@@ -1,0 +1,10 @@
+﻿from pathlib import Path
+s=Path('probe_native_search_open.py').read_text(encoding='utf-8')
+s=s.replace("if any(', Show Conversation Details, Button' in c for c in before):raise RuntimeError('Refusing keyboard navigation in a conversation with possible draft')", "if not any(c.startswith('New Message, Show Conversation Details, Button') for c in before):raise RuntimeError('Recipient entry page not confirmed')")
+s=s.replace("if '9032619764, Search Field' not in before or '+1 (903) 261-9764, Button' not in before:raise RuntimeError('Exact search result not confirmed')", "if 'To:, 9032619764' not in before or 'Message' not in before:raise RuntimeError('Exact recipient or empty composer not confirmed')")
+s=s.replace('( [],', '([],').replace('( [],','([],')
+s=s.replace('( [],','([],').replace('([], [0x51]', '([], [0x51]')
+s=s.replace('([], [0x51]', '([], [0x51]')
+s=s.replace('([],[0x51],[],[0x28],[])','([],[0x28],[])')
+s=s.replace("'after_down_return'", "'after_confirm_recipient'")
+Path('probe_native_recipient_confirm.py').write_text(s,encoding='utf-8')
