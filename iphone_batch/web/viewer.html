@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>皮卡丘手机群控</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="stylesheet" href="/viewer.css"><style>
+body.batch-preview #left-tray, body.batch-preview #right-tray,
+body.batch-preview #topbar, body.batch-preview #bottom-row,
+body.batch-preview .hw { display:none !important; }
+body.batch-preview #workspace { display:block; }
+body.batch-preview #stage-wrap { width:100%; height:100vh; }
+#translation-layer{position:absolute;pointer-events:none!important;background:transparent!important;touch-action:none;border:0!important;z-index:2;max-width:none!important;box-shadow:none!important;}
+</style></head>
+<body class="frame-on">
+<header id="topbar">
+ <img id="brand-logo" src="/logo.png" alt="" width="22" height="26">
+ <span id="brand">皮卡丘手机群控</span>
+ <span class="spacer"></span>
+ <div id="kb-indicator" class="chip hidden" aria-hidden="true" title="键盘输入正在发送到手机">
+  <svg viewBox="0 0 48 28" width="24" height="14" aria-hidden="true">
+   <rect x="1" y="1" width="46" height="26" rx="4" ry="4" fill="none" stroke="currentColor" stroke-width="2"/>
+   <rect x="6" y="6" width="36" height="4" rx="1" fill="currentColor"/>
+   <rect x="6" y="12" width="36" height="4" rx="1" fill="currentColor"/>
+   <rect x="12" y="18" width="24" height="4" rx="1" fill="currentColor"/>
+  </svg>
+  <span>键盘控制</span>
+ </div>
+ <div id="fps" class="chip">— fps</div>
+</header>
+<div id="workspace">
+ <!-- Left tray: utility actions. Collapsible so the canvas can keep
+      the full viewport width when needed; pinned to the page flow
+      (not position:fixed) so a wide / rotated canvas can't slide
+      underneath it. -->
+ <aside id="left-tray" class="tray">
+  <button class="tray-toggle btn" data-tray="left" title="收起面板" aria-label="收起左侧面板"></button>
+  <div class="tray-content">
+   <h3>显示</h3>
+   <div class="btn-row" role="group" aria-label="缩放">
+    <button class="btn" id="zoom-out" type="button" title="缩小画面（Ctrl+-）" aria-label="缩小">−</button>
+    <button class="btn" id="zoom-reset" type="button" title="适应窗口（Ctrl+0）">100%</button>
+    <button class="btn" id="zoom-in" type="button" title="放大画面（Ctrl+=）" aria-label="放大">+</button>
+   </div>
+   <div class="btn-row" role="group" aria-label="旋转">
+    <button class="btn" id="rotate-left" type="button" title="手机向左旋转 90°">↺ 旋转</button>
+    <button class="btn" id="rotate-right" type="button" title="手机向右旋转 90°">旋转 ↻</button>
+   </div>
+   <button class="btn" id="frame-toggle" type="button" title="显示或隐藏手机边框">边框：读取中</button>
+   <h3>手机</h3>
+   <button class="btn" id="screenshot" type="button" title="保存当前画面（Ctrl+P）">截图</button>
+   <button class="btn" id="sound-toggle" type="button">开启声音</button>
+   <button class="btn" id="style-toggle" type="button" title="切换手机深色或浅色外观">外观：读取中</button>
+   <h3>短信英译中</h3>
+   <button class="btn" id="translation-toggle" type="button">自动英译中：关闭</button>
+   <label style="display:block;padding:8px 0"><input type="checkbox" id="translation-original"> 显示原文</label>
+   <input id="translation-contact" placeholder="联系人号码或姓名（留空自动识别）" style="width:100%;box-sizing:border-box" aria-label="当前联系人">
+   <div id="translation-status" role="status" style="padding:8px 0;line-height:1.5">正在读取翻译设置…</div>
+   <details><summary style="cursor:pointer">DeepSeek 设置</summary>
+    <input id="deepseek-key" type="password" placeholder="API Key（仅保存于本机）" autocomplete="off" style="width:100%;box-sizing:border-box" aria-label="DeepSeek API Key">
+    <input id="deepseek-model" value="deepseek-flash" style="width:100%;box-sizing:border-box" aria-label="DeepSeek 模型">
+    <button class="btn" id="deepseek-save" type="button">保存设置</button>
+   </details>
+   <button class="btn" id="cache-clear-contact" type="button">清理当前联系人缓存</button>
+   <button class="btn" id="cache-clear-all" type="button">清理全部译文缓存</button>
+   <button class="btn" id="translate-panel-text" type="button">翻译剪贴板面板文字</button>
+   <div id="translation-text-result" style="white-space:pre-wrap;line-height:1.5"></div><details><summary>识别出的英文</summary><div id="translation-source" style="white-space:pre-wrap;line-height:1.5"></div></details>
+   <h3>连接</h3>
+   <button class="btn" id="reload-window" type="button" title="重新加载投屏页面">刷新页面</button>
+   <button class="btn" id="restart" type="button" title="重新建立视频流连接">重启视频流</button>
+   <button class="btn" id="help-toggle" type="button" title="查看快捷键和使用说明（?）">快捷键与帮助</button>
+   <h3>状态日志</h3>
+   <div id="status">正在连接…</div>
+  </div>
+ </aside>
+
+ <div id="stage-wrap">
+  <div id="stage">
+   <!-- The hardware buttons are part of the bezel, where they sit on the
+        phone: action + volume rocker on the left edge, side button on the
+        right. --pos / --len are percentages of the device's long edge;
+        viewer.css moves them to the matching edge when the device rotates. -->
+   <div id="device-frame" data-rot="0">
+    <button class="hw hw-l" data-btn="mute" type="button" style="--pos:15.5%;--len:4%" data-label="操作键 / 静音 · Ctrl+\" aria-label="静音"></button>
+    <button class="hw hw-l" data-btn="volume-up" type="button" style="--pos:23%;--len:7.5%" data-label="音量加 · Ctrl+]" aria-label="音量加"></button>
+    <button class="hw hw-l" data-btn="volume-down" type="button" style="--pos:32.5%;--len:7.5%" data-label="音量减 · Ctrl+[" aria-label="音量减"></button>
+    <button class="hw hw-r" data-btn="lock" type="button" style="--pos:26%;--len:12%" data-label="电源 · 点击锁屏或唤醒，按住为长按 · Ctrl+L" aria-label="电源"></button>
+    <canvas id="c" tabindex="0"></canvas>
+    <div id="offline-overlay" class="hidden"><span>视频流中断，正在等待画面…</span></div>
+   </div>
+  </div>
+  <div id="bottom-row">
+   <button class="btn" data-swipe="left" title="从屏幕中部向左滑动">← 左滑</button>
+   <button class="btn" data-btn="home" title="Ctrl+H 或右键点击画面返回主屏幕">主屏幕</button>
+   <button class="btn" data-btn="siri" title="Ctrl+S">Siri</button>
+   <button class="btn" data-swipe="right" title="从屏幕中部向右滑动">右滑 →</button>
+  </div>
+ </div>
+
+ <!-- Right tray: accessibility settings + clipboard. Same collapse model. -->
+ <aside id="right-tray" class="tray">
+  <button class="tray-toggle btn" data-tray="right" title="收起面板" aria-label="收起右侧面板"></button>
+  <div class="tray-content">
+   <h3>剪贴板
+    <button class="btn" id="clipboard-toggle" type="button" title="打开或关闭剪贴板面板">开启</button>
+    <button class="btn" id="clipboard-sync" type="button" title="开启双向同步后，手机复制的内容会写入电脑剪贴板；需保持页面在前台并允许浏览器访问剪贴板">同步：关闭</button>
+   </h3>
+   <div id="clipboard-panel">
+    <div id="clipboard-result" role="status" aria-live="polite">点“同步”开启双向文本同步；已有内容可点“从手机获取”。</div>
+    <textarea id="clipboard-text" rows="3" placeholder="输入要发送的文字，或查看从手机复制的内容"></textarea>
+    <img id="clipboard-image" class="hidden" alt="剪贴板图片">
+    <div class="clipboard-row">
+     <button class="btn" id="clipboard-send" type="button" title="将上方文字复制到手机剪贴板">发送到手机</button>
+     <button class="btn" id="clipboard-copy" type="button" title="将面板文字写入电脑系统剪贴板">复制到电脑</button>
+     <button class="btn" id="clipboard-get" type="button" title="读取手机剪贴板，并尝试复制到电脑">从手机获取</button>
+    </div>
+   </div>
+   <h3>辅助功能</h3>
+   <div id="accessibility-list">正在读取…</div>
+   <button class="btn" id="accessibility-reset" type="button" title="将辅助功能设置恢复为默认值">恢复默认</button>
+  </div>
+ </aside>
+</div>
+
+<div id="hw-tooltip" class="hidden" role="tooltip"></div>
+<div id="help-overlay" class="hidden" aria-hidden="true">
+ <div id="help-modal" role="dialog" aria-modal="true" aria-label="快捷键与使用说明">
+  <button id="help-close" class="btn" type="button" aria-label="关闭">×</button>
+  <h2>快捷键</h2>
+  <table>
+   <tr><th>按键</th><th>功能</th></tr><tr><td>Ctrl + C</td><td>复制手机选中的文字</td></tr><tr><td>Ctrl + V</td><td>粘贴到手机输入框（开启同步后使用电脑剪贴板）</td></tr><tr><td>Ctrl + X</td><td>剪切手机选中的文字</td></tr><tr><td>Ctrl + A</td><td>全选手机当前输入框</td></tr>
+   <tr><td>Ctrl + H</td><td>主屏幕</td></tr>
+   <tr><td>Ctrl + L</td><td>锁屏 / 电源</td></tr>
+   <tr><td>Ctrl + ]</td><td>音量加</td></tr>
+   <tr><td>Ctrl + [</td><td>音量减</td></tr>
+   <tr><td>Ctrl + \</td><td>静音</td></tr>
+   <tr><td>Ctrl + S</td><td>Siri</td></tr>
+   <tr><td>Ctrl + P</td><td>截图</td></tr>
+   <tr><td>Ctrl + = / -</td><td>放大 / 缩小</td></tr>
+   <tr><td>Ctrl + 0</td><td>恢复适应窗口</td></tr>
+   <tr><td>?</td><td>显示帮助</td></tr>
+   <tr><td>Esc</td><td>关闭帮助</td></tr>
+  </table>
+<p>在画面上点击或拖动即可控制手机。点击画面后，键盘输入会发送到手机；点击两侧面板可退出键盘控制。手机边框上的按钮支持长按。剪贴板默认不自动同步：点“从手机获取”读取已有内容；开启“同步”后再在手机上复制新内容。若浏览器未允许写入电脑剪贴板，点“复制到电脑”，或选中面板文字后按 Ctrl+C。自动同步需保持本页在前台，切换到电脑应用前先确认显示“已复制到电脑”。旋转按钮会同时旋转手机和画面，右侧提供手机辅助功能设置。</p>
+ </div>
+</div>
+<script src="/viewer.js"></script>
+</body></html>

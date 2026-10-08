@@ -1,0 +1,15 @@
+﻿{
+  "View":"显示", "Device":"手机", "Session":"连接", "Log":"状态日志", "Clipboard":"剪贴板", "Accessibility":"辅助功能",
+  "Screenshot":"截图", "Enable Sound":"开启声音", "Disable Sound":"关闭声音", "Style: ?":"外观：读取中", "Frame: ?":"边框：读取中",
+  "Force Restart":"重启视频流", "Reload":"刷新页面", "Shortcuts &amp; help":"快捷键与帮助", "Reset all":"恢复默认", "Send to device":"发送到手机", "Get from device":"从手机获取", "Sync: off":"同步：关闭",
+  "connecting...":"正在连接…", "loading…":"正在读取…", "keyboard":"键盘控制", "Home":"主屏幕", "← Swipe":"← 左滑", "Swipe →":"右滑 →", "← Rotate":"← 左转", "Rotate →":"右转 →",
+  "Stream offline — waiting for frames…":"视频流中断，正在等待画面…", "Image on the clipboard":"剪贴板图片", "Type text to send, or see what the device copied":"输入要发送的文字，或查看从手机复制的内容",
+  "Toggle the clipboard panel. When off, send/get are disabled.":"打开或关闭剪贴板面板", "Share the clipboard: text and images copied on the device land in this computer's clipboard, and what you copy here is pasted on the device.":"开启双向同步后，手机复制的内容会写入电脑剪贴板；需保持页面在前台并允许浏览器访问剪贴板",
+  "Copy the text above onto the device pasteboard":"将上方文字复制到手机剪贴板", "Show what is on the device clipboard (text or image) and copy it to this computer's clipboard":"读取手机剪贴板，并尝试复制到电脑",
+  "Collapse this panel":"收起面板", "Collapse left panel":"收起左侧面板", "Collapse right panel":"收起右侧面板", "Expand this panel":"展开面板", "Expand left panel":"展开左侧面板", "Expand right panel":"展开右侧面板",
+  "Keystrokes are being forwarded to the device":"键盘输入正在发送到手机", "Shrink the displayed device (Ctrl+-)":"缩小画面（Ctrl+-）", "Back to fit-to-window (Ctrl+0)":"适应窗口（Ctrl+0）", "Enlarge the displayed device (Ctrl+=)":"放大画面（Ctrl+=）", "Zoom out":"缩小", "Zoom in":"放大", "Zoom":"缩放", "Rotate device 90° CCW":"手机向左旋转 90°", "Rotate device 90° CW":"手机向右旋转 90°", "Rotate":"旋转",
+  "toggle cosmetic iPhone bezel around the canvas":"显示或隐藏手机边框", "Save current frame as PNG (Ctrl+P)":"保存当前画面（Ctrl+P）", "toggle dark/light user-interface style":"切换手机深色或浅色外观", "Reload this viewer page":"重新加载投屏页面", "full DisplayService restart":"重新建立视频流连接", "Show keyboard shortcuts and tips (?)":"查看快捷键和使用说明（?）",
+  "Mute":"静音", "Volume up":"音量加", "Volume down":"音量减", "Power":"电源", "Action / Mute · Ctrl+\\":"操作键 / 静音 · Ctrl+\\", "Volume up · Ctrl+]":"音量加 · Ctrl+]", "Volume down · Ctrl+[":"音量减 · Ctrl+[", "Power · tap to sleep/wake, hold like the real button · Ctrl+L":"电源 · 点击锁屏或唤醒，按住为长按 · Ctrl+L",
+  "Swipe left across the middle of the screen":"从屏幕中部向左滑动", "Swipe right across the middle of the screen":"从屏幕中部向右滑动", "Ctrl+H (or right-click the screen)":"Ctrl+H 或右键点击画面返回主屏幕", "Reset all accessibility settings to defaults":"将辅助功能设置恢复为默认值",
+  "Shortcuts and tips":"快捷键与使用说明", "Shortcuts":"快捷键", "Close":"关闭", "Key":"按键", "Action":"功能", "Lock / Power":"锁屏 / 电源", "Volume Up":"音量加", "Volume Down":"音量减", "Zoom in / out":"放大 / 缩小", "Zoom back to fit":"恢复适应窗口", "Show this help":"显示帮助", "Close this help":"关闭帮助"
+}

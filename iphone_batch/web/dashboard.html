@@ -1,0 +1,42 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>皮卡丘手机群控</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#10141d;color:#eef3fc;font:14px "Microsoft YaHei",sans-serif}header{height:64px;display:flex;align-items:center;gap:20px;padding:0 24px;border-bottom:1px solid #283248}h1{font-size:20px;margin:0}#status{color:#aab9d3}main{display:grid;grid-template-columns:280px minmax(650px,1fr);gap:16px;padding:16px;height:calc(100vh - 64px)}#previews{overflow:auto;display:flex;flex-direction:column;gap:12px}article{background:#1b2332;border:2px solid #34425d;border-radius:12px;overflow:hidden;position:relative;flex-shrink:0}article.selected{border-color:#52a8ff}.label{height:42px;display:flex;align-items:center;justify-content:space-between;padding:0 12px}.badge{font-size:12px;color:#aab9d3}iframe{border:0;width:100%;height:440px;display:block;background:#090b10}.cover{position:absolute;inset:42px 0 0;border:0;background:transparent;cursor:pointer;color:transparent}article.selected .cover{display:none}#selected{height:100%;min-height:0}#selected article{height:100%}#selected iframe{height:calc(100% - 42px)}.waiting{height:140px;display:grid;place-items:center;color:#aab9d3}button.pick{background:#263851;color:#eef3fc;border:0;padding:5px 10px;border-radius:6px;cursor:pointer}#empty{padding:32px;color:#aab9d3} @media(max-width:1000px){main{grid-template-columns:220px minmax(500px,1fr)}header{min-width:740px}}
+</style></head><body><header><h1>皮卡丘手机群控</h1><span id="status">正在连接手机…</span></header><main><div id="previews"></div><div id="selected"><div id="empty">两台持续投屏，选中一台后操作。键盘与剪贴板跟随选中手机。</div></div></main><script>
+const cards=new Map();let active=null;let busy=false;let latest=[];
+const status=document.getElementById('status');
+function sendFocus(card,on){if(card.frame) card.frame.contentWindow.postMessage({type:'device-focus',active:on},card.origin);}
+function render(rows,selected){
+ latest=rows;active=selected;
+ for(const d of rows){
+  let card=cards.get(d.udid);
+  if(!card){
+   const node=document.createElement('article');node.dataset.udid=d.udid;
+   const label=document.createElement('div');label.className='label';
+   const name=document.createElement('span');name.textContent=d.name+' · '+d.udid.slice(-6);
+   const button=document.createElement('button');button.className='pick';button.textContent='选择控制';button.onclick=()=>select(d.udid);
+   label.append(name,button);node.append(label);
+   const waiting=document.createElement('div');waiting.className='waiting';waiting.textContent='正在启动投屏…';node.append(waiting);
+   card={node,button,waiting,frame:null,origin:'http://127.0.0.1:'+d.port};cards.set(d.udid,card);
+  }
+  if(d.ready&&!card.frame){
+   const frame=document.createElement('iframe');frame.title=d.name+' 实时画面';frame.src=card.origin+'/?batch=1&manager='+encodeURIComponent(location.origin);frame.allow='clipboard-read; clipboard-write';
+   frame.onload=()=>sendFocus(card,active===d.udid);card.frame=frame;card.waiting.remove();card.node.append(frame);
+   const cover=document.createElement('button');cover.className='cover';cover.textContent='选择 '+d.name;cover.setAttribute('aria-label','选择 '+d.name+' 进行控制');cover.onclick=()=>select(d.udid);card.node.append(cover);
+  }
+  const on=selected===d.udid;card.node.classList.toggle('selected',on);card.button.textContent=on?'正在控制':'选择控制';card.button.disabled=!d.ready||busy;
+  const target=document.getElementById(on?'selected':'previews');if(card.node.parentElement!==target)target.append(card.node);
+  if(card.lastActive!==on){sendFocus(card,on);card.lastActive=on;}
+ }
+ const empty=document.getElementById('empty');if(empty)empty.style.display=selected?'none':'';
+ const owner=rows.find(d=>d.udid===selected);
+ status.textContent=busy?'正在切换控制…':`${rows.filter(d=>d.ready).length}/${rows.length} 台页面就绪 · ${owner?'当前控制：'+owner.name:'请选择一台手机'}`;
+}
+async function select(udid){
+ if(busy)return;busy=true;for(const card of cards.values())sendFocus(card,false);render(latest,null);
+ try{const r=await fetch('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({udid})});const j=await r.json();if(!r.ok)throw Error(j.error);active=j.active;}
+ catch(e){active=null;status.textContent=e.message;}
+ finally{busy=false;await refresh();}
+}
+async function refresh(){try{const r=await fetch('/api/state',{cache:'no-store'});const j=await r.json();if(!busy)render(j.devices,j.active);}catch(e){status.textContent='管理页面连接中断';}}
+refresh();setInterval(refresh,2000);
+</script></body></html>
