@@ -1,1 +1,2 @@
-﻿pymobiledevice3==11.22.0
+pymobiledevice3==11.22.0
+pytypedstream==0.1.0

@@ -1,6 +1,7 @@
 """Bounded, explicit accessibility traversal of the open Messages conversation.
 
-No OCR, translation calls, message activation, or text-based deduplication.
+No OCR, message activation, or text-based deduplication. Extracted text is
+translated after collection unless --no-translate is supplied.
 Element identifiers may be recycled by the Messages list during scrolling.
 """
 import argparse
@@ -35,7 +36,7 @@ def parse_records(records):
             continue
         content = text[:match.start()]
         side = None
-        for prefix in ('Your iMessage, ', 'Your Message, ', 'Your SMS, '):
+        for prefix in ('Your iMessage, ', 'Your Message, ', 'Your SMS, ', 'Your Text Message, '):
             if content.startswith(prefix):
                 side = 'outgoing'
                 content = content[len(prefix):]
@@ -187,6 +188,14 @@ async def collect(args):
         chronological = list(reversed(records)) if args.direction == 'reverse' else records
         summary = save_result(args.udid, chronological, reason, time.monotonic() - started, output)
         print(json.dumps({'status': 'collection_finished', **summary}, ensure_ascii=False), flush=True)
+        if not args.no_translate:
+            from sms_translate import translate_file
+            try:
+                translated = await asyncio.to_thread(translate_file, output.with_suffix('.json'))
+                print(json.dumps({'status': 'translation_finished', **translated}, ensure_ascii=False), flush=True)
+            except Exception as error:
+                print(json.dumps({'status': 'translation_failed', 'error': str(error),
+                                  'source_preserved': str(output.with_suffix('.json'))}, ensure_ascii=False), flush=True)
 
 
 def main():
@@ -197,6 +206,7 @@ def main():
     parser.add_argument('--direction', choices=['forward', 'reverse'], default='forward')
     parser.add_argument('--settle-ms', type=int, default=250)
     parser.add_argument('--label', choices=['verify-reverse', 'verify-forward'])
+    parser.add_argument('--no-translate', action='store_true', help='仅提取，不自动翻译')
     args = parser.parse_args()
     if not 1 <= args.max_elements <= 2000 or not 1 <= args.max_seconds <= 300 or not 0 <= args.settle_ms <= 2000:
         parser.error('Invalid traversal limits')
