@@ -6,8 +6,14 @@
 body.batch-preview #left-tray, body.batch-preview #right-tray,
 body.batch-preview #topbar, body.batch-preview #bottom-row,
 body.batch-preview .hw { display:none !important; }
-body.batch-preview #workspace { display:block; }
-body.batch-preview #stage-wrap { width:100%; height:100vh; }
+body.batch-preview { padding:0; gap:0; height:100dvh; min-height:0; overflow:hidden; background:#eef1eb; }
+body.batch-preview #workspace { display:block; width:100%; height:100%; min-height:0; }
+body.batch-preview #stage-wrap { width:100%; height:100%; padding:6px; gap:0; display:flex; align-items:center; justify-content:center; }
+body.batch-preview #stage { width:100%; height:100%; align-items:center; justify-content:center; }
+body.batch-preview #stage::before { display:none; }
+body.batch-preview.frame-on #device-frame { padding:2px; border-radius:18px; background:#253129; box-shadow:0 0 0 1px #d9dfd4,0 4px 16px #24302710; }
+body.batch-preview.frame-on canvas { border-radius:16px; }
+body.batch-preview.frame-on #offline-overlay { border-radius:16px; inset:2px; }
 #translation-layer{position:absolute;pointer-events:none!important;background:transparent!important;touch-action:none;border:0!important;z-index:2;max-width:none!important;box-shadow:none!important;}
 </style></head>
 <body class="frame-on">

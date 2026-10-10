@@ -58,9 +58,17 @@ function fitCanvasToViewport() {
     // the device and cost no width.
     const stacked = window.matchMedia('(max-width: 900px)').matches;
     const reservedW = (stacked ? 0 : trayW('left-tray') + trayW('right-tray')) + 48 + 40;
-    const availW = Math.max(100, window.innerWidth - reservedW) / bezelShare;
-    const availH = Math.max(100, window.innerHeight - 150) / bezelShare;
-    const scale = Math.min(1, availW / naturalW, availH / naturalH) * zoom;
+    const embeddedStage = document.getElementById('stage');
+    const availW = batchManaged
+        ? Math.max(1, embeddedStage.clientWidth - 4)
+        : Math.max(100, window.innerWidth - reservedW) / bezelShare;
+    const availH = batchManaged
+        ? Math.max(1, embeddedStage.clientHeight - 4)
+        : Math.max(100, window.innerHeight - 150) / bezelShare;
+    // Embedded screens use the full stage and ignore standalone zoom preferences.
+    const scale = batchManaged
+        ? Math.min(availW / naturalW, availH / naturalH)
+        : Math.min(1, availW / naturalW, availH / naturalH) * zoom;
     canvas.style.width  = (naturalW * scale) + 'px';
     canvas.style.height = (naturalH * scale) + 'px';
     // Bezel geometry follows the displayed size so the frame looks the same
@@ -71,7 +79,7 @@ function fitCanvasToViewport() {
     frameStyle.setProperty('--bezel', Math.max(5, shortSide * BEZEL_RATIO) + 'px');
     frameStyle.setProperty('--hw-t', Math.max(3, shortSide * 0.014) + 'px');
     zoomResetBtn.textContent = Math.round(zoom * 100) + '%';
-    stageWrap.classList.toggle('zoomed', zoom > 1);
+    stageWrap.classList.toggle('zoomed', !batchManaged && zoom > 1);
 }
 window.addEventListener('resize', fitCanvasToViewport);
 
@@ -1578,7 +1586,8 @@ if (batchManaged) {
     window.addEventListener('message', event => {
         if (event.source !== parent || event.origin !== (new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070') || event.data?.type !== 'device-focus') return;
         batchActive = event.data.active === true;
-        document.body.classList.toggle('batch-preview', !batchActive);
+        // The dashboard owns the controls; keep its embedded viewer screen-only.
+        document.body.classList.add('batch-preview');
         releaseAllKeys();
         pendingHostWrite = null;
         if (clipboardSyncAbort) { clipboardSyncAbort.abort(); clipboardSyncAbort = null; }

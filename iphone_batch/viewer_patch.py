@@ -102,7 +102,7 @@ def install():
         setattr(screen_stream.ScreenStreamServer, name, wrap_action(original_action, name))
     original = screen_stream.ScreenStreamServer._handle_http
 
-    async def handle(self, reader, writer):
+    async def dispatch_handle(self, reader, writer):
         first = await reader.readline()
         parts = first.decode('latin-1').strip().split()
         if len(parts) != 3:
@@ -246,5 +246,20 @@ def install():
             return await reply(writer, 400, {'error': 'invalid request'})
         except Exception:
             return await reply(writer, 500, {'error': 'Windows clipboard unavailable; retry'})
+
+    async def handle(self, reader, writer):
+        # asyncio keeps weak references to tasks. Retain connection handlers
+        # while they await device responses, including long-lived video streams.
+        tasks = getattr(self, '_viewer_http_tasks', None)
+        if tasks is None:
+            tasks = self._viewer_http_tasks = set()
+        task = asyncio.current_task()
+        tasks.add(task)
+        try:
+            return await dispatch_handle(self, reader, writer)
+        finally:
+            tasks.discard(task)
+            if not writer.is_closing():
+                writer.close()
 
     screen_stream.ScreenStreamServer._handle_http = handle

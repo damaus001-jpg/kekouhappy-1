@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>皮卡丘手机群控 · 短信工作台</title><link rel="icon" href="/brand-logo.jpg"><link rel="stylesheet" href="/dashboard.css"></head>
+<body><header class="app-header"><div class="brand"><img src="/brand-logo.jpg" alt="皮卡丘" width="44" height="48"><div><h1>皮卡丘手机群控</h1><span>短信工作台</span></div></div><span id="status" role="status">正在连接手机…</span><span class="mode">人工回复阶段</span></header>
+<main>
+ <aside class="devices"><div class="section-title"><h2>设备列表</h2><span id="device-count">USB</span></div><p class="muted">选择一台手机开始处理</p><div id="device-list" aria-label="已连接设备"></div><div id="previews"></div></aside>
+ <section class="phone-panel"><div class="section-title"><h2>实时画面 <span id="screen-device" class="muted"></span></h2><button id="screen-expand" class="secondary" type="button" aria-pressed="false">放大画面</button></div><div id="selected"><div id="empty"><span class="empty-icon">▣</span><h3>选择要控制的手机</h3><p>左侧查看设备，右侧阅读短信与译文。</p></div></div></section>
+ <section class="work-panel">
+  <div class="conversation-heading"><div><span class="eyebrow">当前会话</span><h2 id="contact-title">尚未选择手机</h2></div><div class="heading-actions"><button id="capture-current" type="button" class="secondary">读取当前会话</button><button id="refresh-messages" type="button" class="secondary">刷新记录</button></div></div>
+  <div class="unread-heading"><h3>未读会话 <span id="unread-count" class="muted"></span></h3><button id="refresh-unread" type="button" class="secondary" title="原生读取短信列表；当前会话没有草稿时会返回列表">刷新未读</button></div>
+  <div id="unread-list" class="unread-list" aria-label="未读会话列表"><span class="muted">点击刷新未读，识别所选手机的会话。</span></div><div id="unread-status" class="unread-status" role="status"></div>
+   <div class="unread-heading"><h3>短信通知 <span id="notification-count" class="muted"></span></h3><button id="refresh-notifications" type="button" class="secondary">检查通知</button></div>
+   <div id="notification-list" class="unread-list" aria-label="Messages 通知"><span class="muted">只处理 Messages，其他 App 通知跳过。</span></div>
+   <div class="unread-status"><label><input id="watch-notifications" type="checkbox" checked disabled> 全部设备自动检查，最多4台并行，每台检查后间隔30秒</label><span id="notification-status" role="status">点击通知后核验收件人并读取会话；可能使手机消息变为已读。</span></div>
+   <div class="conversation-tools"><select id="conversation-select" aria-label="选择已提取会话"><option>暂无会话记录</option></select><label><input id="show-original" type="checkbox" checked> 显示英文原文</label></div>
+  <details class="profile" id="profile-panel"><summary><span>联系人资料 <small>基本信息 · 生活工作 · 偏好 · 待跟进</small></span><span id="profile-state" class="tag">未汇总</span></summary><div class="profile-body"><button id="summarize-contact" type="button" disabled>一键汇总对方信息</button><div id="profile-result"><p>从对方消息整理资料，每项附原文依据。</p></div></div></details>
+  <div class="message-heading"><h3>短信与译文</h3><span id="message-count" class="muted">0 条</span></div>
+  <p id="archive-status" role="status" class="archive-status">选择手机后加载已保存的翻译记录。</p>
+  <div id="messages" class="messages" aria-label="短信中英对照"><div class="message-empty">短信原文与中文译文将在这里呈现。</div></div>
+  <details class="composer-wrap" id="reply-box"><summary><strong>人工回复</strong><span id="draft-status" class="muted">中文 Enter 翻译，再 Enter 发送</span></summary><section class="composer"><textarea id="reply-zh" rows="2" placeholder="中文：Enter 翻译，再 Enter 发送。粘贴英文、链接、数字或表情：Enter 直接发送。Shift+Enter 换行。禁止发送中文。" aria-label="中文或粘贴待发送内容" disabled></textarea><div class="compose-actions"><button id="copy-draft" class="secondary" type="button" disabled>复制回复草稿</button><button id="translate-reply" type="button" disabled>生成英文与回译</button></div><details class="reply-preview" id="reply-preview"><summary>英文待发送内容与中文回译</summary><label for="reply-en">待发送内容（禁止中文）</label><textarea id="reply-en" rows="2" readonly aria-label="待发送内容"></textarea><p id="reply-back" class="translated"></p></details><div class="send-row"><span id="send-status">发送前核验当前会话和完整号码；已确认回复会保存为学习案例。</span><button id="send-reply" type="button" disabled>确认发送</button></div></section></details>
+ </section>
+</main><script src="/workspace.js"></script><script src="/dashboard.js"></script></body></html>
