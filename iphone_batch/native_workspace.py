@@ -244,6 +244,43 @@ async def reopen_reply_recipient(service, phone, record):
     return current
 
 
+async def focus_current_composer(phone, current, record):
+    if current.get('phone_number')!=record.get('phone_number'):
+        raise ValueError('当前手机会话号码不一致，未切换或发送')
+    validate_snapshot(current,record)
+    if not composer_is_empty([row['caption'] for row in current['raw_elements']]):
+        raise ValueError('当前手机输入框存在草稿，已保留原内容')
+    # Focus within the verified current conversation. Never reopen another page.
+    await phone.keys([0x2B])
+    await phone.keys([])
+
+
+async def open_phone_conversation(service, phone, number):
+    key = phone_key(number or '')
+    if not key:
+        raise ValueError('需要完整联系人号码')
+    # Check the current page and preserve drafts before navigating away.
+    await list_page(service, phone)
+    await phone.chord(0x11)
+    await asyncio.sleep(.3)
+    captions = [r['caption'] for r in await raw_page(service)]
+    if ('To:' not in captions or 'Message' not in captions or not any(
+            c.startswith('New Message, Show Conversation Details') for c in captions)):
+        raise ValueError('未确认空白收件人输入栏，已停止')
+    await phone.paste(key)
+    await asyncio.sleep(.3)
+    captions = [r['caption'] for r in await raw_page(service)]
+    if not any(c.startswith('To:, ') and phone_key(c[5:]) == key for c in captions):
+        raise ValueError('输入的完整号码未确认，未打开会话')
+    await phone.keys([0x28])
+    await phone.keys([])
+    await asyncio.sleep(.5)
+    current = await read(service)
+    if current['phone_number'] != key:
+        raise ValueError('打开后的会话号码未确认')
+    return current
+
+
 async def list_page(service, phone):
     records = await raw_page(service)
     if any(', Show Conversation Details, Button' in r['caption'] for r in records):
@@ -290,29 +327,13 @@ async def run(args):
                     raise ValueError('通知记录路径无效')
                 expected = json.loads(record_path.read_text(encoding='utf-8'))
                 return await open_notification(service, phone, args.device, expected, context)
-            if args.action in ('unread', 'open'):
+            if args.action == 'open':
+                phone = NativeConversation(); phone.base = args.base
+                return {'device':args.device, **await open_phone_conversation(service, phone, args.phone)}
+            if args.action == 'unread':
                 phone = NativeConversation(); phone.base = args.base
                 records = await list_page(service, phone)
-                candidates = unread_records(records)
-                if args.action == 'unread':
-                    return {'device': args.device, **await verified_list(service, records)}
-                key = phone_key(args.phone or '')
-                matches = [r for r in candidates if r['phone_number'] == key]
-                if not key or len(matches) != 1:
-                    raise ValueError('未读列表未唯一匹配完整号码，请刷新未读列表')
-                await phone.chord(0x11); await asyncio.sleep(.3)
-                captions = [r['caption'] for r in await raw_page(service)]
-                if 'To:' not in captions or 'Message' not in captions or not any(c.startswith('New Message, Show Conversation Details') for c in captions):
-                    raise ValueError('未确认空白收件人输入栏，已停止')
-                await phone.paste(key); await asyncio.sleep(.3)
-                captions = [r['caption'] for r in await raw_page(service)]
-                if not any(c.startswith('To:, ') and phone_key(c[5:]) == key for c in captions):
-                    raise ValueError('输入的完整号码未确认，未打开会话')
-                await phone.keys([0x28]); await phone.keys([]); await asyncio.sleep(.5)
-                current = await read(service)
-                if current['phone_number'] != key:
-                    raise ValueError('打开后的会话号码未确认')
-                return {'device': args.device, **current}
+                return {'device': args.device, **await verified_list(service, records)}
             if args.action == 'history':
                 phone = NativeConversation(); phone.base = args.base
                 return {'device': args.device, **await capture_history(service, phone)}
@@ -339,8 +360,7 @@ async def run(args):
                 await check_layout(phone, profile, captions)
                 await tap(phone, profile['input'])
             else:
-                current = await reopen_reply_recipient(service, phone, record)
-                await phone.keys([0x2B]); await phone.keys([])
+                await focus_current_composer(phone, current, record)
             await phone.paste(text)
             await asyncio.sleep(.5)
             prepared = await read(service)

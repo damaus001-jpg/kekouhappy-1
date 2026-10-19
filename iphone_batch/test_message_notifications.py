@@ -132,7 +132,7 @@ class StoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):service.dispatch('two',{'action':'open_notification','notification_id':row['id']},'unused')
             self.assertEqual(called,[])
 
-    def test_notifications_are_isolated_and_opened_notifications_are_not_requeued(self):
+    def test_card_count_uses_current_visible_cards_regardless_of_old_open_state(self):
         with tempfile.TemporaryDirectory() as root:
             row=parse_notification('MESSAGES, now, +19562154700, Hello, Button','x','one')
             wrong={**row,'device':'two'}
@@ -142,6 +142,8 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(len(first['items']),1)
             self.assertEqual(first['items'][0]['status'],'pending')
             service.write(service.notification_path(row['id']),{**row,'status':'opened'})
+            self.assertEqual(len(service.notifications('one','unused')['items']),1)
+            service.native=lambda *args,**kwargs:{'items':[], 'complete':True}
             self.assertEqual(service.notifications('one','unused')['items'],[])
 
     def test_missing_notification_id_cannot_fall_back_to_capture(self):

@@ -184,6 +184,8 @@ class WorkspaceService:
                     raise ValueError('通知打开后的号码不一致，未保存为可回复会话')
             else:
                 result = self.native(device, 'open' if phone else 'capture', base, phone=phone)
+                if phone and result.get('phone_number')!=phone:
+                    raise ValueError('打开后的会话号码不一致，未保存为可回复会话')
             window = result['messages']
             contact = result.get('phone_number') or result['contact']
             prior = self.ledger.load(device, contact)
@@ -287,8 +289,7 @@ class WorkspaceService:
                 row['status'] = previous.get('status','pending')
                 row['discovered_at'] = previous.get('discovered_at',datetime.now().isoformat())
                 self.write(path,row)
-                if row['status']!='opened':
-                    pending.append(row)
+                pending.append(row)
             result['items'] = pending
             return result
 

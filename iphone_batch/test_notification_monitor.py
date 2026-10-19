@@ -22,14 +22,55 @@ class MonitorTests(unittest.TestCase):
             return NotificationMonitor(devices,threading.Lock(),lease,scan or discover,
                                        lambda d:True,threading.Event())
 
-    def test_all_ten_devices_are_checked_without_frequent_rescanning(self):
+    def test_ten_devices_repeat_immediately_in_fair_order_even_with_equal_times(self):
         monitor=self.make_monitor()
         with patch('notification_monitor.time.monotonic',return_value=140):
-            for _ in range(10):self.assertTrue(monitor.tick(now=140))
-            self.assertFalse(monitor.tick(now=140))
-        self.assertEqual([device for action,device in self.calls if action=='scan'],[f'phone{i}' for i in range(10)])
+            for _ in range(20):self.assertTrue(monitor.tick(now=140))
+        self.assertEqual([device for action,device in self.calls if action=='scan'],[f'phone{i}' for i in range(10)]*2)
+        self.assertEqual(monitor.snapshot('phone0')['interval_seconds'],0)
         self.assertEqual(monitor.snapshot('phone0')['pending_contacts'],1)
         self.assertEqual(monitor.snapshot('phone0')['state'],'checked')
+
+    def test_first_check_has_no_startup_delay(self):
+        monitor=self.make_monitor()
+        with patch('notification_monitor.time.monotonic',return_value=100):
+            self.assertTrue(monitor.tick(now=100))
+        self.assertEqual([device for action,device in self.calls if action=='scan'],['phone0'])
+
+    def test_sound_only_on_new_cards_including_replacement_at_same_count(self):
+        monitor=self.make_monitor()
+        sounded=[]
+        monitor.on_new_cards=sounded.append
+        monitor.record('phone0',{'items':[{'id':'a'}]})
+        monitor.record('phone0',{'items':[{'id':'a'}]})
+        self.assertEqual(sounded,['phone0'])
+        monitor.record('phone0',{'items':[{'id':'b'}]})
+        monitor.record('phone1',{'items':[{'id':'b'}]})
+        self.assertEqual(sounded,['phone0','phone0','phone1'])
+        monitor.record('phone0',{'items':[]})
+        self.assertEqual(len(sounded),3)
+
+    def test_audio_failure_does_not_lose_card_count(self):
+        monitor=self.make_monitor()
+        monitor.on_new_cards=lambda device:(_ for _ in ()).throw(RuntimeError('audio unavailable'))
+        monitor.record('phone0',{'items':[{'id':'a'}]})
+        self.assertEqual(monitor.snapshot('phone0')['card_count'],1)
+        self.assertEqual(monitor.snapshot('phone0')['state'],'checked')
+
+    def test_run_refills_workers_until_stopped(self):
+        scanned=[]
+        def scan(device,base):
+            scanned.append(device)
+            if len(scanned)>=8:monitor.stopping.set()
+            return {'items':[]}
+        monitor=self.make_monitor(scan)
+        monitor.devices=monitor.devices[:2]
+        monitor.workers=1
+        runner=threading.Thread(target=monitor.run,daemon=True)
+        runner.start();runner.join(timeout=3)
+        monitor.stopping.set()
+        self.assertFalse(runner.is_alive())
+        self.assertEqual(scanned,['phone0','phone1']*4)
 
     def test_draft_protection_and_busy_phone_skip_background_scanning(self):
         monitor=self.make_monitor()
@@ -40,6 +81,22 @@ class MonitorTests(unittest.TestCase):
         try:self.assertFalse(monitor.tick(now=140))
         finally:monitor.phone_lock.release()
         self.assertEqual(self.calls,[])
+
+    def test_manual_phone_is_skipped_and_cards_from_same_sender_are_counted(self):
+        monitor=self.make_monitor()
+        selected=['phone0']
+        monitor.manual_device=lambda:selected[0]
+        with patch('notification_monitor.time.monotonic',return_value=140):
+            self.assertTrue(monitor.tick(now=140))
+        self.assertEqual([device for action,device in self.calls if action=='scan'],['phone1'])
+        self.assertTrue(monitor.snapshot('phone0')['manual_control'])
+        self.assertEqual(monitor.snapshot('phone1')['card_count'],2)
+        selected[0]='phone1'
+        with patch('notification_monitor.time.monotonic',return_value=140):
+            self.assertTrue(monitor.tick(now=140))
+        self.assertEqual(monitor.snapshot('phone0')['card_count'],2)
+        monitor.record('phone0',{'items':[]})
+        self.assertEqual(monitor.snapshot('phone0')['card_count'],0)
 
     def test_scan_failure_preserves_pending_state_and_has_an_error(self):
         monitor=self.make_monitor(scan=lambda *args:(_ for _ in ()).throw(ValueError('offline')))

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch, AsyncMock
 
-from native_workspace import context, unread_records, validate_snapshot, composer_is_empty, reopen_reply_recipient, merge_history_messages
+from native_workspace import context, unread_records, validate_snapshot, composer_is_empty, reopen_reply_recipient, focus_current_composer, open_phone_conversation, merge_history_messages
 from send_policy import validate_send_text
 from workspace_service import WorkspaceService
 
@@ -188,6 +188,59 @@ class WorkspaceTests(unittest.TestCase):
 
 
 class RecipientFocusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_current_composer_focus_never_reopens_recipient(self):
+        phone=AsyncMock()
+        record={'phone_number':'+13153602544','context_fingerprint':'same'}
+        current={**record,'raw_elements':[{'caption':'Message, iMessage'}]}
+        await focus_current_composer(phone,current,record)
+        self.assertEqual([c.args for c in phone.keys.await_args_list],[([0x2B],),([], )])
+        phone.chord.assert_not_awaited();phone.paste.assert_not_awaited()
+
+    async def test_current_composer_wrong_number_never_changes_focus(self):
+        phone=AsyncMock()
+        with self.assertRaises(ValueError):await focus_current_composer(phone,{'phone_number':'+13153602545'},{'phone_number':'+13153602544'})
+        phone.keys.assert_not_awaited();phone.chord.assert_not_awaited()
+
+    async def test_current_composer_preserves_draft(self):
+        phone=AsyncMock()
+        record={'phone_number':'+13153602544','context_fingerprint':'same'}
+        current={**record,'raw_elements':[{'caption':'Message, draft'},{'caption':'Send, Button'}]}
+        with self.assertRaises(ValueError):await focus_current_composer(phone,current,record)
+        phone.keys.assert_not_awaited();phone.chord.assert_not_awaited()
+
+    async def test_open_read_contact_without_an_unread_list_match(self):
+        phone=AsyncMock()
+        number='+13153602544'
+        current={'phone_number':number,'messages':[]}
+        pages=[[{'caption':'To:'},{'caption':'Message'},{'caption':'New Message, Show Conversation Details, Button'}],
+               [{'caption':'To:, '+number}]]
+        with patch('native_workspace.list_page',AsyncMock(return_value=[{'caption':'Messages, Header'}])), patch('native_workspace.raw_page',AsyncMock(side_effect=pages)), patch('native_workspace.read',AsyncMock(return_value=current)), patch('native_workspace.asyncio.sleep',AsyncMock()):
+            self.assertEqual(await open_phone_conversation(None,phone,number),current)
+        phone.chord.assert_awaited_once_with(0x11)
+        phone.paste.assert_awaited_once_with(number)
+        self.assertEqual([c.args for c in phone.keys.await_args_list],[([0x28],),([], )])
+
+    async def test_open_preserves_existing_phone_draft(self):
+        phone=AsyncMock()
+        with patch('native_workspace.list_page',AsyncMock(side_effect=ValueError('existing draft'))):
+            with self.assertRaises(ValueError):await open_phone_conversation(None,phone,'+13153602544')
+        phone.chord.assert_not_awaited();phone.paste.assert_not_awaited()
+
+    async def test_open_rejects_wrong_recipient_before_confirmation(self):
+        phone=AsyncMock()
+        pages=[[{'caption':'To:'},{'caption':'Message'},{'caption':'New Message, Show Conversation Details, Button'}],
+               [{'caption':'To:, +13153602545'}]]
+        with patch('native_workspace.list_page',AsyncMock()), patch('native_workspace.raw_page',AsyncMock(side_effect=pages)), patch('native_workspace.asyncio.sleep',AsyncMock()):
+            with self.assertRaises(ValueError):await open_phone_conversation(None,phone,'+13153602544')
+        phone.keys.assert_not_awaited()
+
+    async def test_open_rechecks_final_conversation_number(self):
+        phone=AsyncMock()
+        pages=[[{'caption':'To:'},{'caption':'Message'},{'caption':'New Message, Show Conversation Details, Button'}],
+               [{'caption':'To:, +13153602544'}]]
+        with patch('native_workspace.list_page',AsyncMock()), patch('native_workspace.raw_page',AsyncMock(side_effect=pages)), patch('native_workspace.read',AsyncMock(return_value={'phone_number':'+13153602545'})), patch('native_workspace.asyncio.sleep',AsyncMock()):
+            with self.assertRaises(ValueError):await open_phone_conversation(None,phone,'+13153602544')
+
     async def test_reopens_exact_number_before_focusing_reply(self):
         phone=AsyncMock()
         record={'phone_number':'+13153602544','context_fingerprint':'same'}
