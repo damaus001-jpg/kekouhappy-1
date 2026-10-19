@@ -1,8 +1,9 @@
 param([Parameter(Mandatory=$true)][int]$DashboardId)
 $ErrorActionPreference = 'Stop'
+$taskScriptPattern = [regex]::Escape(($PSScriptRoot + '\'))
 $taskProcesses = @(Get-CimInstance Win32_Process)
 $taskDashboard = $taskProcesses | Where-Object { $_.ProcessId -eq $DashboardId }
-if (!$taskDashboard -or $taskDashboard.CommandLine -notmatch 'D:\\qunkong\\iphone_batch\\dashboard\.py') {
+if (!$taskDashboard -or $taskDashboard.CommandLine -notmatch ($taskScriptPattern + 'dashboard\.py(?:"|\s|$)')) {
     throw 'Dashboard identity changed; restart cancelled.'
 }
 if ($taskProcesses | Where-Object { $_.Name -match '^python' -and $_.CommandLine -match 'native_workspace\.py|message_backup\.py' }) {
@@ -15,7 +16,7 @@ do {
 } while ($taskMore.Count -gt 0)
 $taskPython = @($taskProcesses | Where-Object { $_.ProcessId -in $taskIds -and $_.Name -match '^python' })
 foreach ($taskProcess in $taskPython) {
-    if ($taskProcess.CommandLine -notmatch 'D:\\qunkong\\iphone_batch\\(dashboard|controller|pmd_entry)\.py') {
+    if ($taskProcess.CommandLine -notmatch ($taskScriptPattern + '(dashboard|controller|pmd_entry)\.py(?:"|\s|$)')) {
         throw 'Unexpected child process; restart cancelled.'
     }
 }
@@ -25,5 +26,4 @@ foreach ($taskProcess in $taskPython) {
         Stop-Process -Id $taskProcess.ProcessId -Force -ErrorAction SilentlyContinue
     }
 }
-$taskLaunch = Start-Process -FilePath 'D:\qunkong\.venv\Scripts\python.exe' -ArgumentList @('D:\qunkong\iphone_batch\dashboard.py', '--udid', '00008030-001119CE0A93402E') -WorkingDirectory 'D:\qunkong' -WindowStyle Hidden -RedirectStandardOutput 'D:\qunkong\iphone_batch\.device-data\logs\incremental-dashboard.out.log' -RedirectStandardError 'D:\qunkong\iphone_batch\.device-data\logs\incremental-dashboard.err.log' -PassThru
-Write-Output "Started dashboard process $($taskLaunch.Id)"
+& (Join-Path $PSScriptRoot 'start_workspace.ps1') -Udid '00008030-001119CE0A93402E'

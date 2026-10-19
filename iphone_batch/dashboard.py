@@ -18,6 +18,13 @@ import controller
 ROOT = Path(__file__).resolve().parent
 
 
+def play_notification_sound(device):
+    """Play the Windows notification sound without browser autoplay restrictions."""
+    if os.name=='nt':
+        import winsound
+        winsound.PlaySound('SystemNotification',winsound.SND_ALIAS | winsound.SND_ASYNC)
+
+
 class FocusManager:
     def __init__(self, devices, token, transport=None):
         self.devices = devices
@@ -92,7 +99,8 @@ def main():
     parser.add_argument('--port',type=int,default=8070)
     parser.add_argument('--base-port',type=int,default=8080)
     args=parser.parse_args()
-    udids=controller.resolve_devices(args.udid or [row['udid'] for row in controller.discover()])
+    requested=args.udid or [row['udid'] for row in controller.discover()]
+    udids=controller.resolve_devices(requested) if requested else []
     if not 1024 <= args.port <= 65535 or not 1024 <= args.base_port <= 65535-len(udids)+1:
         raise ValueError('Invalid ports')
     if args.port in range(args.base_port,args.base_port+len(udids)):
@@ -113,7 +121,8 @@ def main():
     notification_monitor=NotificationMonitor(devices,workspace_service.phone_lock,
         manager.notification_lease,workspace_service.notifications,
         lambda d: bool(children.get(d['udid']) and children[d['udid']].poll() is None),stopping,
-        lock_for=workspace_service.device_lock)
+        lock_for=workspace_service.device_lock,manual_device=lambda: manager.active,
+        on_new_cards=play_notification_sound)
 
     def launch_viewer(device):
         port=device['port']
@@ -173,7 +182,7 @@ def main():
             if self.path=='/':
                 return self.respond(200,(ROOT/'web/workspace.html').read_bytes(),'text/html; charset=utf-8')
             assets = {'/dashboard.css': 'text/css; charset=utf-8', '/dashboard.js': 'text/javascript; charset=utf-8',
-                      '/workspace.js': 'text/javascript; charset=utf-8', '/brand-logo.jpg': 'image/jpeg'}
+                      '/workspace.js': 'text/javascript; charset=utf-8', '/gpt_export.js': 'text/javascript; charset=utf-8', '/electric-doodles.svg':'image/svg+xml', '/brand-logo.jpg': 'image/jpeg'}
             if self.path in assets:
                 path = ROOT/'web'/self.path.lstrip('/')
                 if path.is_file():
@@ -208,6 +217,19 @@ def main():
         def do_POST(self):
             if not self.allowed():
                 return self.respond(403,{'error':'same-origin localhost access required'})
+            if self.path=='/api/gpt-summary':
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=4*1024*1024:raise ValueError('汇总内容为空或过长')
+                    self.connection.settimeout(15)
+                    body=json.loads(self.rfile.read(length))
+                    if not isinstance(body,dict):raise ValueError('汇总请求无效')
+                    from gpt_bridge import open_gpt_draft
+                    return self.respond(200,open_gpt_draft(body.get('text')))
+                except (ValueError,TypeError) as exc:
+                    return self.respond(400,{'error':str(exc)})
+                except Exception:
+                    return self.respond(500,{'error':'复制或打开 ChatGPT 失败，请重试；没有发送任何内容'})
             if self.path=='/api/notification-policy':
                 try:
                     length=int(self.headers.get('Content-Length','0'))

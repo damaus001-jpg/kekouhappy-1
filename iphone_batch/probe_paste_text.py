@@ -1,5 +1,6 @@
 ﻿import json
 import time
+from pathlib import Path
 from demo_reply import DemoPhone
 p=DemoPhone();p.select('00008030-001C481A3C32802E')
 items=p.native_items()
@@ -16,4 +17,6 @@ finally:
 time.sleep(.7)
 items=p.native_items()
 print(json.dumps({'status':'paste_check','composer':[i.get('caption','') for i in items if i.get('caption','').startswith('Message, ')],'send_clicked':False},ensure_ascii=True),flush=True)
-p.frame().save('D:/qunkong/iphone_batch/.device-data/diagnostics/good-night-paste.png')
+output = Path(__file__).resolve().parent / '.device-data' / 'diagnostics' / 'good-night-paste.png'
+output.parent.mkdir(parents=True, exist_ok=True)
+p.frame().save(output)

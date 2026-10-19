@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="360" viewBox="0 0 360 360">
+ <defs>
+  <g id="bolt"><path d="m7-23-21 28h15l-7 23L19-4H4Z"/></g>
+  <g id="star"><path d="m0-15 4 10 11 1-9 7 3 11-9-6-10 6 3-11-9-7 12-1Z"/></g>
+  <g id="spark"><path d="M-8 0H8M0-8V8m-5-5 10 10m0-10L-5 5"/></g>
+  <g id="chat"><path d="M-19-13q-4 0-4 5V8q0 5 5 5h7l-2 8 11-8h18q5 0 5-5V-8q0-5-5-5Z"/><path d="M-13-3H11M-13 4H4"/></g>
+  <g id="heart"><path d="M0 15C-31-2-12-25 0-10 13-25 30-2 0 15Z"/></g>
+  <g id="pika">
+   <path d="M-23 3-34-43-13-17Q0-24 13-17L34-43 24 3Q35 18 21 27 0 39-21 27-35 18-23 3Z"/>
+   <path d="m-31-34 10 11m51-11-10 11M-11 8v1m22-1v1m-14 9q3 4 6 0m-3-6 1 1"/>
+   <ellipse cx="-20" cy="19" rx="5" ry="3"/><ellipse cx="20" cy="19" rx="5" ry="3"/>
+  </g>
+  <g id="tail"><path d="m-19 22 10-14-8-8 18-17 22 1L8-2l9 10-21 17-5-7Z"/></g>
+  <g id="paw"><ellipse cy="6" rx="10" ry="7"/><ellipse cx="-11" cy="-5" rx="3" ry="4" transform="rotate(-15 -11 -5)"/><ellipse cx="-4" cy="-10" rx="3" ry="4"/><ellipse cx="5" cy="-10" rx="3" ry="4"/><ellipse cx="12" cy="-4" rx="3" ry="4" transform="rotate(15 12 -4)"/></g>
+  <g id="orbit"><circle r="13"/><path d="M-13 0H-4M4 0h9"/><circle r="4"/></g>
+ </defs>
+ <g fill="none" stroke="#c8bd83" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" opacity=".115">
+  <use href="#bolt" transform="translate(42 40) rotate(-14) scale(.8)"/>
+  <use href="#pika" transform="translate(146 63) rotate(12) scale(.65)"/>
+  <use href="#chat" transform="translate(250 35) rotate(-13) scale(.8)"/>
+  <use href="#star" transform="translate(326 104) rotate(12) scale(.8)"/>
+  <use href="#heart" transform="translate(60 145) rotate(-20) scale(.7)"/>
+  <use href="#spark" transform="translate(105 202) rotate(12) scale(.65)"/>
+  <use href="#tail" transform="translate(226 148) rotate(10) scale(.8)"/>
+  <use href="#orbit" transform="translate(294 211) rotate(-22)"/>
+  <use href="#bolt" transform="translate(164 235) rotate(17) scale(.8)"/>
+  <use href="#chat" transform="translate(48 283) rotate(14) scale(.75)"/>
+  <use href="#paw" transform="translate(235 304) rotate(-18) scale(.85)"/>
+  <use href="#pika" transform="translate(327 304) rotate(-8) scale(.5)"/>
+  <use href="#star" transform="translate(166 -6) rotate(8) scale(.6)"/>
+  <use href="#star" transform="translate(166 354) rotate(8) scale(.6)"/>
+  <use href="#bolt" transform="translate(-8 225) rotate(-10) scale(.7)"/>
+  <use href="#bolt" transform="translate(352 225) rotate(-10) scale(.7)"/>
+  <path d="m103 20 3-4m98 74 4 2m-90 48 4 2m59-7 2-4m-2 158 3 3m100-20 4-2M28 101h3m281-82 2 3M90 337h3"/>
+  <circle cx="27" cy="190" r="1.5"/><circle cx="187" cy="173" r="1.5"/><circle cx="285" cy="83" r="1.5"/><circle cx="112" cy="296" r="1.5"/>
+ </g>
+</svg>
