@@ -21,3 +21,5 @@
 *.zip
 *.ipa
 *.ipsw
+recovery-local/
+/sk-*/
