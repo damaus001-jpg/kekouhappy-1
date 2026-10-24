@@ -182,13 +182,22 @@ def main():
             if self.path=='/':
                 return self.respond(200,(ROOT/'web/workspace.html').read_bytes(),'text/html; charset=utf-8')
             assets = {'/dashboard.css': 'text/css; charset=utf-8', '/dashboard.js': 'text/javascript; charset=utf-8',
-                      '/workspace.js': 'text/javascript; charset=utf-8', '/gpt_export.js': 'text/javascript; charset=utf-8', '/electric-doodles.svg':'image/svg+xml', '/brand-logo.jpg': 'image/jpeg'}
+                      '/workspace.js': 'text/javascript; charset=utf-8', '/gpt_export.js': 'text/javascript; charset=utf-8', '/contact_profile.js': 'text/javascript; charset=utf-8', '/electric-doodles.svg':'image/svg+xml', '/brand-logo.jpg': 'image/jpeg'}
             if self.path in assets:
                 path = ROOT/'web'/self.path.lstrip('/')
                 if path.is_file():
                     return self.respond(200, path.read_bytes(), assets[self.path])
                 return self.respond(404, {'error': 'asset not found'})
             parsed = urlsplit(self.path)
+            if parsed.path == '/api/contact-profile':
+                query = parse_qs(parsed.query)
+                device = query.get('device', [''])[0]
+                if device not in {d['udid'] for d in devices}:
+                    return self.respond(400, {'error':'请选择有效的手机'})
+                try:
+                    return self.respond(200,workspace_service.contact_profile(device,query.get('conversation',[''])[0]))
+                except (ValueError,KeyError,OSError,TypeError):
+                    return self.respond(400,{'error':'联系人资料读取失败，请刷新记录后重试'})
             if parsed.path == '/api/messages':
                 device = parse_qs(parsed.query).get('device', [''])[0]
                 if device not in {d['udid'] for d in devices}:
@@ -217,6 +226,17 @@ def main():
         def do_POST(self):
             if not self.allowed():
                 return self.respond(403,{'error':'same-origin localhost access required'})
+            if self.path=='/api/contact-profile':
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=128*1024:raise ValueError('联系人资料过长')
+                    self.connection.settimeout(15)
+                    body=json.loads(self.rfile.read(length))
+                    if not isinstance(body,dict) or not isinstance(body.get('fields'),dict):raise ValueError('联系人资料格式无效')
+                    if body.get('device') not in {d['udid'] for d in devices}:raise ValueError('请选择有效的手机')
+                    return self.respond(200,workspace_service.contact_profile(body['device'],body.get('conversation'),body['fields']))
+                except (ValueError,TypeError,KeyError,OSError) as exc:
+                    return self.respond(400,{'error':'联系人资料保存失败，请检查内容或刷新后重试'})
             if self.path=='/api/gpt-summary':
                 try:
                     length=int(self.headers.get('Content-Length','0'))

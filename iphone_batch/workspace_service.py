@@ -75,6 +75,14 @@ class WorkspaceService:
     @staticmethod
     def _missing(): raise ValueError('当前手机的会话记录不存在，请刷新')
 
+    def contact_profile(self, device, identifier, fields=None):
+        from contact_profiles import read_profile, save_profile
+        with self.lock:
+            conversation = self.conversation(device, identifier)
+            if fields is None:
+                return read_profile(self.root, device, conversation)
+            return save_profile(self.root, device, conversation, fields)
+
     def write(self, path, value):
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_suffix('.tmp')

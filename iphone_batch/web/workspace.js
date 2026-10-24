@@ -56,8 +56,9 @@ function renderConversation(){
  document.getElementById('send-reply').textContent='确认发送';
  pastedEnglish=false;
  generatedDraft=null;
- document.getElementById('profile-state').textContent='待导出';document.getElementById('profile-result').replaceChildren();document.getElementById('profile-panel').open=false;
+ document.getElementById('profile-result').replaceChildren();document.getElementById('profile-panel').open=false;
  currentConversation=savedConversations.find(c=>c.id===currentConversationId)||null;
+ if(typeof refreshContactProfile==='function')refreshContactProfile();
  document.getElementById('peer-phone').textContent=currentConversation?.phone_number||'—';
  if(typeof syncContactFollowup==='function')syncContactFollowup();
  messagesEl.replaceChildren();
@@ -101,6 +102,7 @@ function syncWorkspaceControls(){
  const selected=!!workspaceDevice, available=!!currentConversation;
  for(const id of ['capture-current','refresh-messages'])document.getElementById(id).disabled=workspaceBusy||!selected;
  document.getElementById('summarize-contact').disabled=workspaceBusy||!available;
+ if(typeof syncContactProfileControls==='function')syncContactProfileControls();
  const sendButton=document.getElementById('send-reply');
  sendButton.disabled=workspaceBusy||sendBlocked||!selected||!available||!draftEl.value.trim()||!!(generatedDraft&&!generatedDraft.sendable);
  const sendLabel=workspaceBusy?'正在处理':sendBlocked?'请先核对发送结果':isEnglish(draftEl.value)?'发送回复':'翻译为英文';
@@ -148,8 +150,7 @@ document.getElementById('summarize-contact').addEventListener('click',()=>{
   notice(message);
   if(currentConversation?.id!==conversation.id)return;
   const container=document.getElementById('profile-result');container.replaceChildren();
-  document.getElementById('profile-state').textContent=result.status==='filled'?'已填入':'已复制';
-  const description=document.createElement('p');description.textContent=exported.message_count+' 条双方文字消息。'+message;container.append(description);
+  const description=document.createElement('p');description.textContent=exported.message_count+' 条双方文字消息。'+message+' 汇总后复制 GPT 的 JSON 结果，粘贴到下方并填入资料。';container.append(description);
   const link=document.createElement('a');link.href='https://chatgpt.com/';link.target='_blank';link.rel='noopener noreferrer';link.textContent='打开 ChatGPT';container.append(link);
   document.getElementById('profile-panel').open=true;
  });

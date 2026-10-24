@@ -1,0 +1,12 @@
+const assert=require('node:assert/strict');
+const {CONTACT_PROFILE_FIELDS,parseContactProfile}=require('./web/contact_profile');
+const {buildGptProfileExport}=require('./web/gpt_export');
+const fields=Object.fromEntries(CONTACT_PROFILE_FIELDS.map(name=>[name,'未提及']));
+fields.姓名='Alice';fields.工作='已退休';fields.婚否='离异';fields.兴趣爱好='园艺 🌹';
+assert.deepEqual(parseContactProfile('```json\n'+JSON.stringify(fields)+'\n```'),fields);
+assert.deepEqual(parseContactProfile('{"姓名":"<script>alert(1)</script>"}'),{'姓名':'<script>alert(1)</script>'});
+for(const value of ['bad json','{}','[]','{"年龄":65}','{"姓名":null}','{"姓名":'+JSON.stringify('a'.repeat(1001))+'}'])assert.throws(()=>parseContactProfile(value));
+const exported=buildGptProfileExport({messages:[{side:'incoming',text:'I retired at 65.'}]}).text;
+for(const name of CONTACT_PROFILE_FIELDS)assert(exported.includes('"'+name+'"'));
+assert(exported.includes('婚姻状况')&&exported.includes('已退休')&&exported.includes('不猜测'));
+console.log('Contact profile import passed: fixed GPT schema, retired work, unknown fields, Unicode, safe text and malformed JSON.');

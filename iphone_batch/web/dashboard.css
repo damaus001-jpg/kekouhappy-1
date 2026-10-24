@@ -205,3 +205,17 @@ body{background-image:radial-gradient(ellipse at 8% 0%,#d7b62d0b,transparent 48%
 .reading-heading-controls{width:100%;flex:none}
 .reading-meta-info{scrollbar-width:none}.reading-meta-info::-webkit-scrollbar{display:none}
 .devices>.app-version{font-size:11px;line-height:1.5;font-weight:400;letter-spacing:.04em;color:var(--muted);margin:-2px 0 3px}
+
+/* Editable contact facts returned from the user's ChatGPT web conversation. */
+.profile-contact{font-size:13px;overflow-wrap:anywhere;margin:8px 0}
+.profile-import{display:block;margin-top:12px;font-size:14px}
+.profile-import textarea,.contact-profile-fields input,.contact-profile-fields textarea{display:block;width:100%;min-width:0;border:1px solid #4b563d;border-radius:7px;background:#151d17;color:var(--ink);padding:8px;line-height:1.55;font-size:14px}
+.profile-import textarea{margin-top:5px;resize:vertical;min-height:70px;max-height:160px}
+.contact-profile-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
+.contact-profile-fields label{min-width:0;font-size:14px;color:#d9dec9}
+.contact-profile-fields input,.contact-profile-fields textarea{margin-top:4px}
+.contact-profile-fields textarea{resize:vertical;min-height:60px;max-height:180px}
+.contact-profile-fields .profile-wide{grid-column:1/-1}
+.profile-save-row{position:sticky;bottom:-14px;background:#242d23;padding:10px 0 4px;display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.profile-save-row #profile-feedback{font-size:13px;line-height:1.6;flex:1 1 160px}
+.profile-save-row button{margin-top:0;flex:none}
