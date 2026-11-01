@@ -31,6 +31,37 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(monitor.snapshot('phone0')['pending_contacts'],1)
         self.assertEqual(monitor.snapshot('phone0')['state'],'checked')
 
+    def test_unready_phone_does_not_busy_loop_or_acquire_control(self):
+        monitor=self.make_monitor()
+        monitor.devices=monitor.devices[:1]
+        monitor.ready=lambda device:False
+        with patch('notification_monitor.time.monotonic',return_value=140):
+            self.assertTrue(monitor.tick(now=140))
+            self.assertFalse(monitor.tick(now=140))
+            self.assertTrue(monitor.tick(now=142))
+        self.assertEqual(self.calls,[])
+
+    def test_manual_switch_stops_dispatch_and_keeps_saved_cards(self):
+        monitor=self.make_monitor()
+        monitor.record('phone0',{'items':[{'id':'keep','phone_number':'+123'}]})
+        monitor.set_enabled(False)
+        for _ in range(5):self.assertFalse(monitor.tick(now=999))
+        self.assertEqual(self.calls,[])
+        self.assertEqual(monitor.snapshot('phone0')['items'][0]['id'],'keep')
+        self.assertFalse(monitor.snapshot('phone0')['enabled'])
+        monitor.set_enabled(True)
+        self.assertTrue(monitor.tick(now=9999999999))
+        self.assertTrue(monitor.snapshot('phone0')['enabled'])
+
+    def test_disable_while_checking_readiness_prevents_control_lease(self):
+        monitor=self.make_monitor()
+        def ready(device):
+            monitor.set_enabled(False)
+            return True
+        monitor.ready=ready
+        monitor.tick(now=9999999999)
+        self.assertEqual(self.calls,[])
+
     def test_first_check_has_no_startup_delay(self):
         monitor=self.make_monitor()
         with patch('notification_monitor.time.monotonic',return_value=100):

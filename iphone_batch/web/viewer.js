@@ -1,6 +1,8 @@
 // Dashboard previews stay live; only the selected child accepts input or clipboard writes.
 const batchManaged = new URLSearchParams(location.search).has('batch');
 let batchActive = !batchManaged;
+let batchVisible = !batchManaged;
+let compatibleVideoAbort = null;
 if (batchManaged) document.body.classList.add('batch-preview');
 window.AUDIO_DEFAULT_ON = __AUDIO_DEFAULT_ON__;
 // Resolution-collapse compensation default (server --compensate flag), with a
@@ -191,6 +193,18 @@ async function postJson(path, payload) {
 
 let activePointer = null;
 let lastCoords = {x: 0, y: 0};
+const pointerInput = new PointerInput(async payload => {
+    if (!batchActive) throw Error('当前手机控制已暂停');
+    const response = await fetch('/manual-touch', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload), signal: AbortSignal.timeout(5000)});
+    if (!response.ok) throw Error('触摸操作失败，请检查手机连接');
+}, error => {activePointer = null; log(error.message);});
+const wheelInput = new WheelInput(pointerInput, {
+    bounds: () => canvas.getBoundingClientRect(),
+    coords: touchCoords,
+    enabled: () => batchActive && activePointer === null,
+});
+canvas.addEventListener('wheel', event => wheelInput.handle(event), {passive: false});
 // Drag-outside-then-release leaves the device-side contact stuck if we
 // only listen on the canvas: pointer capture is silently dropped on
 // window blur / Cmd-Tab / right-click menus / OS-level interruptions,
@@ -198,12 +212,14 @@ let lastCoords = {x: 0, y: 0};
 // cursor is over (often nothing). Mirror up / cancel / lostcapture
 // listeners onto `window` so we always see the release.
 function releaseActive() {
+    wheelInput.stop();
     if (activePointer === null) return;
     activePointer = null;
-    postJson('/touch', {type: 'release', x: lastCoords.x, y: lastCoords.y});
+    pointerInput.end(lastCoords);
 }
 canvas.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;   // primary button only
+    if (e.button !== 0 || !batchActive) return;   // primary button only
+    wheelInput.stop();
     e.preventDefault();
     // preventDefault on pointerdown also suppresses the implicit
     // focus shift onto our tabindex=0 canvas; focus it explicitly so
@@ -212,13 +228,13 @@ canvas.addEventListener('pointerdown', (e) => {
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
     activePointer = e.pointerId;
     lastCoords = touchCoords(e);
-    postJson('/touch', {type: 'contact', x: lastCoords.x, y: lastCoords.y});
+    pointerInput.start(lastCoords);
 });
 function onMove(e) {
     if (e.pointerId !== activePointer) return;
     e.preventDefault();
     lastCoords = touchCoords(e);
-    postJson('/touch', {type: 'contact', x: lastCoords.x, y: lastCoords.y});
+    pointerInput.move(lastCoords);
 }
 function onUp(e) {
     if (e.pointerId !== activePointer) return;
@@ -226,7 +242,6 @@ function onUp(e) {
     lastCoords = touchCoords(e);
     releaseActive();
 }
-canvas.addEventListener('pointermove', onMove);
 window.addEventListener('pointermove', onMove);
 canvas.addEventListener('pointerup', onUp);
 window.addEventListener('pointerup', onUp);
@@ -1399,6 +1414,45 @@ window.addEventListener('focus', async () => {
 });
 try { if (localStorage.getItem('clipboardSync') === 'true') setClipboardSync(true); } catch (e) {}
 
+async function runCompatibleVideo() {
+    log('使用兼容视频解码');
+    while (true) {
+        while (batchManaged && !batchVisible) await new Promise(resolve => setTimeout(resolve, 50));
+        compatibleVideoAbort = new AbortController();
+        try {
+            const response = await fetch('/jpeg.bin', {cache: 'no-store', signal: compatibleVideoAbort.signal});
+            if (!response.ok) throw Error('视频服务暂不可用');
+            const reader = response.body.getReader();
+            let buffer = new Uint8Array(0);
+            try {
+                while (true) {
+                    const {value, done} = await reader.read();
+                    if (done) throw Error('视频连接已断开');
+                    const merged = new Uint8Array(buffer.length + value.length);
+                    merged.set(buffer); merged.set(value, buffer.length); buffer = merged;
+                    let latestImage = null;
+                    while (buffer.length >= 4) {
+                        const size = new DataView(buffer.buffer, buffer.byteOffset, 4).getUint32(0);
+                        if (!size || size > 8 * 1024 * 1024) throw Error('视频帧格式无效');
+                        if (buffer.length < size + 4) break;
+                        latestImage = buffer.slice(4, size + 4); buffer = buffer.subarray(size + 4);
+                    }
+                    if (latestImage) {
+                        const frame = await createImageBitmap(new Blob([latestImage], {type: 'image/jpeg'}));
+                        Object.defineProperties(frame, {displayWidth: {value: frame.width}, displayHeight: {value: frame.height}});
+                        if (pendingFrame) pendingFrame.close();
+                        pendingFrame = frame;
+                        if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(drawPending); }
+                        frameCount++;
+                    }
+                }
+            } finally { await reader.cancel().catch(() => {}); }
+        } catch (error) { if (error.name === 'AbortError') continue; log('兼容视频：' + error.message + '，正在重连'); }
+        compatibleVideoAbort = null;
+        await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+}
+
 async function run() {
     log('userAgent: ' + navigator.userAgent.slice(0, 80));
     const { codec, description } = await fetchCodecWithRetry();
@@ -1412,10 +1466,10 @@ async function run() {
     try {
         support = await VideoDecoder.isConfigSupported({ codec, description });
     } catch (e) {
-        log('isConfigSupported threw: ' + e.message); return;
+        log('isConfigSupported threw: ' + e.message); return runCompatibleVideo();
     }
     log('isConfigSupported: ' + JSON.stringify(support));
-    if (!support.supported) { log('FAIL: codec not supported'); return; }
+    if (!support.supported) { log('浏览器不支持 HEVC，切换兼容视频'); return runCompatibleVideo(); }
 
     let decodeErrCount = 0;
     let needsResync = false;     // skip deltas until we see the next key after an error
@@ -1584,8 +1638,20 @@ run().catch(e => log('fatal: ' + e.message));
 
 if (batchManaged) {
     window.addEventListener('message', event => {
-        if (event.source !== parent || event.origin !== (new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070') || event.data?.type !== 'device-focus') return;
+        if (event.source !== parent || event.origin !== (new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070')) return;
+        if (event.data?.type === 'device-home') {
+            if (!batchActive) return;
+            releaseActive();
+            pointerInput.idle().then(() => fetch('/manual-home', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}', signal: AbortSignal.timeout(5000)}))
+                .then(response => {if (!response.ok) throw Error('返回手机主页失败'); parent.postMessage({type: 'device-home-result', ok: true}, event.origin);})
+                .catch(error => parent.postMessage({type: 'device-home-result', ok: false, error: error.message}, event.origin));
+            return;
+        }
+        if (event.data?.type !== 'device-focus') return;
+        if (!event.data.active) releaseActive();
         batchActive = event.data.active === true;
+        batchVisible = typeof event.data.visible === 'boolean' ? event.data.visible : batchActive;
+        if (!batchVisible && compatibleVideoAbort) compatibleVideoAbort.abort();
         // The dashboard owns the controls; keep its embedded viewer screen-only.
         document.body.classList.add('batch-preview');
         releaseAllKeys();

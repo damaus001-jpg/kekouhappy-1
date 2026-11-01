@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch, AsyncMock
 
-from native_workspace import context, unread_records, validate_snapshot, composer_is_empty, reopen_reply_recipient, focus_current_composer, open_phone_conversation, merge_history_messages
+from native_workspace import context, unread_records, validate_snapshot, composer_is_empty, reopen_reply_recipient, focus_current_composer, open_phone_conversation, merge_history_messages, prepared_send_control
 from send_policy import validate_send_text
 from workspace_service import WorkspaceService
 
@@ -192,9 +192,32 @@ class RecipientFocusTests(unittest.IsolatedAsyncioTestCase):
         phone=AsyncMock()
         record={'phone_number':'+13153602544','context_fingerprint':'same'}
         current={**record,'raw_elements':[{'caption':'Message, iMessage'}]}
-        await focus_current_composer(phone,current,record)
-        self.assertEqual([c.args for c in phone.keys.await_args_list],[([0x2B],),([], )])
+        with patch('native_workspace.input_point',return_value={'x':.4,'y':.9}) as locate, patch('native_workspace.tap',new=AsyncMock()) as tap:
+            await focus_current_composer(phone,current,record)
+        locate.assert_called_once_with(phone)
+        tap.assert_awaited_once_with(phone,{'x':.4,'y':.9})
+        phone.keys.assert_not_awaited()
         phone.chord.assert_not_awaited();phone.paste.assert_not_awaited()
+
+    async def test_missing_composer_location_never_guesses_with_tab(self):
+        phone=AsyncMock()
+        record={'phone_number':'+13153602544','context_fingerprint':'same'}
+        current={**record,'raw_elements':[{'caption':'Message, iMessage'}]}
+        with patch('native_workspace.input_point',side_effect=ValueError('ambiguous frame')), patch('native_workspace.tap',new=AsyncMock()) as tap:
+            with self.assertRaises(ValueError):
+                await focus_current_composer(phone,current,record)
+        tap.assert_not_awaited();phone.keys.assert_not_awaited()
+
+    async def test_prepared_send_requires_exact_body_number_and_enabled_unique_button(self):
+        number='+13153602544'
+        for suffix in ['',', Text Field',', Text Message, SMS']:
+            prepared={'phone_number':number,'raw_elements':[{'caption':'Message, Hello'+suffix},{'caption':'Send, Button'}]}
+            self.assertEqual(prepared_send_control(prepared,number,'Hello')['caption'],'Send, Button')
+            for target,text in [('+13153602545','Hello'),(number,'Different')]:
+                with self.assertRaises(ValueError):prepared_send_control(prepared,target,text)
+        for buttons in [[],[{'caption':'Send, Button, Dimmed'}],[{'caption':'Send, Button'},{'caption':'Send, Button'}]]:
+            with self.assertRaises(ValueError):
+                prepared_send_control({'phone_number':number,'raw_elements':[{'caption':'Message, Hello'},*buttons]},number,'Hello')
 
     async def test_current_composer_wrong_number_never_changes_focus(self):
         phone=AsyncMock()

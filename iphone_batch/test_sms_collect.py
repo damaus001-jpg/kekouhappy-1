@@ -3,6 +3,12 @@ from sms_collect import parse_records
 
 
 class ParseMessagesTests(unittest.TestCase):
+    def test_picture_without_time_is_reported_and_later_text_is_preserved(self):
+        _,messages,unknown=parse_records(self.records('Your iMessage, Includes picture, Image',
+                                                     'Your iMessage, After picture, 23:06'))
+        self.assertEqual([m['text'] for m in messages],['After picture'])
+        self.assertEqual(len(unknown),1)
+
     def records(self, *captions):
         return [{'caption': 'Test, Contact, Show Conversation Details, Button'},
                 *({'caption': text, 'platform_identifier': 'recycled-id'} for text in captions)]

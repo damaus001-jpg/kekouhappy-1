@@ -1,0 +1,28 @@
+const assert=require('node:assert/strict');
+const PointerInput=require('./web/pointer_input.js');
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+ const sent=[],acks=[];
+ const input=new PointerInput(payload=>{sent.push(payload);return new Promise(resolve=>acks.push(resolve));});
+ input.start({x:1,y:2});
+ for(let y=3;y<103;y++)input.move({x:1,y});
+ assert.equal(sent.length,1,'Only one touch can be in flight');
+ assert.equal(input.queue.length,1,'Unsent motion must not accumulate');
+ acks.shift()();await tick();
+ assert.equal(sent[1].y,102,'Send the newest pointer position');
+ input.move({x:1,y:110});input.end({x:1,y:120});
+ assert.equal(input.queue.length,1);
+ assert.equal(input.queue[0].type,'release');
+ acks.shift()();await tick();
+ assert.deepEqual(sent[2],{type:'release',x:1,y:120,settle:false});
+ let idle=false;input.idle().then(()=>idle=true);await tick();assert.equal(idle,false);
+ acks.shift()();await input.idle();assert.equal(idle,true);
+ const taps=[];const tap=new PointerInput(async payload=>taps.push(payload));
+ tap.start({x:4,y:5});tap.end();tap.start({x:6,y:7});tap.end();await tap.idle();
+ assert.deepEqual(taps.map(p=>p.type),['contact','release','contact','release']);
+ assert(taps.filter(p=>p.type==='release').every(p=>p.settle===false));
+ const failures=[];const failure=new PointerInput(async payload=>{failures.push(payload);if(payload.type==='contact')throw Error('offline');});
+ failure.start({x:3,y:4});failure.move({x:5,y:6});await failure.idle();
+ assert.deepEqual(failures.map(p=>p.type),['contact','release']);
+ console.log('Pointer input passed: ordered gestures, latest motion, final coordinates, idle barrier and release on failure');
+})().catch(error=>{console.error(error);process.exitCode=1;});

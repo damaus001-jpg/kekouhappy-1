@@ -205,6 +205,11 @@ body{background-image:radial-gradient(ellipse at 8% 0%,#d7b62d0b,transparent 48%
 .reading-heading-controls{width:100%;flex:none}
 .reading-meta-info{scrollbar-width:none}.reading-meta-info::-webkit-scrollbar{display:none}
 .devices>.app-version{font-size:11px;line-height:1.5;font-weight:400;letter-spacing:.04em;color:var(--muted);margin:-2px 0 3px}
+.device-setup{flex:none;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fff}.device-setup summary{cursor:pointer;font-size:12px;color:var(--muted)}.device-setup button{margin-top:10px;font-size:12px}.device-setup p{margin-top:8px;line-height:1.7;overflow-wrap:anywhere}
+.translated{display:flex;align-items:flex-start;gap:6px}.translation-text{flex:1;min-width:0}.message-retranslate{flex:none;align-self:flex-start;padding:0 3px;min-width:24px;height:24px;background:transparent;color:var(--muted);font-size:21px;line-height:22px;font-weight:400;border-radius:4px}.message-retranslate:hover:not(:disabled){background:#e3eada;color:var(--ink)}.message-retranslate:disabled{background:transparent;opacity:.5}
+#selected article[hidden]{display:none}
+.device-list-actions{display:flex;align-items:center;gap:6px;font-size:11px}#refresh-devices{padding:0;width:26px;height:26px;font-size:21px;font-weight:400;line-height:24px}
+.scan-toggle{display:flex;align-items:center;gap:5px;margin:0 0 12px;font-size:12px;cursor:pointer}.scan-toggle input{margin:0;width:16px;height:16px}.scan-toggle span{margin-left:auto;font-size:10px;color:var(--muted)}
 
 /* Editable contact facts returned from the user's ChatGPT web conversation. */
 .profile-contact{font-size:13px;overflow-wrap:anywhere;margin:8px 0}

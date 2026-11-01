@@ -33,6 +33,11 @@ def parse_records(records):
         text = record.get('caption') or ''
         match = TIME.search(text)
         if not match:
+            # A photo without an exposed timestamp is still evidence of a
+            # message we could not parse. The incremental reader must use DB
+            # recovery rather than silently treating that gap as no new mail.
+            if 'Includes picture' in text or text.startswith(('Your iMessage, ', 'Your Message, ', 'Your SMS, ', 'Your Text Message, ')):
+                unclassified.append(record)
             continue
         content = text[:match.start()]
         side = None

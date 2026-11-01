@@ -2,7 +2,7 @@ const assert=require('node:assert/strict'),path=require('node:path'),fs=require(
 const {ensureBrowser,localJson,CDP}=require('./gpt_browser.cjs');
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 (async()=>{
- const port=await ensureBrowser(path.join(__dirname,'.device-data/composer-test'),{headless:true});
+ const port=await ensureBrowser(process.env.IPHONE_BATCH_TEST_BROWSER_PROFILE||path.join(__dirname,'.device-data/composer-test'),{headless:true});
  const target=await localJson(port,'/json/new?'+encodeURIComponent('http://127.0.0.1:8070/#preview-devices'),'PUT');
  const client=await CDP.connect(target.webSocketDebuggerUrl);
  async function click(selector){
@@ -28,7 +28,7 @@ const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   assert((await client.evaluate('draftEl.value')).includes('💐'));
   assert.equal(await client.evaluate("document.querySelector('.chat-compose-row').nextElementSibling===null"),true);
   await client.evaluate(`
-   workspaceDevice='test-device';protectNotificationDraft=()=>{};window.replyCalls=[];
+   workspaceDevice='test-device';controlOwner='test-device';protectNotificationDraft=()=>{};window.replyCalls=[];
    workspaceRequest=async(action,data)=>{window.replyCalls.push(action);if(action==='draft')return {id:'test-draft',english:'Hello',sendable:true,phone_number:'+15550000001'};if(action==='send')return {conversation:{...currentConversation,messages:[...currentConversation.messages,{side:'outgoing',kind:'text',text:'Hello'}]}};throw Error('unexpected action');};
    draftEl.value='你好';draftEl.dispatchEvent(new Event('input',{bubbles:true}));
    draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
@@ -36,6 +36,10 @@ const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   await pause(100);
   assert.deepEqual(await client.evaluate('window.replyCalls'),['draft']);
   assert.equal(await client.evaluate('draftEl.value'),'Hello');
+  await client.evaluate("controlOwner=null;draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))");
+  await pause(50);assert.deepEqual(await client.evaluate('window.replyCalls'),['draft']);
+  assert((await client.evaluate("document.getElementById('archive-status').textContent")).includes('控制权'));
+  await client.evaluate("controlOwner='test-device';syncWorkspaceControls()");
   await client.evaluate("draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))");
   await pause(100);
   assert.deepEqual(await client.evaluate('window.replyCalls'),['draft','send']);
@@ -61,5 +65,5 @@ const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   await client.evaluate("draftEl.value='line\\n'.repeat(20);draftEl.dispatchEvent(new Event('input',{bubbles:true}))");
   assert.equal(await client.evaluate('draftEl.style.height'),'128px');
   console.log('Composer passed: real mouse emoji picker, cursor insertion, no bottom controls, in-place translation, second Enter sends once, Han/IME/repeat protection, no uncertain retry');
- }finally{await client.call('Browser.close').catch(()=>{});client.close();}
+ }finally{client.close();await localJson(port,'/json/close/'+target.id).catch(()=>{});}
 })().catch(error=>{console.error(error);process.exitCode=1;});

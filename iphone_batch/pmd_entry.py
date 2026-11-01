@@ -10,6 +10,8 @@ def main():
     if not hasattr(common, '_HOMEFOLDER'):
         raise RuntimeError('Upstream cache API changed; update pmd_entry.py')
     common._HOMEFOLDER = Path(__file__).resolve().parent / '.device-data'
+    from pairing_patch import install as install_pairing
+    install_pairing()
     import sys
     if 'serve-web' in sys.argv:
         from viewer_patch import install

@@ -1,5 +1,5 @@
 """Open uniquely identified unread phone conversations via native keyboard navigation."""
-import argparse,asyncio,json,re,sys,urllib.request
+import argparse,asyncio,json,re,sys,urllib.request,urllib.error
 from pathlib import Path
 from pymobiledevice3 import common
 from pymobiledevice3.lockdown import create_using_usbmux
@@ -19,8 +19,15 @@ def phone_key(value):
 class NativeConversation:
     def __init__(self):self.opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));self.base=None
     def request(self,base,path,body=None):
+        # Native workflows require actual HID dispatch, not a queue-insertion ACK.
+        path={'/touch':'/manual-touch','/key':'/manual-key'}.get(path,path)
         r=urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),headers={'Content-Type':'application/json'})
-        with self.opener.open(r,timeout=10) as response:raw=response.read()
+        try:
+            with self.opener.open(r,timeout=10) as response:raw=response.read()
+        except urllib.error.HTTPError as exc:
+            try:detail=json.loads(exc.read(65536)).get('error')
+            except (ValueError,AttributeError):detail=None
+            raise ValueError(detail or f'手机接口失败（HTTP {exc.code}），未自动重试') from None
         try:return json.loads(raw)
         except ValueError:return raw.decode()
     def select(self):

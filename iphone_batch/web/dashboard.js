@@ -1,6 +1,85 @@
 
 const cards=new Map();let active=null;let busy=false;let latest=[];let controlPaused=false;
+let selectionRevision=0;
+let controlOwner=null;
 const devicePreview=location.hash==='#preview-devices';
+const autoScanSwitch=document.getElementById('auto-scan');
+const autoScanStatus=document.getElementById('auto-scan-status');
+let autoScanEnabled=true,autoScanUpdating=false,scanRevision=0;
+function syncAutoScan(enabled){
+ if(typeof enabled!=='boolean'||autoScanUpdating)return;
+ autoScanEnabled=enabled;
+ if(autoScanSwitch){autoScanSwitch.checked=enabled;autoScanSwitch.disabled=devicePreview;}
+ if(autoScanStatus)autoScanStatus.textContent=enabled?'已开启':'已关闭';
+}
+autoScanSwitch?.addEventListener('change',async()=>{
+ if(autoScanUpdating||devicePreview)return;
+ const enabled=autoScanSwitch.checked;
+ autoScanUpdating=true;scanRevision++;autoScanSwitch.disabled=true;
+ autoScanStatus.textContent=enabled?'正在开启…':'正在停止…';
+ try{
+  const response=await fetch('/api/notification-scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
+  const result=await response.json();
+  if(!response.ok||typeof result.enabled!=='boolean')throw Error(result.error||'遍历开关未完成，请重试');
+  autoScanEnabled=result.enabled;render(latest,active);
+  notice(result.enabled?'自动遍历已开启':'自动遍历已关闭，可以测试投屏操作速度。');
+ }catch(error){notice(error.message);}
+ finally{autoScanUpdating=false;scanRevision++;syncAutoScan(autoScanEnabled);refresh();}
+});
+let refreshingDevices=false;
+const refreshDevicesButton=document.getElementById('refresh-devices');
+refreshDevicesButton?.addEventListener('click',async()=>{
+ if(busy||workspaceBusy||refreshingDevices)return;
+ if(devicePreview){render(previewDevices,previewSelection);notice('预览模式：已刷新模拟设备');return;}
+ refreshingDevices=true;refreshDevicesButton.disabled=true;refreshDevicesButton.textContent='…';
+ try{
+  const response=await fetch('/api/devices/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  const result=await response.json();if(!response.ok)throw Error(result.error||'设备刷新失败');
+  await refresh();notice('已重新检测 USB：当前识别到 '+result.count+' 台手机。');
+ }catch(error){notice(error.message);}
+ finally{refreshingDevices=false;refreshDevicesButton.textContent='↻';refreshDevicesButton.disabled=busy||workspaceBusy;}
+});
+const phoneHomeButton=document.getElementById('phone-home');
+phoneHomeButton?.addEventListener('click',()=>{
+ if(!active||controlOwner!==active||busy||workspaceBusy||controlPaused||devicePreview)return;
+ const card=cards.get(active);
+ if(!card?.frame){notice('手机画面尚未连接，请稍后重试');return;}
+ card.frame.contentWindow.postMessage({type:'device-home'},card.origin);
+});
+window.addEventListener('message',event=>{
+ if(event.data?.type!=='device-home-result')return;
+ const card=cards.get(active);
+ if(!card?.frame||event.source!==card.frame.contentWindow||event.origin!==card.origin)return;
+ notice(event.data.ok?'已请求返回手机主页':event.data.error||'返回手机主页失败，请检查手机连接');
+});
+let revealingDeveloperMode=false;
+let developerModeFeedbackDevice=null;
+const revealDeveloperModeButton=document.getElementById('reveal-developer-mode');
+const developerModeStatus=document.getElementById('developer-mode-status');
+function syncDeveloperModeButton(){
+ if(!revealDeveloperModeButton)return;
+ revealDeveloperModeButton.disabled=!active||busy||workspaceBusy||revealingDeveloperMode||devicePreview;
+ revealDeveloperModeButton.textContent=revealingDeveloperMode?'正在显示入口…':'显示开发者模式入口';
+ if(developerModeFeedbackDevice!==active){
+  developerModeFeedbackDevice=active;
+  developerModeStatus.textContent=active?'仅显示当前手机的设置入口；请在手机上手动开启。':'选中手机后点击，再到手机设置中开启开发者模式。';
+ }
+}
+revealDeveloperModeButton?.addEventListener('click',async()=>{
+ if(!active||busy||workspaceBusy||revealingDeveloperMode||devicePreview)return;
+ const device=active;
+ const row=latest.find(d=>d.udid===device);
+ const label=row?deviceLabel(row,latest.indexOf(row)).number:device.slice(-8);
+ revealingDeveloperMode=true;syncDeveloperModeButton();
+ developerModeStatus.textContent='正在为设备 '+label+' 显示入口…';
+ try{
+  const response=await fetch('/api/developer-mode/reveal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device})});
+  const result=await response.json();
+  if(!response.ok)throw Error(result.error||'显示入口失败，请检查手机连接后重试');
+  if(active===device)developerModeStatus.textContent='设备 '+label+'：'+result.message;
+ }catch(error){if(active===device)developerModeStatus.textContent='设备 '+label+'：'+error.message;}
+ finally{revealingDeveloperMode=false;syncDeveloperModeButton();}
+});
 let previewSelection=null;
 const previewDevices=Array.from({length:20},(_,i)=>({
  udid:'preview-device-'+(i+1),number:String(i+1).padStart(2,'0'),name:'iPhone '+(i+1),
@@ -178,23 +257,33 @@ document.getElementById('device-label-form').addEventListener('submit',event=>{
  document.getElementById('device-label-dialog').close();editingDevice=null;
  render(latest,active);
 });
-function sendFocus(card,on){if(card.frame) card.frame.contentWindow.postMessage({type:'device-focus',active:on},card.origin);}
-function render(rows,selected){
- latest=rows;active=selected;
- controlPaused=rows.some(row=>row.udid===selected&&row.notifications?.state==='scanning');
+function sendFocus(card,on){if(card.frame) card.frame.contentWindow.postMessage({type:'device-focus',active:on,visible:card.node.parentElement?.id==='selected'&&!card.node.hidden},card.origin);}
+function render(rows,selected,controller=controlOwner){
+ latest=rows;active=selected;controlOwner=controller;
+ if(refreshDevicesButton)refreshDevicesButton.disabled=busy||workspaceBusy||refreshingDevices;
+ const connected=new Set(rows.map(device=>device.udid));
+ for(const [udid,card] of cards){if(!connected.has(udid)){sendFocus(card,false);card.node.remove();cards.delete(udid);}}
+ syncDeveloperModeButton();
+ controlPaused=autoScanEnabled&&rows.some(row=>row.udid===selected&&row.notifications?.state==='scanning');
+ if(phoneHomeButton)phoneHomeButton.disabled=!(controlOwner===selected&&rows.some(row=>row.udid===selected&&row.ready))||busy||workspaceBusy||controlPaused||devicePreview;
  const selectedDevice=rows.find(device=>device.udid===selected);
  const readingDeviceLabel=selectedDevice?deviceLabel(selectedDevice,rows.indexOf(selectedDevice)):null;
  document.getElementById('reading-device-number').textContent='设备：'+(readingDeviceLabel?.number||'—');
- if(devicePreview)loadPreviewContacts(selectedDevice);else loadWorkspace(selected);
+ if(devicePreview)loadPreviewContacts(selectedDevice);else{loadWorkspace(selected);syncWorkspaceControls();}
  syncContactFollowup();
  document.getElementById('device-count').textContent=rows.length+' 台';
  const deviceList=document.getElementById('device-list');deviceList.replaceChildren();
  const ordered=rows.map((device,index)=>({device,index,label:deviceLabel(device,index),followupCount:contactFollowupCount(device)}));
- ordered.sort((a,b)=>sortControl.value==='unread'?
-  ((b.device.notifications?.card_count??b.device.notifications?.items?.length??0)-(a.device.notifications?.card_count??a.device.notifications?.items?.length??0)||a.index-b.index):
-  (b.followupCount-a.followupCount||a.index-b.index));
+ ordered.sort((a,b)=>{
+  const available=Number(b.device.ready===true)-Number(a.device.ready===true);
+  if(available)return available;
+  return sortControl.value==='unread'?
+   ((b.device.notifications?.card_count??b.device.notifications?.items?.length??0)-(a.device.notifications?.card_count??a.device.notifications?.items?.length??0)||a.index-b.index):
+   (b.followupCount-a.followupCount||a.index-b.index);
+ });
  for(const {device:d,index,label,followupCount} of ordered){
-  const entry=document.createElement('button');entry.type='button';entry.className='device-entry'+(selected===d.udid?' current':'');entry.disabled=(!devicePreview&&!d.ready)||busy;entry.setAttribute('aria-pressed',String(selected===d.udid));
+  const entry=document.createElement('button');entry.type='button';entry.className='device-entry'+(selected===d.udid?' current':'');entry.disabled=busy||workspaceBusy||refreshingDevices;entry.setAttribute('aria-pressed',String(selected===d.udid));
+  entry.dataset.udid=d.udid;
   const number=label.number;
   const name=document.createElement('strong');name.textContent='设备 '+number;
   const remark=document.createElement('span');remark.className='device-remark'+(followupCount||label.followup?' followup':'');remark.textContent=followupCount||label.followup?'待跟进 '+followupCount:'无';
@@ -208,11 +297,13 @@ function render(rows,selected){
    const badge=document.createElement('span');badge.className='notification-badge';badge.textContent=String(count);
    phone.append(badge);
   }
-  detail.textContent=devicePreview?'':!d.ready?'连接中':notification?.manual_control?'当前控制':notification?.protected?'草稿保护':
+  const setupError=String(d.error||'');
+  const setupState=setupError.includes('开发者模式未开启')?'开发者模式关闭':setupError.includes('信任')?'需解锁并信任':setupError.includes('镜像准备失败')?'投屏准备失败':'正在准备投屏';
+  detail.textContent=devicePreview?'':!d.ready?setupState:notification?.manual_control?'当前控制':!autoScanEnabled?'遍历已关闭':notification?.protected?'草稿保护':
    notification?.state==='scanning'?'检查中':notification?.state==='paused'?'检查暂停':
    notification?.last_checked?(count?'有新通知':'暂无通知'):'待检查';
   entry.title='设备 '+number+' · '+remark.textContent+' · '+d.name+' · '+d.udid.slice(-8)+' · '+detail.textContent+' · '+count+' 张短信通知卡片'+
-   (notification?.error?' · '+notification.error:notification?.last_checked?' · 最近检查：'+new Date(notification.last_checked).toLocaleString():'');
+   (d.error?' · '+d.error:notification?.error?' · '+notification.error:notification?.last_checked?' · 最近检查：'+new Date(notification.last_checked).toLocaleString():'');
   entry.setAttribute('aria-label',entry.title);
   entry.append(phone,name,remark);if(detail.textContent)entry.append(detail);entry.onclick=()=>select(d.udid);
   const tile=document.createElement('div');tile.className='device-tile';
@@ -252,13 +343,14 @@ function render(rows,selected){
   if(!d.ready)card.waiting.textContent=d.error||'正在启动投屏…';
   if(d.ready&&!card.frame){
    const frame=document.createElement('iframe');frame.title=d.name+' 实时画面';frame.src=card.origin+'/?batch=1&manager='+encodeURIComponent(location.origin);frame.allow='clipboard-read; clipboard-write';
-   frame.onload=()=>sendFocus(card,active===d.udid&&!controlPaused);card.frame=frame;card.waiting.remove();card.node.append(frame);
+   frame.onload=()=>sendFocus(card,controlOwner===d.udid&&active===d.udid&&!controlPaused&&!busy);card.frame=frame;card.waiting.remove();card.node.append(frame);
    const cover=document.createElement('button');cover.className='cover';cover.textContent='选择 '+d.name;cover.setAttribute('aria-label','选择 '+d.name+' 进行控制');cover.onclick=()=>select(d.udid);card.node.append(cover);
   }
-  const on=selected===d.udid;card.node.classList.toggle('selected',on);card.button.textContent=on?'正在控制':'选择控制';card.button.disabled=!d.ready||busy;
-  const target=document.getElementById(on?'selected':'previews');if(card.node.parentElement!==target)target.append(card.node);
-  const controllable=on&&!controlPaused;
-  if(card.lastActive!==controllable){sendFocus(card,controllable);card.lastActive=controllable;}
+  const on=selected===d.udid;card.node.classList.toggle('selected',on);card.button.textContent=on&&controlOwner===d.udid?'正在控制':'选择控制';card.button.disabled=!d.ready||busy;
+  const target=document.getElementById('selected');if(card.node.parentElement!==target)target.append(card.node);
+  card.node.hidden=!on;
+  const controllable=on&&controlOwner===d.udid&&!controlPaused&&!busy;
+  if(card.lastActive!==controllable||card.lastVisible!==on){sendFocus(card,controllable);card.lastActive=controllable;card.lastVisible=on;}
  }
  const empty=document.getElementById('empty');if(empty)empty.style.display=selected?'none':'';
  const owner=rows.find(d=>d.udid===selected);
@@ -267,12 +359,12 @@ function render(rows,selected){
 }
 async function select(udid){
  if(devicePreview){previewSelection=udid;render(previewDevices,previewSelection);return;}
-  if(busy||workspaceBusy)return;busy=true;for(const card of cards.values())sendFocus(card,false);render(latest,null);
- try{const r=await fetch('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({udid})});const j=await r.json();if(!r.ok)throw Error(j.error);active=j.active;}
- catch(e){active=null;notice(e.message);}
- finally{busy=false;await refresh();}
+  if(busy||workspaceBusy||refreshingDevices)return;selectionRevision++;busy=true;for(const card of cards.values()){sendFocus(card,false);card.lastActive=false;}render(latest,active);
+ try{const r=await fetch('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({udid})});const j=await r.json();if(!r.ok)throw Error(j.error);active=j.selected??j.active;controlOwner=j.active;}
+ catch(e){active=null;controlOwner=null;notice(e.message);}
+ finally{busy=false;render(latest,active);refresh();}
 }
-async function refresh(){if(devicePreview){render(previewDevices,previewSelection);return;}try{const r=await fetch('/api/state',{cache:'no-store'});const j=await r.json();if(!busy)render(j.devices,j.active);}catch(e){notice('管理页面连接中断');}}
+async function refresh(){if(devicePreview){syncAutoScan(false);render(previewDevices,previewSelection);return;}const revision=selectionRevision,scanVersion=scanRevision;try{const r=await fetch('/api/state',{cache:'no-store'});const j=await r.json();if(scanVersion===scanRevision)syncAutoScan(j.scan_enabled);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){notice('管理页面连接中断');}}
 refresh();if(!devicePreview)setInterval(refresh,2000);
 document.getElementById('screen-expand').addEventListener('click',e=>{
  const expanded=document.body.classList.toggle('screen-expanded');

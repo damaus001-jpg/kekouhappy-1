@@ -32,6 +32,19 @@ def page(captions,complete=True):
 
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_header_identity_can_stop_before_blocked_image_without_claiming_history(self):
+        items=[SimpleNamespace(platform_identifier=str(i),caption=c) for i,c in enumerate(
+            ['Back, Button','+12345678901, Show Conversation Details, Button','Includes picture'])]
+        inspector=Inspector(items,drop=2)
+        with patch('native_ui_scan.deserialize_object',side_effect=lambda x:x):
+            result=await scan(inspector,limit=20,seconds=4,settle=0,
+                              stop_when=lambda i:'Show Conversation Details' in i.caption)
+        self.assertEqual(len(result),2)
+        self.assertEqual(inspector.advances,1)
+        self.assertFalse(result.complete)
+        self.assertEqual(result.reason,'target_found')
+        self.assertFalse(inspector.monitoring)
+
     async def test_same_name_and_preview_do_not_hide_distinct_contacts(self):
         rows=unread_records([{'caption':'Messages, Header'},
             {'caption':'John, Unread, Hi','platform_identifier':'a'},

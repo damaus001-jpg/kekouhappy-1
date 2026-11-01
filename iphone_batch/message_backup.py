@@ -9,6 +9,9 @@ import plistlib
 import re
 import sqlite3
 import sys
+import shutil
+import tempfile
+from contextlib import closing
 
 
 def attributed_text(blob):
@@ -27,7 +30,9 @@ def attributed_text(blob):
 def identifier(value):
     if re.fullmatch(r'[+\d\s().-]+', value or ''):
         digits = re.sub(r'\D', '', value)
-        return '+' + digits if value.strip().startswith('+') else digits
+        if len(digits) == 10 and not value.strip().startswith('+'):
+            digits = '1' + digits
+        return '+' + digits
     return value
 
 
@@ -46,7 +51,23 @@ def read_snapshot(root, device, contact):
         raise ValueError('数据库快照已加密，需要原备份密码')
     file_id = hashlib.sha1(b'HomeDomain-Library/SMS/sms.db').hexdigest()
     database = folder / file_id[:2] / file_id
-    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
+    # Backup payload names are hashes. Restore SQLite's actual filenames so a
+    # retained WAL is replayed rather than silently losing its newer messages.
+    with tempfile.TemporaryDirectory(prefix='sms-read-') as temporary:
+        local = Path(temporary) / 'sms.db'
+        if not database.is_file():
+            raise ValueError('备份中缺少短信数据库，完整读取未完成')
+        shutil.copy2(database, local)
+        for suffix in ('-wal', '-shm'):
+            side_id = hashlib.sha1(('HomeDomain-Library/SMS/sms.db' + suffix).encode()).hexdigest()
+            side = folder / side_id[:2] / side_id
+            if side.is_file():
+                shutil.copy2(side, Path(str(local) + suffix))
+        return _read_database(local, device, contact, status_path)
+
+
+def _read_database(database, device, contact, status_path):
+    with closing(sqlite3.connect(database)) as db:
         db.row_factory = sqlite3.Row
         if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise ValueError('消息数据库完整性检查失败')
@@ -60,6 +81,10 @@ def read_snapshot(root, device, contact):
             m.item_type,m.associated_message_type
             FROM message m JOIN chat_message_join j ON j.message_id=m.ROWID
             WHERE j.chat_id IN ({marks}) ORDER BY m.date,m.ROWID''', chats).fetchall()
+        expected = db.execute(f'''SELECT COUNT(DISTINCT message_id) FROM chat_message_join
+            WHERE chat_id IN ({marks})''', chats).fetchone()[0]
+        if len(rows) != expected:
+            raise ValueError('会话记录数量不一致，完整读取未完成')
     messages = []
     for row in rows:
         text, decode_error = row['text'], None
@@ -69,7 +94,10 @@ def read_snapshot(root, device, contact):
             except Exception as exc:
                 decode_error = str(exc)
         kind = ('reaction' if row['associated_message_type'] else 'system' if row['item_type']
-                else 'attachment' if not text and row['cache_has_attachments'] else 'text')
+                else 'attachment' if (not text or not text.replace('\ufffc', '').strip())
+                and row['cache_has_attachments'] else 'text')
+        if kind == 'text' and not text and not decode_error:
+            decode_error = '消息正文为空且没有可确认的附件，需核对原始记录'
         try:
             timestamp = (datetime(2001, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=row['date']/1e9)).isoformat()
         except (OverflowError, TypeError):
@@ -82,26 +110,36 @@ def read_snapshot(root, device, contact):
                    'has_attachments': bool(row['cache_has_attachments']), 'record_source': 'backup-snapshot'}
         if decode_error:
             message['decode_error'] = decode_error
+            message['raw_attributed_body_hex'] = bytes(row['attributedBody'] or b'').hex()
         messages.append(message)
-    return {'messages': messages,
+    decode_errors = sum('decode_error' in message for message in messages)
+    return {'messages': messages, 'record_count': expected, 'decode_errors': decode_errors,
+            'history_complete': not decode_errors,
             'snapshot_at': datetime.fromtimestamp(status_path.stat().st_mtime, timezone.utc).isoformat(),
             'scope': '已完成备份中的会话记录；未读状态仅对应备份时刻'}
 
 
 async def refresh_snapshot(root, device):
     from pymobiledevice3.lockdown import create_using_usbmux
-    from pymobiledevice3.services.mobilebackup2 import Mobilebackup2Service, BackupSelection
+    from pymobiledevice3.services.mobilebackup2 import Mobilebackup2Service
     from pymobiledevice3 import common
+    from pairing_patch import install
+    install()
     common._HOMEFOLDER = Path(root)
     folder = Path(root) / 'sms-backup'
     folder.mkdir(parents=True, exist_ok=True)
     lockdown = await create_using_usbmux(serial=device, connection_type='USB',
         usbmux_address='127.0.0.1:27015', pairing_records_cache_folder=Path(root), autopair=False)
     try:
-        async with asyncio.timeout(180):
+        async with asyncio.timeout(600):
             async with Mobilebackup2Service(lockdown) as service:
+                if await service.get_will_encrypt():
+                    raise ValueError('手机启用了加密备份，需要原备份密码才能完整读取；未更改手机设置')
+                from pymobiledevice3.services.mobilebackup2 import BackupSelectionRule
+                rules = tuple(BackupSelectionRule('HomeDomain', 'Library/SMS/sms.db'+suffix)
+                              for suffix in ('', '-wal', '-shm'))
                 await service.backup(full=False, backup_directory=folder,
-                    filter_callback=service.selection_filter_callback(BackupSelection.SMS.rules()))
+                    filter_callback=service.selection_filter_callback(rules))
     finally:
         await lockdown.close()
 
@@ -120,7 +158,10 @@ if __name__ == '__main__':
             if sys.platform == 'win32':
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             asyncio.run(refresh_snapshot(args.root, args.device))
-        print(json.dumps({'snapshot': read_snapshot(args.root, args.device, args.contact)}, ensure_ascii=True))
+        snapshot = read_snapshot(args.root, args.device, args.contact)
+        if snapshot and args.refresh:
+            snapshot['snapshot_at'] = datetime.now(timezone.utc).isoformat()
+        print(json.dumps({'snapshot': snapshot}, ensure_ascii=True))
     except Exception as exc:
-        print(json.dumps({'error': str(exc)}, ensure_ascii=True))
+        print(json.dumps({'error': str(exc) or type(exc).__name__}, ensure_ascii=True))
         sys.exit(1)

@@ -8,7 +8,7 @@ import time
 class NotificationMonitor:
     def __init__(self, devices, phone_lock, lease, scan, ready, stopping, interval=0,
                  lock_for=None, workers=4, manual_device=None, on_new_cards=None):
-        self.devices=devices
+        self.devices=list(devices)
         self.phone_lock=phone_lock
         self.lease=lease
         self.scan=scan
@@ -20,11 +20,31 @@ class NotificationMonitor:
         self.manual_device=manual_device or (lambda: None)
         self.on_new_cards=on_new_cards
         self.lock=threading.RLock()
+        self.enabled=True
         self.queue_order={d['udid']:i for i,d in enumerate(devices)}
         self.next_order=len(devices)
         now=time.monotonic()
         self.states={d['udid']:{'state':'waiting','last_checked':None,'pending_contacts':0,
             'items':[],'protected':False,'next_due':now,'error':None} for d in devices}
+
+    def set_enabled(self, enabled):
+        if not isinstance(enabled,bool):raise ValueError('无效的遍历开关状态')
+        with self.lock:
+            self.enabled=enabled
+            for state in self.states.values():
+                if state['state']!='scanning':state['state']='waiting' if enabled else 'paused'
+                if enabled:state['next_due']=time.monotonic()
+
+    def update_devices(self, devices):
+        with self.lock:
+            for device in devices:
+                udid = device['udid']
+                if udid not in self.states:
+                    self.states[udid] = {'state':'waiting','last_checked':None,'pending_contacts':0,
+                        'items':[],'protected':False,'next_due':time.monotonic(),'error':None}
+                    self.queue_order[udid] = self.next_order
+                    self.next_order += 1
+            self.devices = list(devices)
 
     def protect(self, device, protected):
         with self.lock:
@@ -37,6 +57,7 @@ class NotificationMonitor:
             return {**{k:v for k,v in state.items() if k!='next_due'},
                     'card_count':len(state['items']),
                     'manual_control':device==self.manual_device(),
+                    'enabled':self.enabled,
                     'interval_seconds':self.interval,'parallel_limit':self.workers}
 
     def record(self, device, result):
@@ -63,6 +84,7 @@ class NotificationMonitor:
     def tick(self, now=None):
         now=time.monotonic() if now is None else now
         with self.lock:
+            if not self.enabled:return False
             due=[d for d in self.devices if self.states[d['udid']]['next_due']<=now
                  and not self.states[d['udid']]['protected']
                  and d['udid']!=self.manual_device()
@@ -75,17 +97,20 @@ class NotificationMonitor:
                     break
             else:return False
         started=time.monotonic()
+        retry_delay=self.interval
         try:
             if not self.ready(device):raise ValueError('手机投屏尚未就绪，稍后重查')
+            if not self.enabled:raise ValueError('自动遍历已关闭')
             with self.lease(device['udid']):
                 result=self.scan(device['udid'],f"http://127.0.0.1:{device['port']}")
             self.record(device['udid'],result)
         except Exception as exc:
+            retry_delay=max(self.interval,2)
             with self.lock:
                 state.update(state='paused',error=str(exc))
         finally:
             with self.lock:
-                state['next_due']=time.monotonic()+self.interval
+                state['next_due']=time.monotonic()+retry_delay
                 state['scan_seconds']=round(time.monotonic()-started,2)
                 self.queue_order[device['udid']]=self.next_order
                 self.next_order+=1

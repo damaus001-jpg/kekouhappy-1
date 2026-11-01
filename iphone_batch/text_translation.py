@@ -63,7 +63,8 @@ class TextTranslationService:
         config=load_config()
         return {'configured':bool(config['api_key']),'model':config['model'],'cache_entries':self.cache.count(),
                 'ocr_installed':importlib.util.find_spec('rapidocr') is not None and importlib.util.find_spec('onnxruntime') is not None}
-    def translate_texts(self,device,contact,texts):
+    def translate_texts(self,device,contact,texts,*,force=False):
+        if not isinstance(force,bool):raise ValueError('Invalid refresh flag')
         if not isinstance(contact,str) or not contact.strip() or len(contact)>200:
             raise TranslationError('请填写当前联系人的号码或姓名')
         if not isinstance(texts,list) or not 1<=len(texts)<=30 or any(not isinstance(v,str) or not 0<len(v)<=6000 for v in texts):
@@ -71,7 +72,7 @@ class TextTranslationService:
         config=load_config();model=config['model'];contact=contact.strip()
         with self.lock:
             generation=self.cache.generation
-            output=[self.cache.get(device,contact,model,text) for text in texts]
+            output=[None if force else self.cache.get(device,contact,model,text) for text in texts]
             missing={normalize(text):[] for text,result in zip(texts,output) if result is None}
             for index,(text,result) in enumerate(zip(texts,output)):
                 if result is None:missing[normalize(text)].append(index)

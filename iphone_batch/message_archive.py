@@ -17,9 +17,12 @@ def conversations(device, directory=None):
                             'native_context': value.get('native_context'),
                             'scope': value.get('scope'),
                             'history_complete': value.get('history_complete', False),
+                            'baseline_complete': value.get('baseline_complete', False),
+                            'incremental': value.get('incremental'),
                             'messages': [{key: m.get(key) for key in (
                                 'sequence', 'side', 'time', 'text', 'kind', 'translation_zh',
-                                'message_id', 'guid', 'database_id', 'transport', 'is_read', 'record_source')}
+                                'message_id', 'guid', 'database_id', 'transport', 'is_read', 'record_source',
+                                'has_attachments', 'decode_error')}
                                 for m in value.get('messages', [])]})
         except (OSError, ValueError, TypeError):
             continue

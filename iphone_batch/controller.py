@@ -17,6 +17,7 @@ import tempfile
 import contextlib
 import urllib.request
 from pathlib import Path
+from device_registry import MAX_DEVICES
 
 HID = ['developer', 'core-device', 'universal-hid-service']
 
@@ -276,8 +277,8 @@ def resolve_devices(requested):
         udids = list(connected)
     else:
         raise ValueError('Connect exactly one USB device or explicitly select --udid')
-    if len(udids) > 10:
-        raise ValueError('This deployment is limited to 10 devices')
+    if len(udids) > MAX_DEVICES:
+        raise ValueError(f'当前工作台最多支持 {MAX_DEVICES} 台手机')
     if any(not udid.strip() or udid.startswith('-') for udid in udids):
         raise ValueError('Invalid UDID')
     missing = set(udids) - connected
@@ -328,7 +329,69 @@ async def monitor_usb(udid, seconds, interval):
     return 0 if passed else 1
 
 
+async def screen_service_command(udid, args, timeout):
+    process = await asyncio.create_subprocess_exec(
+        *command_for(udid, args), env=device_environment(udid),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        **({'creationflags': 0x08000000} if os.name == 'nt' else {}))
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
+        return process.returncode, stdout.decode('utf-8', errors='replace').strip(), stderr.decode('utf-8', errors='replace')
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+
+
+async def ensure_screen_services(udid):
+    code, mode, error = await screen_service_command(udid, ['mounter', 'query-developer-mode-status'], 25)
+    if code:
+        raise RuntimeError('无法建立手机可信连接，请解锁手机并确认信任此电脑')
+    if mode.lower() != 'true':
+        raise RuntimeError('开发者模式未开启，请在手机“设置 → 隐私与安全性”开启，重启后确认')
+    media = ['developer', 'core-device', 'display', 'get-media-support-info']
+    code, _, _ = await screen_service_command(udid, media, 30)
+    if not code:
+        return
+    emit({'status': 'preparing_video_services', 'udid': udid})
+    code, _, error = await screen_service_command(udid, ['mounter', 'auto-mount'], 180)
+    if code:
+        raise RuntimeError('开发者镜像准备失败，请解锁手机并检查连接后重试；' + error.strip()[-160:])
+    code, _, _ = await screen_service_command(udid, media, 30)
+    if code:
+        raise RuntimeError('手机视频服务尚未可用，请保持解锁并重新连接')
+
+
+def screen_tunnel_closed(log_path):
+    """A closed userspace dialer cannot be repaired by retrying /codec."""
+    log_path = Path(log_path)
+    try:
+        with Path(log_path).open('rb') as log:
+            log.seek(max(0, log_path.stat().st_size-8192))
+            return b'ConnectionError: userspace dial plane is closed' in log.read()
+    except OSError:
+        return False
+
+
+async def supervise_screen(process, log_path):
+    waiting = asyncio.create_task(process.wait())
+    try:
+        while True:
+            try:
+                return await asyncio.wait_for(asyncio.shield(waiting), 3)
+            except asyncio.TimeoutError:
+                if await asyncio.to_thread(screen_tunnel_closed, log_path):
+                    emit({'status':'error', 'message':'手机视频隧道已关闭，正在重新建立连接'})
+                    return 1
+    finally:
+        if not waiting.done():
+            waiting.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await waiting
+
+
 async def run_screen(udid, port):
+    await ensure_screen_services(udid)
     args = ['developer', 'core-device', 'display', 'serve-web',
             '--bind', '127.0.0.1', '--http-port', str(port), '--no-audio', '--no-motion-idr']
     flags = {'creationflags': 0x08000000} if os.name == 'nt' else {}
@@ -354,7 +417,7 @@ async def run_screen(udid, port):
                         return response.status == 200
                 if await asyncio.to_thread(probe):
                     emit({'status': 'viewer_http_ready', 'udid': udid, 'url': url})
-                    return await process.wait()
+                    return await supervise_screen(process, log_path)
             except OSError:
                 pass
             await asyncio.sleep(0.25)
@@ -437,8 +500,8 @@ def main():
         if args.dry_run:
             if not udids:
                 raise ValueError('Dry run requires explicit --udid placeholders')
-            if len(udids) > 10:
-                raise ValueError('This deployment is limited to 10 devices')
+            if len(udids) > MAX_DEVICES:
+                raise ValueError(f'当前工作台最多支持 {MAX_DEVICES} 台手机')
             emit({'status': 'preview', 'devices': udids,
                   'commands': [{'udid': udid, 'argv': command_for(udid, command), 'target_env': {'PYMOBILEDEVICE3_UDID': udid, 'PYMOBILEDEVICE3_USBMUX': '127.0.0.1:27015'}, 'stdin': script}
                                for udid in udids for command, script in compiled]})

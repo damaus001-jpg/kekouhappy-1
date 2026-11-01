@@ -11,7 +11,7 @@ class ScanResult(list):
     elapsed = 0
 
 
-async def scan(s,limit=90,seconds=22,settle=.15,start_from_last=True):
+async def scan(s,limit=90,seconds=22,settle=.15,start_from_last=True,stop_when=None):
     await s.set_app_monitoring_enabled(True);await s.set_monitored_event_type()
     await asyncio.sleep(.1)
     while not s._event_queue.empty():s._event_queue.get_nowait()
@@ -58,6 +58,8 @@ async def scan(s,limit=90,seconds=22,settle=.15,start_from_last=True):
                 out.reason='repeated_element';break
             if anchor is None:anchor=key
             seen.add(key);out.append(i)
+            if stop_when is not None and stop_when(i):
+                out.reason='target_found';break
             if settle:await asyncio.sleep(settle)
             await s.move_focus_next()
         else:

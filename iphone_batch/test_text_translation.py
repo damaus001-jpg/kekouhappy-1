@@ -51,6 +51,20 @@ class TextTranslationTests(unittest.TestCase):
         self.service.requester=lambda *args:{'choices':[{'finish_reason':'length','message':{'content':'{}'}}]}
         with self.assertRaises(RuntimeError):self.service.translate_texts('phone','Alice',['source'])
         self.assertEqual(self.cache.count(),0)
+    def test_force_refresh_bypasses_and_replaces_only_target_cache(self):
+        self.cache.put('phone1','Alice',CONFIG['model'],'Hello','old',self.cache.generation)
+        self.cache.put('phone1','Alice',CONFIG['model'],'Other','keep',self.cache.generation)
+        result=self.service.translate_texts('phone1','Alice',['Hello'],force=True)
+        self.assertEqual(result['api_requests'],1)
+        self.assertEqual(self.cache.get('phone1','Alice',CONFIG['model'],'Hello'),'translated Hello')
+        self.assertEqual(self.cache.get('phone1','Alice',CONFIG['model'],'Other'),'keep')
+
+    def test_failed_force_refresh_keeps_old_cache(self):
+        self.cache.put('phone1','Alice',CONFIG['model'],'Hello','old',self.cache.generation)
+        self.service.requester=lambda *args:{'choices':[{'finish_reason':'length','message':{'content':'{}'}}]}
+        with self.assertRaises(RuntimeError):self.service.translate_texts('phone1','Alice',['Hello'],force=True)
+        self.assertEqual(self.cache.get('phone1','Alice',CONFIG['model'],'Hello'),'old')
+
     def test_key_saved_but_not_returned(self):
         destination=Path(self.temp.name)/'secret.json'
         value=save_config({'api_key':'test-key-not-real','model':'deepseek-flash'},destination)

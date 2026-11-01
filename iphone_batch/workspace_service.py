@@ -13,7 +13,7 @@ from message_archive import conversations
 from translation import load_config, Translator, TranslationError
 from sms_translate import translate_file
 from send_policy import validate_send_text
-from message_ledger import MessageLedger, append_window
+from message_ledger import MessageLedger, append_window, append_verified_window
 from message_backup import read_snapshot
 
 ROOT = Path(__file__).resolve().parent / '.device-data'
@@ -29,6 +29,8 @@ class WorkspaceService:
         self.phone_lock = threading.RLock()
         self.device_locks = {}
         self.device_locks_lock = threading.Lock()
+        from notification_runner import NotificationRunner
+        self.notification_runner = NotificationRunner()
         self.ledger = MessageLedger(self.root)
         (self.root/'workspace'/'replies').mkdir(parents=True, exist_ok=True)
         (self.root/'workspace'/'profiles').mkdir(parents=True, exist_ok=True)
@@ -42,8 +44,12 @@ class WorkspaceService:
                    '--device', device, '--action', action, '--base', base]
         if record: command += ['--record', str(record)]
         if phone: command += ['--phone', phone]
-        process = subprocess.run(command, capture_output=True, timeout=130, encoding='utf-8',
-                                 creationflags=0x08000000 if sys.platform=='win32' else 0)
+        flags = 0x08000000 if sys.platform=='win32' else 0
+        if action == 'notifications':
+            process = self.notification_runner.run(device, command, timeout=130,
+                encoding='utf-8', creationflags=flags)
+        else:
+            process = subprocess.run(command, capture_output=True, timeout=130, encoding='utf-8', creationflags=flags)
         try:
             result = json.loads(process.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -263,11 +269,160 @@ class WorkspaceService:
                 'phone_number':result.get('phone_number'), 'messages':translated['messages'],
                 'scope':result['scope'], 'message_count':len(result['messages'])}
 
+    def _remember_capture(self, device, contact, translated):
+        value = json.loads(Path(translated['output']).read_text(encoding='utf-8-sig'))
+        ledger = self.ledger.load(device, contact)
+        if ledger and [m.get('message_id') for m in ledger['messages']] == [m.get('message_id') for m in value['messages']]:
+            ledger['messages'] = value['messages']
+            ledger['conversation_id'] = Path(translated['output']).stem
+            self.write(self.ledger.path(device, contact), ledger)
+
+    def _capture_history(self, device, contact, prior):
+        history = prior['messages']
+        identifier = prior.get('conversation_id')
+        if identifier:
+            archived = self.root/'diagnostics'/(identifier+'.json')
+            try:
+                value = json.loads(archived.read_text(encoding='utf-8-sig'))
+                candidates = [value] if value.get('device') == device and value.get('phone_number') == contact else []
+            except (OSError, ValueError):
+                candidates = []
+        else:
+            # Migrate complete reads created before the ledger retained translations.
+            candidates = [c for c in conversations(device, self.root/'diagnostics') if c.get('phone_number') == contact][:1]
+        if candidates:
+            translations = {m.get('message_id'): m for m in candidates[0]['messages'] if m.get('message_id')}
+            for message in history:
+                translated = translations.get(message.get('message_id'), {})
+                if translated.get('text') == message.get('text') and translated.get('translation_zh'):
+                    message['translation_zh'] = translated['translation_zh']
+        return history
+
+    def capture_incremental(self, device, base):
+        with self.phone_lock:
+            identity = self.native(device, 'identify', base)
+            contact = identity['phone_number']
+            prior = self.ledger.load(device, contact)
+            snapshot = (prior or {}).get('snapshot') or {}
+            baseline = (prior or {}).get('baseline_complete', False)
+            # Accept the prior release's provably complete, unmodified DB baseline.
+            if prior and not baseline and not prior.get('pending_windows'):
+                baseline = (snapshot.get('history_complete') is True and
+                            snapshot.get('record_count') == len(prior['messages']) and
+                            all(m.get('record_source') == 'backup-snapshot' for m in prior['messages']))
+            if not baseline or not snapshot.get('history_complete') or prior.get('pending_windows'):
+                return self.capture_complete(device, base, expected_contact=contact, reason='baseline-missing')
+            history = self._capture_history(device, contact, prior)
+            window = []
+            reason = None
+            try:
+                current = self.native(device, 'capture', base)
+            except Exception as exc:
+                reason = '气泡遍历未完成：' + str(exc)
+            else:
+                if current.get('phone_number') != contact:
+                    raise ValueError('读取期间会话发生切换，未合并不同号码的消息')
+                window = current['messages']
+                if current.get('unclassified') or current.get('source') != 'native-current' or not current.get('context_fingerprint'):
+                    reason = '存在未确认的气泡内容'
+                else:
+                    messages, aligned = append_verified_window(history, window)
+                    if not aligned:
+                        # An older viewport must not trigger a backup before
+                        # trying once to expose the latest conversation tail.
+                        try:
+                            latest = self.native(device, 'latest', base)
+                        except Exception as exc:
+                            reason = '无法读取最新气泡：' + str(exc)
+                        else:
+                            if latest.get('phone_number') != contact:
+                                raise ValueError('读取期间会话发生切换，未合并不同号码的消息')
+                            current, window = latest, latest['messages']
+                            messages, aligned = append_verified_window(history, window)
+                            if (not aligned or latest.get('unclassified') or latest.get('source') != 'native-current'
+                                    or not latest.get('context_fingerprint')):
+                                reason = '气泡与完整历史无法唯一衔接'
+            if reason:
+                pending = [*prior.get('pending_windows', []),
+                           {'captured': datetime.now().isoformat(), 'messages': window, 'reason': reason}]
+                self.ledger.commit(device, contact, history, window, False, snapshot, pending,
+                                   conversation_id=prior.get('conversation_id'))
+                try:
+                    return self.capture_complete(device, base, expected_contact=contact, reason=reason)
+                except Exception as exc:
+                    raise ValueError(f'增量未确认，数据库补读失败：{exc}；已有历史和本次现场已保留，未报为读取完成') from exc
+            added = len(messages)-len(history)
+            saved = self.ledger.commit(device, contact, messages, window, True, snapshot,
+                                       baseline_complete=True, conversation_id=prior.get('conversation_id'))
+            scope = (f'增量读取完成：新增 {added} 条，累计 {len(messages)} 条；'
+                     f"完整数据库基准 {snapshot['snapshot_at']}；本次气泡已核验衔接，未重新生成数据库快照")
+            value = {**current, 'device': device, 'created': datetime.now().isoformat(),
+                     'messages': saved['messages'], 'native_context': window,
+                     'history_complete': False, 'baseline_complete': True, 'snapshot': snapshot,
+                     'scope': scope, 'incremental': {'mode': 'incremental', 'added': added,
+                                                  'overlap_confirmed': True}}
+            path = self.root/'diagnostics'/('sms-live-'+device[-8:]+'-'+uuid.uuid4().hex+'.json')
+            self.write(path, value)
+            translated = self.translator(path)
+            self._remember_capture(device, contact, translated)
+            return {'conversation_id': Path(translated['output']).stem, 'contact': identity['contact'],
+                    'phone_number': contact, 'message_count': len(messages), 'scope': scope,
+                    'history_complete': False, 'baseline_complete': True, 'mode': 'incremental', 'added': added}
+
+    def capture_complete(self, device, base, *, expected_contact=None, reason='manual-full'):
+        with self.phone_lock:
+            identity = self.native(device, 'identify', base)
+            contact = identity['phone_number']
+            if expected_contact is not None and contact != expected_contact:
+                raise ValueError('读取期间会话发生切换，未读取其他号码的数据库记录')
+            snapshot = self._backup(device, contact)
+            if snapshot is None:
+                raise ValueError('已读取数据库，但未找到当前号码会话；完整读取未完成，原记录保留')
+            # Check the recipient again after the potentially lengthy transfer.
+            after = self.native(device, 'identify', base)
+            if after.get('phone_number') != contact:
+                raise ValueError('读取期间会话发生切换，未替换阅读区记录')
+            messages = snapshot['messages']
+            complete = snapshot.get('history_complete') is True
+            scope = (f"{'完整读取完成' if complete else '完整读取未完成'}：手机本地数据库共 {len(messages)} 条；"
+                     f"快照时间 {snapshot['snapshot_at']}；图片消息保留，重复消息保留")
+            if not complete:
+                scope += f"；{snapshot.get('decode_errors', 0)} 条正文未解析，原始记录已保留"
+            scope += '；范围为该快照中的本地记录，不含已删除或仅在云端尚未下载的消息'
+            value = {**identity, 'device': device, 'messages': messages,
+                     'source': 'backup-snapshot', 'history_complete': complete,
+                     'snapshot': {k:v for k,v in snapshot.items() if k != 'messages'},
+                     'scope': scope, 'created': datetime.now().isoformat()}
+            value['baseline_complete'] = complete
+            value['incremental'] = {'mode': 'database', 'reason': reason}
+            # A complete snapshot must not fabricate a verified live send context.
+            # Acquire it separately; failure does not discard database messages.
+            try:
+                current = self.native(device, 'capture', base)
+                if current.get('phone_number') == contact:
+                    value.update(source='native-current', native_context=current['messages'],
+                                 context_fingerprint=current['context_fingerprint'])
+            except Exception as exc:
+                value['live_context_error'] = str(exc)
+            saved = self.ledger.commit(device, contact, messages, value.get('native_context', []),
+                                       False, value['snapshot'], baseline_complete=complete)
+            value['messages'] = saved['messages']
+            path = self.root/'diagnostics'/('sms-complete-'+device[-8:]+'-'+uuid.uuid4().hex+'.json')
+            self.write(path, value)
+            translated = self.translator(path)
+            self._remember_capture(device, contact, translated)
+            return {'conversation_id': Path(translated['output']).stem, 'contact': identity['contact'],
+                    'phone_number': contact, 'message_count': len(messages), 'scope': scope,
+                    'history_complete': complete, 'baseline_complete': complete, 'mode': 'database'}
+
     def _backup(self, device, contact):
         command = [sys.executable, str(Path(__file__).resolve().parent/'message_backup.py'),
                    '--device', device, '--contact', contact, '--root', str(self.root), '--refresh']
-        process = subprocess.run(command, capture_output=True, timeout=200, encoding='utf-8',
+        try:
+            process = subprocess.run(command, capture_output=True, timeout=650, encoding='utf-8',
                                  creationflags=0x08000000 if sys.platform=='win32' else 0)
+        except subprocess.TimeoutExpired:
+            raise ValueError('手机数据库读取超时，完整读取未完成；请保持手机解锁及 USB 连接后重试') from None
         try:
             result = json.loads(process.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -347,7 +502,8 @@ class WorkspaceService:
                     translation_zh=record.get('chinese') or record.get('back_translation_zh') or '',
                     confirmed_send_id=record['id'])
         window = current['messages'] if current else []
-        messages, aligned = append_window(history, window)
+        align = append_verified_window if ledger and ledger.get('baseline_complete') else append_window
+        messages, aligned = align(history, window)
         if aligned and window:
             index = next((i for i in range(len(messages)-1, -1, -1)
                           if messages[i]['side']=='outgoing' and messages[i]['text']==record['english']), None)
@@ -360,7 +516,8 @@ class WorkspaceService:
             messages = [*history, sent]
         saved = self.ledger.commit(device, contact, messages, window, aligned,
                                   ledger.get('snapshot') if ledger else None,
-                                  ledger.get('pending_windows') if ledger else None)
+                                  ledger.get('pending_windows') if ledger else None,
+                                  baseline_complete=bool(ledger and ledger.get('baseline_complete') and aligned))
         # Reuse existing translations by stable message ID; sending must not wait
         # for a translation API request or a fresh phone backup.
         translated = {m.get('message_id'): m.get('translation_zh') for m in previous['messages']
@@ -379,12 +536,38 @@ class WorkspaceService:
         return {'conversation_id': output.stem,
                 'conversation': self.conversation(device, output.stem)}
 
+    def retranslate_message(self, device, identifier, index, service):
+        conversation = self.conversation(device, identifier)
+        if type(index) is not int or not 0 <= index < len(conversation['messages']):
+            raise ValueError('消息不存在，请刷新记录后重试')
+        original = conversation['messages'][index]
+        text = original.get('text')
+        if original.get('kind') not in (None, 'text') or not isinstance(text, str) or not text.strip():
+            raise ValueError('这条消息没有可翻译的文字')
+        signature = tuple(original.get(key) for key in ('message_id', 'side', 'text', 'time'))
+        result = service.translate_texts(device, conversation['contact'], [text], force=True)
+        translated = result['translations'][0]
+        path = self.root/'diagnostics'/(conversation['id']+'.json')
+        with self.lock:
+            value = json.loads(path.read_text(encoding='utf-8-sig'))
+            if value.get('device') != device or value.get('contact') != conversation['contact']:
+                raise ValueError('会话已变化，请刷新记录后重试')
+            messages = value.get('messages', [])
+            if index >= len(messages) or tuple(messages[index].get(key) for key in ('message_id', 'side', 'text', 'time')) != signature:
+                raise ValueError('消息已变化，请刷新记录后重试')
+            messages[index]['translation_zh'] = translated
+            self.write(path, value)
+        return {'device': device, 'conversation_id': identifier, 'message_index': index,
+                'translation_zh': translated}
+
     def dispatch(self, device, body, base):
         action = body.get('action')
         if action=='profile': return self.profile(device,body.get('conversation_id'))
         if action=='draft': return self.draft(device,body.get('conversation_id'),body.get('chinese'))
         if action=='direct_draft': return self.direct_draft(device,body.get('conversation_id'),body.get('english'))
-        if action=='capture': return self.capture(device,base)
+        if action=='capture':
+            if body.get('full') is True: return self.capture_complete(device,base)
+            return self.capture_incremental(device,base)
         if action=='unread': return self.unread(device,base)
         if action=='notifications': return self.notifications(device,base)
         if action=='open_notification':

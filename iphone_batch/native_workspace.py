@@ -1,4 +1,4 @@
-"""Native current-conversation capture and one confirmed send; no images or coordinates."""
+"""Native conversation capture and verified one-shot sending."""
 import argparse
 import asyncio
 import hashlib
@@ -17,9 +17,12 @@ from native_ui_scan import scan, ScanResult
 from sms_collect import parse_records
 from send_policy import validate_send_text
 from fixed_coordinates import load_profile, check_layout, tap
+from visual_composer import input_point, send_point
 
 ROOT = Path(__file__).resolve().parent / '.device-data'
 common._HOMEFOLDER = ROOT
+from pairing_patch import install as install_pairing
+install_pairing()
 
 
 def digest(messages):
@@ -78,10 +81,23 @@ async def read(service, start_from_last=True):
         scanned = await scan(service, limit=3000, seconds=22, settle=.04,
                              start_from_last=start_from_last)
     if not scanned.complete:
-        raise ValueError('会话遍历未完整确认，未执行新的发送操作')
+        raise ValueError(f'会话遍历未完整确认（{scanned.reason}，已读 {len(scanned)} 个元素），未执行新的发送操作')
     records = [{'caption': item.caption or '', 'platform_identifier': item.platform_identifier}
                for item in scanned]
     return context(records)
+
+
+async def identify_conversation(service):
+    # A header identifies the recipient only. No bubble or history boundary is
+    # inferred, so a photo blocking focus cannot prevent database extraction.
+    scanned = await scan(service, limit=3000, seconds=22, settle=0,
+                         stop_when=lambda item: ', Show Conversation Details, Button' in (item.caption or ''))
+    titles = {item.caption.split(', Show Conversation Details, Button')[0]
+              for item in scanned if ', Show Conversation Details, Button' in (item.caption or '')}
+    if len(titles) != 1 or not phone_key(next(iter(titles))):
+        raise ValueError('未确认当前会话的完整电话号码，请打开目标短信会话后重试')
+    contact = next(iter(titles))
+    return {'contact': contact, 'phone_number': phone_key(contact)}
 
 
 def merge_history_messages(existing, incoming):
@@ -250,9 +266,28 @@ async def focus_current_composer(phone, current, record):
     validate_snapshot(current,record)
     if not composer_is_empty([row['caption'] for row in current['raw_elements']]):
         raise ValueError('当前手机输入框存在草稿，已保留原内容')
-    # Focus within the verified current conversation. Never reopen another page.
-    await phone.keys([0x2B])
-    await phone.keys([])
+    placeholders = ('Message', 'Message, iMessage', 'Message, Text Message', 'Message, Text Message, SMS')
+    inputs = [row for row in current['raw_elements'] if row['caption'] in placeholders]
+    if len(inputs) != 1:
+        raise ValueError('未找到唯一短信输入框，未输入或发送')
+    point = await asyncio.to_thread(input_point, phone)
+    await tap(phone, point)
+
+
+def prepared_send_control(prepared, number, text):
+    if prepared.get('phone_number') != number:
+        raise ValueError('粘贴后收件人发生变化，未执行发送')
+    rows = prepared.get('raw_elements', [])
+    # Accept only known accessibility traits following the exact intended body.
+    suffixes = ('', ', Text Field', ', Text View', ', Text Message, SMS', ', iMessage')
+    inputs = [row for row in rows if row['caption'] in {'Message, '+text+suffix for suffix in suffixes}]
+    if len(inputs) != 1:
+        raise ValueError('英文未成功填入手机短信输入框，或输入内容不一致；未执行发送')
+    buttons = [row for row in rows if row['caption'].startswith('Send, Button')
+               and 'Dimmed' not in row['caption'] and 'Disabled' not in row['caption']]
+    if len(buttons) != 1:
+        raise ValueError('手机发送按钮未就绪或不唯一，未执行发送')
+    return buttons[0]
 
 
 async def open_phone_conversation(service, phone, number):
@@ -337,7 +372,16 @@ async def run(args):
             if args.action == 'history':
                 phone = NativeConversation(); phone.base = args.base
                 return {'device': args.device, **await capture_history(service, phone)}
+            if args.action == 'identify':
+                return {'device': args.device, **await identify_conversation(service)}
             if args.action == 'capture':
+                return {'device': args.device, **await read(service)}
+            if args.action == 'latest':
+                phone = NativeConversation(); phone.base = args.base
+                # A bounded attempt to expose the newest loaded bubbles. If
+                # their checkpoint is still absent, the caller uses the DB.
+                for _ in range(3):
+                    await scroll_history(phone, False)
                 return {'device': args.device, **await read(service)}
             current = await read(service)
             record_path = Path(args.record).resolve()
@@ -365,17 +409,18 @@ async def run(args):
             await asyncio.sleep(.5)
             prepared = await read(service)
             prepared_captions = [r['caption'] for r in prepared['raw_elements']]
-            if prepared['phone_number'] != key or 'Message, '+text not in prepared_captions or not any(c.startswith('Send, Button') for c in prepared_captions):
-                raise ValueError('输入框正文或收件人核验失败，未执行发送')
+            prepared_send_control(prepared, key, text)
             if profile:
                 await check_layout(phone, profile, prepared_captions)
+            else:
+                send_location = await asyncio.to_thread(send_point, phone)
             # Persist before Return. No retry is allowed after this point.
             record['status'] = 'send_requested'
             record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
             if profile:
                 await tap(phone, profile['send'])
             else:
-                await phone.keys([0x28]); await phone.keys([])
+                await tap(phone, send_location)
             await asyncio.sleep(1)
             after = await read(service)
             before_count = sum(m['side']=='outgoing' and m['text']==text for m in current['messages'])
@@ -399,7 +444,7 @@ async def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', required=True)
-    parser.add_argument('--action', choices=['capture', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification'], required=True)
+    parser.add_argument('--action', choices=['capture', 'latest', 'identify', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification'], required=True)
     parser.add_argument('--base'); parser.add_argument('--record')
     parser.add_argument('--phone')
     args = parser.parse_args()

@@ -70,12 +70,13 @@ class DeviceSelectionTests(unittest.TestCase):
         with controller.device_lock('UNIT-TEST-DEVICE'):
             pass
 
-    def test_ten_device_limit(self):
-        devices = [{'udid': str(n)} for n in range(11)]
+    def test_twenty_device_limit(self):
+        devices = [{'udid': str(n)} for n in range(21)]
         with patch.object(controller, 'discover', return_value=devices):
-            self.assertEqual(len(controller.resolve_devices([str(n) for n in range(10)])), 10)
-            with self.assertRaises(ValueError):
-                controller.resolve_devices([str(n) for n in range(11)])
+            for count in (16,20):
+                self.assertEqual(controller.resolve_devices([str(n) for n in range(count)]),[str(n) for n in range(count)])
+            with self.assertRaisesRegex(ValueError,'20'):
+                controller.resolve_devices([str(n) for n in range(21)])
 
 
 class ProcessTests(unittest.IsolatedAsyncioTestCase):

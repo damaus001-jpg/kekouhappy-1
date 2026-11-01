@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import hmac
+import logging
 import time
 from pathlib import Path
 
@@ -72,7 +73,7 @@ def install():
     from pymobiledevice3.remote.core_device import screen_stream
     folder = Path(__file__).resolve().parent / 'web'
     screen_stream.VIEWER_HTML = (folder / 'viewer.html').read_bytes()
-    screen_stream.VIEWER_JS_TEMPLATE = (folder / 'viewer.js').read_bytes() + b'\n' + (folder / 'translation.js').read_bytes()
+    screen_stream.VIEWER_JS_TEMPLATE = (folder / 'pointer_input.js').read_bytes() + b'\n' + (folder / 'viewer.js').read_bytes() + b'\n' + (folder / 'translation.js').read_bytes()
     if getattr(screen_stream.ScreenStreamServer, '_batch_patched', False):
         return
     screen_stream.ScreenStreamServer._batch_patched = True
@@ -109,7 +110,7 @@ def install():
             return await original(self, ReplayReader(first, reader), writer)
         device_token = token_for(self)
         path = parts[1].partition('?')[0]
-        special = path in ('/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation')
+        special = path in ('/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-key')
         restricted = device_token and (parts[0] == 'POST' or path.startswith('/clipboard') or path == '/host-clipboard')
         if not special and not restricted:
             return await original(self, ReplayReader(first, reader), writer)
@@ -139,6 +140,50 @@ def install():
                 or self._refuse_request(headers) is not None):
             return await reply(writer, 403, {'error': 'same-origin localhost access required'})
         try:
+            if path in ('/manual-touch', '/manual-home', '/manual-key'):
+                if parts[0] != 'POST':
+                    return await reply(writer, 405, {'error': 'POST required'})
+                length = int(headers.get('content-length', '0'))
+                if not 0 < length <= 1024:
+                    return await reply(writer, 400, {'error': 'invalid request size'})
+                data = json.loads(await asyncio.wait_for(reader.readexactly(length), 5))
+                if not isinstance(data, dict):
+                    return await reply(writer, 400, {'error': 'invalid request'})
+                if path == '/manual-touch':
+                    if (data.get('type') not in ('contact', 'release')
+                            or any(type(data.get(key)) is not int or not 0 <= data[key] <= 65535 for key in ('x', 'y'))
+                            or not isinstance(data.get('settle', False), bool)):
+                        return await reply(writer, 400, {'error': 'invalid touch'})
+                if path == '/manual-key':
+                    usages = data.get('usages')
+                    if not isinstance(usages, list) or len(usages) > 16 or any(type(key) is not int or not 0 <= key <= 255 for key in usages):
+                        return await reply(writer, 400, {'error': 'invalid keyboard usages'})
+                async with input_lock(self):
+                    if not active(self):
+                        return await reply(writer, 403, {'error': 'device is read-only'})
+                    await self._ensure_hid()
+                    if path == '/manual-home':
+                        code, _ = await originals['_handle_button'](self, b'{"name":"home","state":"press"}')
+                    elif path == '/manual-key':
+                        code, _ = await originals['_handle_key'](self, json.dumps({'usages': usages}).encode())
+                    else:
+                        if data['type'] == 'release' and data.get('settle'):
+                            contact = json.dumps({'type': 'contact', 'x': data['x'], 'y': data['y']}).encode()
+                            code, _ = await originals['_handle_touch'](self, contact)
+                            if code != 200:
+                                return await reply(writer, code, {'error': 'touch failed'})
+                            await asyncio.sleep(.08)
+                            await originals['_handle_touch'](self, contact)
+                        payload = json.dumps({key: data[key] for key in ('type', 'x', 'y')}).encode()
+                        code, _ = await originals['_handle_touch'](self, payload)
+                        if code == 200:
+                            self._batch_contact = data if data['type'] == 'contact' else None
+                return await reply(writer, code, {'ok': code == 200})
+            if path == '/jpeg.bin':
+                if parts[0] != 'GET':
+                    return await reply(writer, 405, {'error': 'GET required'})
+                from video_compat import serve_jpeg
+                return await serve_jpeg(self._http_port, writer, self)
             if path == '/translation':
                 if parts[0] not in ('GET', 'POST'):
                     return await reply(writer, 405, {'error': 'GET or POST required'})
@@ -245,6 +290,14 @@ def install():
         except (ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
             return await reply(writer, 400, {'error': 'invalid request'})
         except Exception:
+            if path in ('/manual-touch', '/manual-home', '/manual-key'):
+                logging.getLogger(__name__).exception('Manual phone control failed: %s', path)
+                # Never replay an input: a failed release may already have sent.
+                try:
+                    await asyncio.wait_for(self._stop_hid(), 2)
+                except Exception:
+                    pass
+                return await reply(writer, 500, {'error': '手机触控服务不可用，请检查连接和开发者服务'})
             return await reply(writer, 500, {'error': 'Windows clipboard unavailable; retry'})
 
     async def handle(self, reader, writer):

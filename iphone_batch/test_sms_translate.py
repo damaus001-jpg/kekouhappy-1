@@ -9,6 +9,31 @@ from text_translation import TextCache, TextTranslationService
 
 
 class TranslationFileTests(unittest.TestCase):
+    def test_incremental_translates_only_missing_text_without_history_batch_delays(self):
+        class Service:
+            last_api_request=0
+            calls=[]
+            def translate_texts(self,device,contact,texts):
+                self.calls.append(texts)
+                return {'translations':['新译文']*len(texts),'cache_hits':0,'api_requests':1}
+            def status(self):return {'model':'test'}
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'sms.json'
+            messages=[{'kind':'text','text':str(i),'translation_zh':'旧译文'} for i in range(180)]
+            messages.append({'kind':'text','text':'New message'})
+            path.write_text(json.dumps({'device':'one','contact':'contact','messages':messages}),encoding='utf-8')
+            service=Service()
+            with patch('sms_translate.time.sleep') as sleep:
+                result=translate_file(path,service)
+            self.assertEqual(service.calls,[['New message']]);sleep.assert_not_called()
+            self.assertEqual(result['reused_translations'],180)
+            self.assertEqual(result['translated_this_read'],1)
+            service.calls.clear()
+            with patch('sms_translate.time.sleep') as sleep:
+                second=translate_file(result['output'],service)
+            self.assertEqual(service.calls,[]);sleep.assert_not_called()
+            self.assertEqual(second['api_requests'],0)
+
     def test_preserves_occurrences_skips_images_escapes_html_and_reuses_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
