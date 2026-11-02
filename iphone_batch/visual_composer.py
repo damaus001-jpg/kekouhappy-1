@@ -76,9 +76,14 @@ def send_point_in_frame(image):
     contours,_ = cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
     for contour in contours:
         cx,cy,cw,ch = cv2.boundingRect(contour)
-        if (.025*width < cw < .15*width and .7 < cw/ch < 1.3
+        # Messages also renders Send as a short horizontal capsule. Require
+        # a rounded, compact shape inside the composer, including that layout.
+        perimeter = cv2.arcLength(contour, True)
+        rounded = len(cv2.approxPolyDP(contour, .025*perimeter, True)) >= 6
+        if (.025*width < cw < .15*width and .7 < cw/ch < 1.8 and rounded
+                and .35*h < ch < 1.3*h
                 and cx+cw/2 > x+.75*w and abs(cy+ch/2-(y+h/2)) < .6*h
-                and cx+cw/2 < x+w+.02*width and cv2.contourArea(contour) > .45*cw*ch):
+                and cx+cw/2 < x+w+.02*width and cv2.contourArea(contour) > .55*cw*ch):
             candidates.append((cx,cy,cw,ch))
     if len(candidates) != 1:
         raise ValueError('未定位到唯一可用的手机发送按钮，未执行发送')

@@ -8,10 +8,12 @@ from pymobiledevice3.remote.core_device import screen_stream
 
 viewer_patch.install()
 
-class ClipboardHTTPTests(unittest.IsolatedAsyncioTestCase):
+class ViewerHTTPFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.instance = object.__new__(screen_stream.ScreenStreamServer)
         self.instance._password = None
+        self.instance._active_service = object()  # fake media session; phone services are mocked
+        self.instance._stream_dirty = False
         self.server = await asyncio.start_server(self.instance._handle_http, '127.0.0.1', 0)
         self.port = self.server.sockets[0].getsockname()[1]
         self.instance._http_port = self.port
@@ -42,6 +44,9 @@ class ClipboardHTTPTests(unittest.IsolatedAsyncioTestCase):
         await writer.wait_closed()
         head, data = response.split(b'\r\n\r\n',1)
         return int(head.split()[1]), data
+
+
+class ClipboardHTTPTests(ViewerHTTPFixture):
 
     async def test_compatible_video_rejects_cross_origin_and_writes(self):
         with patch('video_compat.serve_jpeg') as serve:
@@ -95,6 +100,54 @@ class ClipboardHTTPTests(unittest.IsolatedAsyncioTestCase):
         code,_=await self.request('POST',{'usages':[]},path='/manual-key')
         self.assertEqual(code,403)
         self.instance._ensure_hid.assert_not_awaited()
+
+    async def test_health_is_same_origin_control_only_and_emits_no_pressed_key(self):
+        self.instance._ensure_hid = AsyncMock()
+        self.instance._ensure_keyboard = AsyncMock()
+        self.instance._kb_service_id = 9
+        self.instance._uhs = SimpleNamespace(send_keyboard=AsyncMock())
+        self.instance._batch_token = 'token'
+        self.instance._batch_active = False
+        code, _ = await self.request('POST', {}, path='/input-health')
+        self.assertEqual(code, 403)
+        self.instance._batch_active = True
+        code, _ = await self.request('POST', {}, path='/input-health', origin='https://example.com')
+        self.assertEqual(code, 403)
+        code, _ = await self.request(path='/input-health')
+        self.assertEqual(code, 405)
+        self.instance._ensure_hid.assert_not_awaited()
+        code, data = await self.request('POST', {}, path='/input-health')
+        self.assertEqual(code, 200)
+        self.assertTrue(json.loads(data)['ok'])
+        self.instance._uhs.send_keyboard.assert_awaited_once_with(9, [])
+
+    async def test_input_queued_before_recovery_is_not_executed(self):
+        self.instance._ensure_hid = AsyncMock()
+        self.instance._batch_input_lock = asyncio.Lock()
+        await self.instance._batch_input_lock.acquire()
+        request = asyncio.create_task(self.request('POST', {'usages':[40]}, path='/manual-key'))
+        for _ in range(10):
+            await asyncio.sleep(.005)
+        self.instance._batch_input_generation = 1
+        self.instance._batch_input_lock.release()
+        code, _ = await request
+        self.assertEqual(code, 409)
+        self.instance._ensure_hid.assert_not_awaited()
+
+    async def test_recovering_rejects_new_input_without_queuing(self):
+        self.instance._batch_recovering = True
+        self.instance._ensure_hid = AsyncMock()
+        code, _ = await self.request('POST', {'usages':[40]}, path='/manual-key')
+        self.assertEqual(code, 503)
+        self.instance._ensure_hid.assert_not_awaited()
+
+    async def test_timed_out_input_clears_connection_and_is_not_replayed(self):
+        self.instance._ensure_hid = AsyncMock(side_effect=asyncio.TimeoutError())
+        self.instance._stop_hid = AsyncMock()
+        code, _ = await self.request('POST', {'usages':[40]}, path='/manual-key')
+        self.assertEqual(code, 503)
+        self.instance._stop_hid.assert_awaited_once()
+        self.instance._ensure_hid.assert_awaited_once()
 
     async def test_manual_input_rejects_read_only_and_cross_origin(self):
         self.instance._batch_token = 'test-token'
@@ -152,6 +205,15 @@ class ClipboardHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code,200)
         self.assertIn(b'lang="zh-CN"',data)
         self.assertIn('clipboard-copy'.encode(),data)
+
+    async def test_viewer_script_refreshes_without_restarting_device(self):
+        self.instance._audio_default_on = False
+        self.instance._compensate = False
+        with patch('viewer_patch.viewer_script', return_value=b'const newest = true;') as read:
+            code, data = await self.request(path='/viewer.js')
+            self.assertEqual(code, 200)
+            self.assertIn(b'const newest = true;', data)
+            read.assert_called_once()
 
 if __name__ == '__main__':
     unittest.main()

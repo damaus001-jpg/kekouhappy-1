@@ -1,8 +1,10 @@
-// Dashboard previews stay live; only the selected child accepts input or clipboard writes.
+// The dashboard mounts only the selected preview; device connections stay warm.
 const batchManaged = new URLSearchParams(location.search).has('batch');
 let batchActive = !batchManaged;
 let batchVisible = !batchManaged;
 let compatibleVideoAbort = null;
+let inputReady = !batchManaged, inputHealthPaused = false, inputMonitor = null, inputEpoch = 0;
+function controlAvailable() { return batchActive && inputReady; }
 if (batchManaged) document.body.classList.add('batch-preview');
 window.AUDIO_DEFAULT_ON = __AUDIO_DEFAULT_ON__;
 // Resolution-collapse compensation default (server --compensate flag), with a
@@ -177,32 +179,37 @@ function touchCoords(e) {
 }
 
 async function postJson(path, payload) {
-    if (!batchActive) return;
+    if (!controlAvailable()) return;
     // Note: do NOT pass {keepalive: true} -- that triggers fetch's
     // "send during page unload" path which has body-size limits and
     // queues requests differently; we want plain HTTP/1.1 keep-alive
     // (the default) so pointer events stream over one TCP.
     try {
-        await fetch(path, {
+        if (path === '/key') path = '/manual-key';
+        if (path === '/touch') path = '/manual-touch';
+        if (path === '/button' && payload.name === 'home' && payload.state === 'press') path = '/manual-home';
+        const response = await fetch(path, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(5000),
         });
-    } catch (e) { log(path + ' err: ' + e.message); }
+        if (!response.ok) throw Error('控制输入失败（HTTP ' + response.status + '）');
+    } catch (e) { log(path + ' err: ' + e.message); inputMonitor?.invalidate(); }
 }
 
 let activePointer = null;
 let lastCoords = {x: 0, y: 0};
 const pointerInput = new PointerInput(async payload => {
-    if (!batchActive) throw Error('当前手机控制已暂停');
+    if (!controlAvailable()) throw Error('当前手机控制连接尚未就绪');
     const response = await fetch('/manual-touch', {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload), signal: AbortSignal.timeout(5000)});
     if (!response.ok) throw Error('触摸操作失败，请检查手机连接');
-}, error => {activePointer = null; log(error.message);});
+}, error => {activePointer = null; log(error.message); inputMonitor?.invalidate();});
 const wheelInput = new WheelInput(pointerInput, {
     bounds: () => canvas.getBoundingClientRect(),
     coords: touchCoords,
-    enabled: () => batchActive && activePointer === null,
+    enabled: () => controlAvailable() && activePointer === null,
 });
 canvas.addEventListener('wheel', event => wheelInput.handle(event), {passive: false});
 // Drag-outside-then-release leaves the device-side contact stuck if we
@@ -218,7 +225,7 @@ function releaseActive() {
     pointerInput.end(lastCoords);
 }
 canvas.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || !batchActive) return;   // primary button only
+    if (e.button !== 0 || !controlAvailable()) return;   // primary button only
     wheelInput.stop();
     e.preventDefault();
     // preventDefault on pointerdown also suppresses the implicit
@@ -410,7 +417,8 @@ function postKeys() {
     // Serialize POSTs so the device sees them in order even when the
     // browser fires keydown bursts faster than the HTTP round-trip.
     const snapshot = deviceKeyUsages(pressedUsages, windowsEditKeys.size > 0);
-    lastKeyPost = lastKeyPost.then(() => postJson('/key', {usages: snapshot}));
+    const epoch = inputEpoch;
+    lastKeyPost = lastKeyPost.then(() => {if (epoch === inputEpoch) return postJson('/key', {usages: snapshot});});
 }
 
 // Gate host-keystroke forwarding on canvas focus: keys flow to the
@@ -419,7 +427,7 @@ function postKeys() {
 // the page chrome. No persisted toggle to flip — the focus is the
 // state, and the #kb-indicator badge mirrors it visually.
 const kbIndicator = document.getElementById('kb-indicator');
-function keyboardCaptureOn() { return batchActive && document.activeElement === canvas; }
+function keyboardCaptureOn() { return controlAvailable() && document.activeElement === canvas; }
 function releaseAllKeys() {
     windowsEditKeys.clear();
     if (pressedUsages.size) {
@@ -1414,6 +1422,52 @@ window.addEventListener('focus', async () => {
 });
 try { if (localStorage.getItem('clipboardSync') === 'true') setClipboardSync(true); } catch (e) {}
 
+async function readCompatibleFrames(reader, onFrame, decodeImage = createImageBitmap) {
+    let buffer = new Uint8Array(0), latestImage = null, decodeTask = null;
+    let running = true, failure = null;
+    async function decodeLatest() {
+        while (running && latestImage) {
+            const image = latestImage;
+            latestImage = null;
+            const frame = await decodeImage(new Blob([image], {type: 'image/jpeg'}));
+            if (!running) { frame.close(); return; }
+            onFrame(frame);
+        }
+    }
+    function startDecode() {
+        if (!latestImage || decodeTask) return;
+        decodeTask = decodeLatest().catch(error => {
+            failure = error;
+            return reader.cancel().catch(() => {});
+        }).finally(() => {
+            decodeTask = null;
+            if (running && !failure) startDecode();
+        });
+    }
+    try {
+        while (true) {
+            const {value, done} = await reader.read();
+            if (failure) throw failure;
+            if (done) throw Error('视频连接已断开');
+            const merged = new Uint8Array(buffer.length + value.length);
+            merged.set(buffer); merged.set(value, buffer.length); buffer = merged;
+            while (buffer.length >= 4) {
+                const size = new DataView(buffer.buffer, buffer.byteOffset, 4).getUint32(0);
+                if (!size || size > 8 * 1024 * 1024) throw Error('视频帧格式无效');
+                if (buffer.length < size + 4) break;
+                latestImage = buffer.slice(4, size + 4); buffer = buffer.subarray(size + 4);
+            }
+            // Keep draining the network while a bitmap decodes. Retain only
+            // one waiting JPEG, so slow decoding cannot queue seconds of video.
+            startDecode();
+        }
+    } finally {
+        running = false;
+        latestImage = null;
+        if (decodeTask) await decodeTask;
+    }
+}
+
 async function runCompatibleVideo() {
     log('使用兼容视频解码');
     while (true) {
@@ -1423,29 +1477,14 @@ async function runCompatibleVideo() {
             const response = await fetch('/jpeg.bin', {cache: 'no-store', signal: compatibleVideoAbort.signal});
             if (!response.ok) throw Error('视频服务暂不可用');
             const reader = response.body.getReader();
-            let buffer = new Uint8Array(0);
             try {
-                while (true) {
-                    const {value, done} = await reader.read();
-                    if (done) throw Error('视频连接已断开');
-                    const merged = new Uint8Array(buffer.length + value.length);
-                    merged.set(buffer); merged.set(value, buffer.length); buffer = merged;
-                    let latestImage = null;
-                    while (buffer.length >= 4) {
-                        const size = new DataView(buffer.buffer, buffer.byteOffset, 4).getUint32(0);
-                        if (!size || size > 8 * 1024 * 1024) throw Error('视频帧格式无效');
-                        if (buffer.length < size + 4) break;
-                        latestImage = buffer.slice(4, size + 4); buffer = buffer.subarray(size + 4);
-                    }
-                    if (latestImage) {
-                        const frame = await createImageBitmap(new Blob([latestImage], {type: 'image/jpeg'}));
-                        Object.defineProperties(frame, {displayWidth: {value: frame.width}, displayHeight: {value: frame.height}});
-                        if (pendingFrame) pendingFrame.close();
-                        pendingFrame = frame;
-                        if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(drawPending); }
-                        frameCount++;
-                    }
-                }
+                await readCompatibleFrames(reader, frame => {
+                    Object.defineProperties(frame, {displayWidth: {value: frame.width}, displayHeight: {value: frame.height}});
+                    if (pendingFrame) pendingFrame.close();
+                    pendingFrame = frame;
+                    if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(drawPending); }
+                    frameCount++;
+                });
             } finally { await reader.cancel().catch(() => {}); }
         } catch (error) { if (error.name === 'AbortError') continue; log('兼容视频：' + error.message + '，正在重连'); }
         compatibleVideoAbort = null;
@@ -1619,6 +1658,25 @@ async function run() {
                 needsResync = true;
                 continue;
             }
+            // Prefer current video over playing a backlog. HEVC deltas depend
+            // on earlier frames: reset and wait for a fresh key, never drop an
+            // arbitrary delta and then continue using its dependent frames.
+            // Network reads can contain a healthy burst. Give decoder tasks a
+            // display interval to drain before treating the burst as overload.
+            if (decoder.decodeQueueSize >= 6) {
+                await new Promise(resolve => setTimeout(resolve, 16));
+            }
+            if (decoder.decodeQueueSize >= 6) {
+                try { decoder.close(); } catch (e) {}
+                decoder = buildDecoder();
+                decoder.configure(decoderConfig);
+                needsResync = true;
+                if (pendingFrame) { pendingFrame.close(); pendingFrame = null; }
+                fetch('/pli', {method: 'POST', cache: 'no-store'})
+                    .catch(err => log('/pli err: ' + err.message));
+                log('解码积压，等待新关键帧');
+                continue;
+            }
             try {
                 decoder.decode(new EncodedVideoChunk({
                     type: (type === 0 || type === 2) ? 'key' : 'delta',
@@ -1634,22 +1692,48 @@ async function run() {
         }
     }
 }
+inputMonitor = new InputHealthMonitor({
+    request: async () => {
+        const response = await fetch('/input-health', {method: 'POST',
+            headers: {'Content-Type': 'application/json'}, body: '{}', signal: AbortSignal.timeout(30000)});
+        if (!response.ok) throw Error('控制连接检查失败（HTTP ' + response.status + '）');
+        return response.json();
+    },
+    eligible: () => !inputHealthPaused && !document.hidden && activePointer === null &&
+        !pointerInput.running && !wheelInput.active && pressedUsages.size === 0,
+    changed: state => {
+        if (!state.ready && inputReady) inputEpoch++;
+        inputReady = state.ready;
+        if (!state.ready) { pressedUsages.clear(); windowsEditKeys.clear(); }
+        if (state.state === 'unavailable') log('控制连接不可用；可点击设备列表刷新重试');
+        if (state.state === 'ready' && state.recovered) log('控制连接已自动恢复');
+        if (batchManaged) parent.postMessage({type: 'input-health-result', ...state},
+            new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070');
+    },
+});
+if (!batchManaged) inputMonitor.setActive(true);
 run().catch(e => log('fatal: ' + e.message));
 
 if (batchManaged) {
     window.addEventListener('message', event => {
         if (event.source !== parent || event.origin !== (new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070')) return;
+        if (event.data?.type === 'input-recover') {
+            if (batchActive) inputMonitor.check(true);
+            return;
+        }
         if (event.data?.type === 'device-home') {
-            if (!batchActive) return;
+            if (!controlAvailable()) return;
             releaseActive();
             pointerInput.idle().then(() => fetch('/manual-home', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}', signal: AbortSignal.timeout(5000)}))
                 .then(response => {if (!response.ok) throw Error('返回手机主页失败'); parent.postMessage({type: 'device-home-result', ok: true}, event.origin);})
-                .catch(error => parent.postMessage({type: 'device-home-result', ok: false, error: error.message}, event.origin));
+                .catch(error => {inputMonitor.invalidate(); parent.postMessage({type: 'device-home-result', ok: false, error: error.message}, event.origin);});
             return;
         }
         if (event.data?.type !== 'device-focus') return;
         if (!event.data.active) releaseActive();
         batchActive = event.data.active === true;
+        inputHealthPaused = event.data.working === true;
+        inputMonitor.setActive(batchActive);
         batchVisible = typeof event.data.visible === 'boolean' ? event.data.visible : batchActive;
         if (!batchVisible && compatibleVideoAbort) compatibleVideoAbort.abort();
         // The dashboard owns the controls; keep its embedded viewer screen-only.

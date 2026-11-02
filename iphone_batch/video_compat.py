@@ -167,10 +167,22 @@ class JpegHub:
             writer.close()
 
 
-async def serve_jpeg(port, writer, owner=None):
+async def serve_jpeg(port, writer, owner=None, reader=None):
     hub = getattr(owner, '_jpeg_hub', None)
     if hub is None or hub.stopped.is_set():
         hub = JpegHub(port)
         if owner is not None:
             owner._jpeg_hub = hub
-    await hub.serve(writer)
+    if reader is None:
+        return await hub.serve(writer)
+    # A static phone may emit no new frames. Watch the client's EOF as well
+    # as writes, so closing its preview stops decoding immediately even then.
+    serving = asyncio.create_task(hub.serve(writer))
+    disconnected = asyncio.create_task(reader.read(1))
+    try:
+        await asyncio.wait((serving, disconnected), return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (serving, disconnected):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(serving, disconnected, return_exceptions=True)

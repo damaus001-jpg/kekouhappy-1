@@ -3,9 +3,27 @@ import unittest
 from unittest.mock import patch, AsyncMock
 import pairing_patch
 from pymobiledevice3 import lockdown
+from pymobiledevice3.exceptions import NotPairedError
+from types import SimpleNamespace
 
 
 class PairingCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def test_background_reconnection_never_autopairs(self):
+        original = AsyncMock(); original._project_existing_only = False
+        with patch.object(lockdown.LockdownClient, '_handle_autopair', original):
+            pairing_patch.prevent_automatic_pairing()
+            with self.assertRaises(NotPairedError):
+                await lockdown.LockdownClient._handle_autopair(SimpleNamespace(paired=False), True, 10)
+            self.assertFalse(original.await_args.args[1])
+
+    async def test_existing_trust_is_used_and_explicit_pair_can_connect_unpaired(self):
+        original = AsyncMock(); original._project_existing_only = False
+        with patch.object(lockdown.LockdownClient, '_handle_autopair', original):
+            pairing_patch.prevent_automatic_pairing()
+            await lockdown.LockdownClient._handle_autopair(SimpleNamespace(paired=True), True, 10)
+            await lockdown.LockdownClient._handle_autopair(SimpleNamespace(paired=False), False, 10)
+            self.assertTrue(all(call.args[1] is False for call in original.await_args_list))
+
     async def test_project_record_is_preferred_without_repairing(self):
         record={key:'present' for key in ('HostID','HostPrivateKey','HostCertificate','SystemBUID')}
         fallback=AsyncMock();fallback._project_pairing=False

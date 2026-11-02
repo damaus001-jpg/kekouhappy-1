@@ -1,8 +1,8 @@
 ﻿import asyncio
 import json
-from test_viewer_patch import ClipboardHTTPTests
+from test_viewer_patch import ViewerHTTPFixture
 
-class BatchControlHTTPTests(ClipboardHTTPTests):
+class BatchControlHTTPTests(ViewerHTTPFixture):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.instance._batch_token='unit-test'

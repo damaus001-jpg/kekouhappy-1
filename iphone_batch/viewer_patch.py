@@ -6,8 +6,14 @@ import hmac
 import logging
 import time
 from pathlib import Path
+from input_health import check_input, clear_input, record_input, ensure_input_services
+from video_idle import ensure_idle_monitor, stream_until_disconnect, touch_media, wake_media
 
 MAX_TEXT_BYTES = 1024 * 1024
+
+
+def viewer_script(folder):
+    return b'\n'.join((folder / name).read_bytes() for name in ('pointer_input.js', 'input_health.js', 'viewer.js'))
 
 
 class ReplayReader:
@@ -60,7 +66,7 @@ def windows_clipboard(text=None, *, write=False):
 async def reply(writer, code, data):
     payload = json.dumps(data, ensure_ascii=False).encode('utf-8')
     reason = {200: 'OK', 400: 'Bad Request', 403: 'Forbidden', 405: 'Method Not Allowed',
-              413: 'Payload Too Large', 500: 'Internal Server Error'}[code]
+              409: 'Conflict', 413: 'Payload Too Large', 500: 'Internal Server Error', 503: 'Service Unavailable'}[code]
     writer.write((f'HTTP/1.1 {code} {reason}\r\nContent-Type: application/json; charset=utf-8\r\n'
                   f'Cache-Control: no-store\r\nContent-Length: {len(payload)}\r\nConnection: close\r\n\r\n').encode() + payload)
     await writer.drain()
@@ -73,10 +79,11 @@ def install():
     from pymobiledevice3.remote.core_device import screen_stream
     folder = Path(__file__).resolve().parent / 'web'
     screen_stream.VIEWER_HTML = (folder / 'viewer.html').read_bytes()
-    screen_stream.VIEWER_JS_TEMPLATE = (folder / 'pointer_input.js').read_bytes() + b'\n' + (folder / 'viewer.js').read_bytes() + b'\n' + (folder / 'translation.js').read_bytes()
+    screen_stream.VIEWER_JS_TEMPLATE = viewer_script(folder)
     if getattr(screen_stream.ScreenStreamServer, '_batch_patched', False):
         return
     screen_stream.ScreenStreamServer._batch_patched = True
+    screen_stream.ScreenStreamServer._ensure_hid = ensure_input_services
     token = os.environ.get('IPHONE_BATCH_CONTROL_TOKEN')
     def token_for(instance):
         return getattr(instance, '_batch_token', token)
@@ -88,16 +95,28 @@ def install():
         if not hasattr(instance, '_batch_input_lock'):
             instance._batch_input_lock = asyncio.Lock()
         return instance._batch_input_lock
+    from video_idle import install as install_idle_video
+    install_idle_video(screen_stream.ScreenStreamServer, input_lock)
     for name, original_action in originals.items():
         def wrap_action(action, kind):
             async def guarded(instance, body):
+                generation = getattr(instance, '_batch_input_generation', 0)
+                if getattr(instance, '_batch_recovering', False):
+                    return 503, b'input connection recovering'
+                if active(instance):
+                    await asyncio.wait_for(wake_media(instance), 12)
                 async with input_lock(instance):
                     if not active(instance):
                         return 403, b'device is read-only'
-                    result = await action(instance, body)
-                    if kind == '_handle_touch' and result[0] == 200:
-                        data = json.loads(body)
-                        instance._batch_contact = data if data['type'] == 'contact' else None
+                    if generation != getattr(instance, '_batch_input_generation', 0):
+                        return 409, b'input connection changed; repeat manually'
+                    try:
+                        result = await asyncio.wait_for(action(instance, body), 4)
+                    except Exception:
+                        await clear_input(instance)
+                        raise
+                    if result[0] == 200:
+                        record_input(instance, kind, json.loads(body))
                     return result
             return guarded
         setattr(screen_stream.ScreenStreamServer, name, wrap_action(original_action, name))
@@ -110,10 +129,29 @@ def install():
             return await original(self, ReplayReader(first, reader), writer)
         device_token = token_for(self)
         path = parts[1].partition('?')[0]
-        special = path in ('/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-key')
+        async def delegate(replay):
+            serving = original(self, replay, writer)
+            if path in ('/stream.bin', '/audio.bin'):
+                return await stream_until_disconnect(serving, reader)
+            return await serving
+        async def prepare_media():
+            try:
+                await asyncio.wait_for(wake_media(self), 12)
+                return True
+            except Exception as error:
+                logging.getLogger(__name__).warning('Media wake failed: port=%s error=%s', self._http_port, type(error).__name__)
+                await reply(writer, 503, {'error': '视频或控制服务正在准备，请稍后重试'})
+                return False
+        if parts[0] == 'GET' and path in ('/codec', '/stream.bin', '/audio.bin'):
+            if not await prepare_media():
+                return
+        if path == '/viewer.js':
+            # Frontend fixes should need only F5, not a device reconnection.
+            screen_stream.VIEWER_JS_TEMPLATE = viewer_script(folder)
+        special = path in ('/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-key', '/input-health')
         restricted = device_token and (parts[0] == 'POST' or path.startswith('/clipboard') or path == '/host-clipboard')
         if not special and not restricted:
-            return await original(self, ReplayReader(first, reader), writer)
+            return await delegate(ReplayReader(first, reader))
         prefix = bytearray(first)
         headers = {}
         for _ in range(100):
@@ -140,6 +178,20 @@ def install():
                 or self._refuse_request(headers) is not None):
             return await reply(writer, 403, {'error': 'same-origin localhost access required'})
         try:
+            if path == '/input-health':
+                if parts[0] != 'POST':
+                    return await reply(writer, 405, {'error': 'POST required'})
+                if not active(self):
+                    return await reply(writer, 403, {'error': 'device is read-only'})
+                length = int(headers.get('content-length', '0'))
+                if not 0 < length <= 256:
+                    return await reply(writer, 400, {'error': 'invalid health request'})
+                if json.loads(await asyncio.wait_for(reader.readexactly(length), 3)) != {}:
+                    return await reply(writer, 400, {'error': 'invalid health request'})
+                if not await prepare_media():
+                    return
+                result = await check_input(self, input_lock(self), lambda: active(self))
+                return await reply(writer, 200, result)
             if path in ('/manual-touch', '/manual-home', '/manual-key'):
                 if parts[0] != 'POST':
                     return await reply(writer, 405, {'error': 'POST required'})
@@ -158,32 +210,47 @@ def install():
                     usages = data.get('usages')
                     if not isinstance(usages, list) or len(usages) > 16 or any(type(key) is not int or not 0 <= key <= 255 for key in usages):
                         return await reply(writer, 400, {'error': 'invalid keyboard usages'})
+                generation = getattr(self, '_batch_input_generation', 0)
+                if getattr(self, '_batch_recovering', False):
+                    return await reply(writer, 503, {'error': '控制连接恢复中，请稍后重新操作'})
+                if not active(self):
+                    return await reply(writer, 403, {'error': 'device is read-only'})
+                if not await prepare_media():
+                    return
                 async with input_lock(self):
                     if not active(self):
                         return await reply(writer, 403, {'error': 'device is read-only'})
-                    await self._ensure_hid()
-                    if path == '/manual-home':
-                        code, _ = await originals['_handle_button'](self, b'{"name":"home","state":"press"}')
-                    elif path == '/manual-key':
-                        code, _ = await originals['_handle_key'](self, json.dumps({'usages': usages}).encode())
-                    else:
+                    if generation != getattr(self, '_batch_input_generation', 0):
+                        return await reply(writer, 409, {'error': '控制连接已重建，请重新操作'})
+                    async def execute():
+                        await self._ensure_hid()
+                        if path == '/manual-home':
+                            return await originals['_handle_button'](self, b'{"name":"home","state":"press"}')
+                        if path == '/manual-key':
+                            return await originals['_handle_key'](self, json.dumps({'usages': usages}).encode())
                         if data['type'] == 'release' and data.get('settle'):
                             contact = json.dumps({'type': 'contact', 'x': data['x'], 'y': data['y']}).encode()
-                            code, _ = await originals['_handle_touch'](self, contact)
+                            code, message = await originals['_handle_touch'](self, contact)
                             if code != 200:
-                                return await reply(writer, code, {'error': 'touch failed'})
+                                return code, message
                             await asyncio.sleep(.08)
                             await originals['_handle_touch'](self, contact)
                         payload = json.dumps({key: data[key] for key in ('type', 'x', 'y')}).encode()
-                        code, _ = await originals['_handle_touch'](self, payload)
+                        return await originals['_handle_touch'](self, payload)
+                    try:
+                        code, _ = await asyncio.wait_for(execute(), 4)
                         if code == 200:
-                            self._batch_contact = data if data['type'] == 'contact' else None
+                            kind = {'/manual-touch': '_handle_touch', '/manual-key': '_handle_key', '/manual-home': '_handle_button'}[path]
+                            record_input(self, kind, data)
+                    except Exception:
+                        await clear_input(self)
+                        raise
                 return await reply(writer, code, {'ok': code == 200})
             if path == '/jpeg.bin':
                 if parts[0] != 'GET':
                     return await reply(writer, 405, {'error': 'GET required'})
                 from video_compat import serve_jpeg
-                return await serve_jpeg(self._http_port, writer, self)
+                return await serve_jpeg(self._http_port, writer, self, reader=reader)
             if path == '/translation':
                 if parts[0] not in ('GET', 'POST'):
                     return await reply(writer, 405, {'error': 'GET or POST required'})
@@ -222,18 +289,22 @@ def install():
                     self._batch_active = False
                     while not self._hid_queue.empty():
                         self._hid_queue.get_nowait()
-                    contact = getattr(self, '_batch_contact', None)
-                    if contact is not None:
-                        await originals['_handle_touch'](self, json.dumps({**contact, 'type':'release'}).encode())
-                        self._batch_contact = None
-                    if self._uhs is not None and self._kb_service_id is not None:
-                        await self._uhs.send_keyboard(self._kb_service_id, [])
+                    try:
+                        contact = getattr(self, '_batch_contact', None)
+                        if contact is not None:
+                            await originals['_handle_touch'](self, json.dumps({**contact, 'type':'release'}).encode())
+                            self._batch_contact = None
+                        if self._uhs is not None and self._kb_service_id is not None:
+                            await self._uhs.send_keyboard(self._kb_service_id, [])
+                        self._batch_keys_down = False
+                    except Exception:
+                        await clear_input(self)
                     self._batch_active = body['active']
                 return await reply(writer, 200, {'active': active(self)})
             if restricted and not active(self):
                 return await reply(writer, 403, {'error': 'device is read-only'})
             if not special:
-                return await original(self, ReplayReader(prefix, reader), writer)
+                return await delegate(ReplayReader(prefix, reader))
             if path == '/device-clipboard-info':
                 if parts[0] != 'GET':
                     return await reply(writer, 405, {'error': 'GET required'})
@@ -287,20 +358,21 @@ def install():
                     return await reply(writer, 403, {'error': 'device is read-only'})
                 await asyncio.to_thread(windows_clipboard, text, write=True)
             return await reply(writer, 200, {'ok': True})
-        except (ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
+        except asyncio.TimeoutError:
+            if path in ('/manual-touch', '/manual-home', '/manual-key'):
+                return await reply(writer, 503, {'error': '控制请求未完成，请核对手机后重新操作'})
+            return await reply(writer, 400, {'error': 'invalid request'})
+        except (ValueError, asyncio.IncompleteReadError):
             return await reply(writer, 400, {'error': 'invalid request'})
         except Exception:
             if path in ('/manual-touch', '/manual-home', '/manual-key'):
                 logging.getLogger(__name__).exception('Manual phone control failed: %s', path)
                 # Never replay an input: a failed release may already have sent.
-                try:
-                    await asyncio.wait_for(self._stop_hid(), 2)
-                except Exception:
-                    pass
                 return await reply(writer, 500, {'error': '手机触控服务不可用，请检查连接和开发者服务'})
             return await reply(writer, 500, {'error': 'Windows clipboard unavailable; retry'})
 
     async def handle(self, reader, writer):
+        ensure_idle_monitor(self, input_lock(self))
         # asyncio keeps weak references to tasks. Retain connection handlers
         # while they await device responses, including long-lived video streams.
         tasks = getattr(self, '_viewer_http_tasks', None)

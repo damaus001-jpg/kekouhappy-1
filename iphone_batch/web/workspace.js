@@ -3,26 +3,6 @@ let currentConversationId=null;
 let workspaceBusy=false, generatedDraft=null;
 let pastedEnglish=false;
 let sendBlocked=false;
-const pendingMessageTranslations=new Set();
-function messageTranslationKey(device,conversation,index){return JSON.stringify([device,conversation,index]);}
-async function refreshBubbleTranslation(conversation,index,message,textNode,button){
- const device=workspaceDevice, revision=workspaceRevision;
- const key=messageTranslationKey(device,conversation.id,index);
- if(!device||workspaceBusy||pendingMessageTranslations.has(key))return;
- pendingMessageTranslations.add(key);button.disabled=true;button.setAttribute('aria-busy','true');
- notice('正在重新翻译第 '+(index+1)+' 条消息…');
- try{
-  const response=await fetch('/api/message-translation',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({device,conversation_id:conversation.id,message_index:index})});
-  const result=await response.json();
-  if(!response.ok||result.error)throw Error(result.error||'重新翻译失败，原译文已保留');
-  message.translation_zh=result.translation_zh;
-  if(workspaceDevice===device&&workspaceRevision===revision&&currentConversationId===conversation.id){
-   textNode.textContent=result.translation_zh;notice('这条消息已重新翻译并保存。');
-  }
- }catch(error){if(workspaceDevice===device&&workspaceRevision===revision)notice(error.message);}
- finally{pendingMessageTranslations.delete(key);button.disabled=workspaceBusy;button.setAttribute('aria-busy','false');}
-}
 const notificationProtection=new Map();
 function protectNotificationDraft(){
  if(!workspaceDevice)return;
@@ -55,7 +35,6 @@ for(const emoji of ['😀','😃','😄','😁','😊','🙂','😉','😍','�
   if(draftEl.disabled){notice('请先选择手机并读取联系人会话，再插入表情。');return;}
   const start=draftEl.selectionStart??draftEl.value.length,end=draftEl.selectionEnd??start;
   draftEl.setRangeText(emoji,start,end,'end');
-  if(isEnglish(draftEl.value))pastedEnglish=true;
   draftEl.dispatchEvent(new Event('input',{bubbles:true}));draftEl.focus();closeEmojiPicker();
  });emojiPicker.append(button);
 }
@@ -87,23 +66,14 @@ function renderConversation(){
  const rows=currentConversation?.messages||[];
  syncWorkspaceControls();
  document.getElementById('message-count').textContent=rows.length+' 条记录';
- if(!rows.length){const empty=document.createElement('div');empty.className='message-empty';empty.textContent='尚无当前手机的已翻译记录。完成短信提取与翻译后，点击刷新记录。';messagesEl.append(empty);notice('仅显示所选手机的保存记录，不是手机当前会话的实时同步。');return;}
+ if(!rows.length){const empty=document.createElement('div');empty.className='message-empty';empty.textContent='尚无当前手机的保存记录。读取当前会话后显示短信原文。';messagesEl.append(empty);notice('仅显示所选手机的保存记录，不是手机当前会话的实时同步。');return;}
  for(const [index,message] of rows.entries()){
   const node=document.createElement('div');node.className='message '+(message.side==='outgoing'?'outgoing':'incoming');
   node.dataset.messageId=index;
   const meta=document.createElement('div');meta.className='message-meta';meta.textContent=(message.side==='outgoing'?'我方':message.side==='incoming'?'对方':'待核对')+' · '+(message.time||'时间未知');
   const bubble=document.createElement('div');bubble.className='bubble';
   const original=document.createElement('div');original.className='original';original.textContent=message.text||(message.kind==='attachment'?'[附件消息]':message.decode_error?'[正文解析未完成]':'[无文字内容]');
-  const translated=document.createElement('div');translated.className='translated';
-  const translationText=document.createElement('span');translationText.className='translation-text';translationText.textContent=message.kind==='attachment'?'图片消息 · 未翻译':message.translation_zh||'暂无译文';translated.append(translationText);
-  if(message.kind!=='attachment'&&message.text?.trim()){
-   const refresh=document.createElement('button');refresh.type='button';refresh.className='message-retranslate';refresh.textContent='↻';
-   refresh.title='只重新翻译这条消息';refresh.setAttribute('aria-label','重新翻译第 '+(index+1)+' 条消息');
-   refresh.dataset.translationKey=messageTranslationKey(workspaceDevice,currentConversation.id,index);
-   refresh.disabled=workspaceBusy||pendingMessageTranslations.has(refresh.dataset.translationKey)||(typeof devicePreview!=='undefined'&&devicePreview);
-   const conversation=currentConversation;refresh.onclick=()=>refreshBubbleTranslation(conversation,index,message,translationText,refresh);translated.append(refresh);
-  }
-  bubble.append(original,translated);node.append(meta,bubble);messagesEl.append(node);
+  bubble.append(original);node.append(meta,bubble);messagesEl.append(node);
  }
  notice(currentConversation.scope||('已保存记录 · '+(currentConversation.created||'时间未知')+' · 非实时同步，重复记录保留，历史完整性待核对。'));
 }
@@ -112,8 +82,8 @@ async function loadWorkspace(device,force=false,preferred=null){
  const requested=preferred||(workspaceDevice===device?currentConversationId:null);
  workspaceDevice=device;const revision=++workspaceRevision;savedConversations=[];currentConversation=null;currentConversationId=null;
  renderConversation();
- if(!device){notice('选择手机后加载已保存的翻译记录。');return;}
- notice('正在加载已保存的短信与译文…');
+ if(!device){notice('选择手机后加载已保存的短信原文。');return;}
+ notice('正在加载已保存的短信原文…');
  try{const r=await fetch('/api/messages?device='+encodeURIComponent(device),{cache:'no-store'});const data=await r.json();if(!r.ok||data.error)throw Error(data.error||'读取失败');if(revision!==workspaceRevision)return;
   savedConversations=data.conversations||[];
   currentConversationId=savedConversations.some(c=>c.id===requested)?requested:savedConversations[0]?.id||null;
@@ -122,19 +92,22 @@ async function loadWorkspace(device,force=false,preferred=null){
 }
 document.getElementById('refresh-messages').addEventListener('click',()=>loadWorkspace(workspaceDevice,true));
 draftEl.addEventListener('input',()=>{
- generatedDraft=null;if(!isEnglish(draftEl.value))pastedEnglish=false;syncWorkspaceControls();
+ generatedDraft=null;syncWorkspaceControls();
  if(currentConversation){try{localStorage.setItem(draftKey(),draftEl.value);}catch{notice('浏览器未保存草稿。');}}
 });
 
 function syncWorkspaceControls(){
- for(const button of document.querySelectorAll('.message-retranslate'))button.disabled=workspaceBusy||pendingMessageTranslations.has(button.dataset.translationKey)||(typeof devicePreview!=='undefined'&&devicePreview);
+ if(typeof syncDeviceRefreshControls==='function')syncDeviceRefreshControls();
+ if(typeof sendFocus==='function')for(const card of cards.values()){
+  if(card.lastWorking!==workspaceBusy){sendFocus(card,card.lastActive===true);card.lastWorking=workspaceBusy;}
+ }
  const selected=!!workspaceDevice&&(typeof controlOwner==='undefined'||controlOwner===workspaceDevice), available=!!currentConversation;
  for(const id of ['capture-current','refresh-messages'])document.getElementById(id).disabled=workspaceBusy||!selected;
  document.getElementById('summarize-contact').disabled=workspaceBusy||!available;
  if(typeof syncContactProfileControls==='function')syncContactProfileControls();
  const sendButton=document.getElementById('send-reply');
- sendButton.disabled=workspaceBusy||sendBlocked||!selected||!available||!draftEl.value.trim()||!!(generatedDraft&&!generatedDraft.sendable);
- const sendLabel=workspaceBusy?'正在处理':sendBlocked?'请先核对发送结果':isEnglish(draftEl.value)?'发送回复':'翻译为英文';
+ sendButton.disabled=workspaceBusy||sendBlocked||!selected||!replyInputAvailable()||!available||!draftEl.value.trim();
+ const sendLabel=workspaceBusy?'正在处理':sendBlocked?'请先核对发送结果':'发送回复';
  sendButton.title=sendLabel;sendButton.setAttribute('aria-label',sendLabel);
  draftEl.disabled=workspaceBusy;
  emojiToggle.disabled=workspaceBusy;
@@ -145,13 +118,23 @@ function syncWorkspaceControls(){
 }
 async function workspaceRequest(action, extra={}, device=workspaceDevice){
  const r=await fetch('/api/workspace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,device,...extra})});
- const data=await r.json();if(!r.ok||data.error)throw Error(data.error||'请求失败');return data;
+ const data=await r.json();
+ if(!r.ok||data.error){
+  const error=Error(data.error||'请求失败');
+  error.beforeSend=action==='send'&&data.error==='未定位到唯一可用的手机发送按钮，未执行发送';
+  throw error;
+ }
+ return data;
 }
 async function operation(text, action){
  if(workspaceBusy)return;
  const sendButton=document.getElementById('send-reply');
  workspaceBusy=true;syncWorkspaceControls();notice(text);
- try{await action();}catch(e){notice(e.message);if(sendBlocked)sendButton.textContent='发送未完成';}
+ try{await action();}catch(e){
+  if(e.beforeSend===true){sendBlocked=false;generatedDraft=null;}
+  notice(e.message+(e.beforeSend===true?'；正文已保留，可再次手动发送。':''));
+  if(sendBlocked)sendButton.textContent='发送未完成';
+ }
  finally{workspaceBusy=false;if(!sendBlocked)sendButton.textContent='确认发送';else if(sendButton.textContent==='正在核验…')sendButton.textContent='发送已处理';syncWorkspaceControls();}
 }
 document.getElementById('capture-current').addEventListener('click',()=>{
@@ -184,19 +167,6 @@ document.getElementById('summarize-contact').addEventListener('click',()=>{
   document.getElementById('profile-panel').open=true;
  });
 });
-async function translateReply(){
- const device=workspaceDevice, revision=workspaceRevision, conversation=currentConversation, chinese=draftEl.value;
- if(!conversation||!chinese.trim())return;
- await operation('正在将输入框中的中文翻译为英文…',async()=>{
-  const result=await workspaceRequest('draft',{conversation_id:conversation.id,chinese},device);
-  if(revision!==workspaceRevision||draftEl.value!==chinese)return;
-  if(!isEnglish(result.english))throw Error('翻译结果为空或仍含中文，未替换输入框，禁止发送。');
-  generatedDraft=result;pastedEnglish=false;draftEl.value=result.english;
-  try{localStorage.setItem(draftKey(),draftEl.value);}catch{}
-  notice(result.sendable?'已转为英文，再按 Enter 直接发送。':'请先读取手机当前会话后再发送。');
-  setTimeout(()=>{draftEl.focus();draftEl.setSelectionRange(draftEl.value.length,draftEl.value.length);},0);
- });
-}
 function showSentReply(result){
  if(result.conversation){
   const conversation=result.conversation;
@@ -208,37 +178,19 @@ function showSentReply(result){
  }
  if(result.reading_error)notice('发送已确认；阅读区更新失败：'+result.reading_error+'。请读取当前会话，勿重复发送。');
 }
-function replyControlAvailable(){
- if(!workspaceDevice){notice('请先选择手机，再翻译或发送回复。');return false;}
- if(typeof controlOwner!=='undefined'&&controlOwner!==workspaceDevice){notice('当前手机尚未取得控制权，请点选该手机，恢复投屏控制后再发送。');return false;}
- return true;
+function replyInputAvailable(){
+ if(typeof cards==='undefined')return true;
+ const card=cards.get(workspaceDevice);
+ return !card||card.inputReady===true;
 }
-function sendGeneratedReply(){
- if(workspaceBusy||sendBlocked)return;
- if(!replyControlAvailable())return;
- const draft=generatedDraft, device=workspaceDevice, revision=workspaceRevision;
- if(!draft?.sendable){submitReplyInput();return;}
- if(!isEnglish(draftEl.value)||draftEl.value.trim()!==draft.english.trim()){
-  generatedDraft=null;pastedEnglish=isEnglish(draftEl.value);submitReplyInput();return;
- }
- generatedDraft=null;sendBlocked=true;
- document.getElementById('send-reply').textContent='正在核验…';
- operation('正在核验当前收件人、会话与输入框，再发送一次…',async()=>{
-  const result=await workspaceRequest('send',{id:draft.id,confirm:true},device);
-  if(revision!==workspaceRevision)return;
-  const text='手机会话中已确认发送'+(result.delivered?'，已送达':'；送达状态尚未确认')+'。人工回复案例已保存。';
-  notice(text);
-  draftEl.value='';try{localStorage.removeItem(draftKey());}catch{}
-  showSentReply(result);
-  if(!result.reading_error)notice(text);
- });
+function replyControlAvailable(){
+ if(!workspaceDevice){notice('请先选择手机，再发送回复。');return false;}
+ if(typeof controlOwner!=='undefined'&&controlOwner!==workspaceDevice){notice('当前手机尚未取得控制权，请点选该手机，恢复投屏控制后再发送。');return false;}
+ if(!replyInputAvailable()){notice('当前手机控制连接不可用，请刷新设备列表，恢复后再发送。');return false;}
+ return true;
 }
 document.getElementById('send-reply').addEventListener('click',submitReplyInput);
 
-function isEnglish(text){return !!text.trim()&&!/\p{Script=Han}/u.test(text);}
-draftEl.addEventListener('paste',event=>{
- pastedEnglish=isEnglish(event.clipboardData?.getData('text')||'');
-});
 draftEl.addEventListener('keydown',event=>{
  if(event.key!=='Enter'||event.shiftKey||event.isComposing||event.keyCode===229)return;
  event.preventDefault();
@@ -249,24 +201,17 @@ function submitReplyInput(){
  if(workspaceBusy||!draftEl.value.trim()||!currentConversation)return;
  if(!replyControlAvailable())return;
  if(sendBlocked){notice('这次发送操作已处理或结果待核对；请核对手机并重新读取当前会话，禁止重复回车发送。');return;}
- if(isEnglish(draftEl.value)&&!generatedDraft){
-  const device=workspaceDevice, revision=workspaceRevision, conversation=currentConversation, english=draftEl.value;
-  operation('正在核验收件人并发送粘贴的英文一次…',async()=>{
-   const draft=await workspaceRequest('direct_draft',{conversation_id:conversation.id,english},device);
-   if(revision!==workspaceRevision||draftEl.value!==english)return;
-   // Leave direct-send mode before requesting a send: repeated Enter cannot retry it.
-   pastedEnglish=false;generatedDraft=null;sendBlocked=true;
-   document.getElementById('send-reply').textContent='正在核验…';
-   const result=await workspaceRequest('send',{id:draft.id,confirm:true},device);
-   if(revision!==workspaceRevision)return;
-   const text='回复已在手机会话中确认发送'+(result.delivered?'，已送达':'')+'；案例已保存。';
-  notice(text);
-   draftEl.value='';try{localStorage.removeItem(draftKey());}catch{}
-   showSentReply(result);
-   if(!result.reading_error)notice(text);
-  });
- }else if(generatedDraft){
-  if(generatedDraft.sendable)sendGeneratedReply();
-  else notice('请先读取当前完整号码会话，重新生成回复后再发送。');
- }else translateReply();
+ const device=workspaceDevice, revision=workspaceRevision, conversation=currentConversation, text=draftEl.value;
+ operation('正在核验收件人并原样发送一次…',async()=>{
+  const draft=await workspaceRequest('direct_draft',{conversation_id:conversation.id,text},device);
+  if(revision!==workspaceRevision||draftEl.value!==text)return;
+  generatedDraft=null;sendBlocked=true;
+  document.getElementById('send-reply').textContent='正在核验…';
+  const result=await workspaceRequest('send',{id:draft.id,confirm:true},device);
+  if(revision!==workspaceRevision)return;
+  const status='正文已在手机会话中确认发送'+(result.delivered?'，已送达':'')+'。';
+  draftEl.value='';try{localStorage.removeItem(draftKey());}catch{}
+  showSentReply(result);
+  if(!result.reading_error)notice(status);
+ });
 }

@@ -181,7 +181,7 @@ body{background-image:radial-gradient(ellipse at 8% 0%,#d7b62d0b,transparent 48%
 .work-panel .reading-heading-meta h3{font-size:18px;line-height:24px;font-weight:700}
 .reading-heading-meta .reading-device-number{font-size:14px}.reading-heading-meta .peer-number,.peer-number strong{font-size:14px}.reading-heading-meta #message-count{font-size:12px}
 .work-panel .translated{font-size:18px;line-height:1.85;font-weight:500;color:#f5f0df}
-.work-panel .original{font-size:15px;line-height:1.8;color:#bbc3b0}
+.work-panel .original{font-size:15px;line-height:1.4;color:#bbc3b0}
 .work-panel .message-meta{font-size:12px;line-height:1.6;margin-bottom:6px;color:#9ca98f}
 .work-panel .bubble{padding:13px 16px}.work-panel .messages{gap:20px}
 .work-panel .archive-status{font-size:12px;line-height:1.65}.work-panel .message-empty{font-size:14px;line-height:1.8}
@@ -224,3 +224,5 @@ body{background-image:radial-gradient(ellipse at 8% 0%,#d7b62d0b,transparent 48%
 .profile-save-row{position:sticky;bottom:-14px;background:#242d23;padding:10px 0 4px;display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .profile-save-row #profile-feedback{font-size:13px;line-height:1.6;flex:1 1 160px}
 .profile-save-row button{margin-top:0;flex:none}
+#selected .input-connection-status{position:absolute;left:10px;right:10px;bottom:10px;z-index:5;padding:8px 10px;border-radius:8px;background:#302b16ed;color:#ffe487;font-size:12px;line-height:1.5;pointer-events:none}
+#selected .input-connection-status[hidden]{display:none}

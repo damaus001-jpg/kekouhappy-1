@@ -3,52 +3,33 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock
-
+from message_archive import archive_reading
 from workspace_service import WorkspaceService
 
+class RemovedTranslationTests(unittest.TestCase):
+    def test_retranslation_never_requests_a_provider(self):
+        with tempfile.TemporaryDirectory() as folder:
+            provider=Mock()
+            workspace=WorkspaceService(Path(folder),requester=provider)
+            with self.assertRaisesRegex(ValueError,'8070'):
+                workspace.retranslate_message('phone','record',0,provider)
+            provider.assert_not_called()
+            provider.translate_texts.assert_not_called()
 
-class MessageRetranslationTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        (self.root/'diagnostics').mkdir()
-        self.path = self.root/'diagnostics'/'conversation-translated.json'
-        self.value = {'device':'phone1','contact':'Alice','messages':[
-            {'text':'Hello','kind':'text','side':'incoming','translation_zh':'原译文一'},
-            {'text':'Hello','kind':'text','side':'incoming','translation_zh':'原译文二'}]}
-        self.path.write_text(json.dumps(self.value), encoding='utf-8')
-        self.workspace = WorkspaceService(self.root)
-        self.translation = Mock()
-        self.translation.translate_texts.return_value = {'translations':['新译文']}
+    def test_reading_preserves_raw_occurrences_without_translation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source=Path(folder)/'capture.json'
+            value={'device':'phone','contact':'+15550000001','messages':[
+                {'message_id':'one','side':'incoming','text':'你好','translation_zh':'old'},
+                {'message_id':'two','side':'incoming','text':'你好'}]}
+            source.write_text(json.dumps(value),encoding='utf8')
+            result=archive_reading(source)
+            saved=json.loads(Path(result['output']).read_text(encoding='utf8'))
+            self.assertEqual(result['api_requests'],0)
+            self.assertFalse(saved['translation_enabled'])
+            self.assertEqual([m['text'] for m in saved['messages']],['你好','你好'])
+            self.assertEqual([m['message_id'] for m in saved['messages']],['one','two'])
+            self.assertNotIn('translation_zh',saved['messages'][0])
+            self.assertEqual(json.loads(source.read_text())['messages'][0]['translation_zh'],'old')
 
-    def test_refresh_only_requested_occurrence_and_persists(self):
-        result = self.workspace.retranslate_message('phone1',self.path.stem,1,self.translation)
-        self.translation.translate_texts.assert_called_once_with('phone1','Alice',['Hello'],force=True)
-        saved = json.loads(self.path.read_text(encoding='utf-8'))
-        self.assertEqual([m['translation_zh'] for m in saved['messages']],['原译文一','新译文'])
-        self.assertEqual(result['message_index'],1)
-
-    def test_wrong_phone_and_invalid_indexes_never_call_translation(self):
-        with self.assertRaises(ValueError):
-            self.workspace.retranslate_message('phone2',self.path.stem,0,self.translation)
-        for index in [-1,2,True,None]:
-            with self.assertRaises(ValueError):
-                self.workspace.retranslate_message('phone1',self.path.stem,index,self.translation)
-        self.translation.translate_texts.assert_not_called()
-
-    def test_failed_translation_preserves_saved_text(self):
-        self.translation.translate_texts.side_effect = RuntimeError('offline')
-        with self.assertRaises(RuntimeError):
-            self.workspace.retranslate_message('phone1',self.path.stem,1,self.translation)
-        self.assertEqual(json.loads(self.path.read_text(encoding='utf-8')),self.value)
-
-    def test_changed_message_is_not_overwritten(self):
-        def change(*args,**kwargs):
-            self.value['messages'][1]['text']='Changed'
-            self.path.write_text(json.dumps(self.value),encoding='utf-8')
-            return {'translations':['Wrong target']}
-        self.translation.translate_texts.side_effect=change
-        with self.assertRaisesRegex(ValueError,'变化'):
-            self.workspace.retranslate_message('phone1',self.path.stem,1,self.translation)
-        self.assertEqual(json.loads(self.path.read_text(encoding='utf-8'))['messages'][1]['translation_zh'],'原译文二')
+if __name__=='__main__':unittest.main()

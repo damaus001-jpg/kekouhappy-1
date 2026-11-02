@@ -17,7 +17,7 @@ class SharedVideoTests(unittest.IsolatedAsyncioTestCase):
                 stopped.wait(.02)
 
         async def handle(reader, writer):
-            await serve_jpeg(8084, writer, owner)
+            await serve_jpeg(8084, writer, owner, reader=reader)
 
         with patch('video_compat.jpeg_frames', side_effect=frames) as decode:
             server = await asyncio.start_server(handle, '127.0.0.1', 0)
@@ -42,6 +42,38 @@ class SharedVideoTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(.02)
                 self.assertTrue(owner._jpeg_hub.stopped.is_set())
                 await asyncio.wait_for(owner._jpeg_hub.task, 2)
+
+    async def test_static_video_stops_on_last_client_eof_and_can_wake_again(self):
+        owner = SimpleNamespace()
+
+        def frames(port, stopped):
+            yield b'one-static-frame'
+            stopped.wait(5)
+
+        async def handle(reader, writer):
+            await serve_jpeg(8084, writer, owner, reader=reader)
+
+        with patch('video_compat.jpeg_frames', side_effect=frames) as decode:
+            server = await asyncio.start_server(handle, '127.0.0.1', 0)
+            try:
+                port = server.sockets[0].getsockname()[1]
+                for _ in range(2):
+                    reader, writer = await asyncio.open_connection('127.0.0.1', port)
+                    try:
+                        await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 2)
+                        size = struct.unpack('>I', await reader.readexactly(4))[0]
+                        self.assertEqual(await reader.readexactly(size), b'one-static-frame')
+                        hub = owner._jpeg_hub
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+                    await asyncio.wait_for(hub.task, 1)
+                    self.assertTrue(hub.stopped.is_set())
+                    self.assertEqual(hub.clients, 0)
+                self.assertEqual(decode.call_count, 2)
+            finally:
+                server.close()
+                await server.wait_closed()
 
     async def test_decoder_failure_returns_unavailable(self):
         async def handle(reader, writer):

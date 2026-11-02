@@ -12,6 +12,7 @@ class ViewerRetryPolicy:
     def needs_setup(error):
         return any(text in (error or '') for text in (
             '开发者模式未开启', '无法建立手机可信连接',
+            '现有配对身份未通过',
             'Selected USB devices are not connected'))
 
     def reset(self, device):

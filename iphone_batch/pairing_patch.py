@@ -3,6 +3,27 @@ from pathlib import Path
 import plistlib
 
 
+def prevent_automatic_pairing():
+    """Ordinary CLI reconnection must not create a new host identity/dialog.
+
+    Explicit `lockdown pair` still calls pair() itself after connecting with
+    autopair=False. This policy applies only to this project's CLI child.
+    """
+    from pymobiledevice3 import lockdown
+    from pymobiledevice3.exceptions import NotPairedError
+    original = lockdown.LockdownClient._handle_autopair
+    if getattr(original, '_project_existing_only', False) is True:
+        return
+
+    async def existing_only(self, autopair, timeout, private_key=None):
+        await original(self, False, timeout, private_key=private_key)
+        if autopair and not self.paired:
+            raise NotPairedError('现有配对身份未通过；后台不会重新发起信任配对')
+
+    existing_only._project_existing_only = True
+    lockdown.LockdownClient._handle_autopair = existing_only
+
+
 def install():
     from pymobiledevice3 import lockdown
     from pymobiledevice3.pair_records import get_local_pairing_record

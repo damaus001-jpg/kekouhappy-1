@@ -135,10 +135,7 @@ def main():
     from viewer_retry import ViewerRetryPolicy
     retry_policy=ViewerRetryPolicy()
     generations={}
-    from text_translation import TextTranslationService
-    from translation_routes import dispatch
     from translation import TranslationError
-    translation_service=TextTranslationService()
     from workspace_service import WorkspaceService
     workspace_service=WorkspaceService()
     stopping=threading.Event()
@@ -325,7 +322,7 @@ def main():
                     device.pop('error',None)
                 rows.append({**device,'ready':ready,'active':manager.active==device['udid'],
                              'notifications':notifications})
-            return self.respond(200,{'devices':rows,'active':manager.active,'selected':manager.selected,'scan_enabled':notification_monitor.enabled})
+            return self.respond(200,{'devices':rows,'active':manager.active,'selected':manager.selected,'scan_enabled':notification_monitor.enabled,'translation_enabled':False})
 
         def do_POST(self):
             if not self.allowed():
@@ -354,20 +351,7 @@ def main():
                 except Exception:
                     return self.respond(503,{'error':'USB 设备刷新未完成，请稍后重试'})
             if self.path=='/api/message-translation':
-                try:
-                    length=int(self.headers.get('Content-Length','0'))
-                    if not 0<length<=4096:raise ValueError('无效请求')
-                    self.connection.settimeout(15)
-                    body=json.loads(self.rfile.read(length))
-                    if not isinstance(body,dict):raise ValueError('无效请求')
-                    device=body.get('device')
-                    if not isinstance(device,str) or device not in {d['udid'] for d in devices}:raise ValueError('请选择有效的手机')
-                    result=workspace_service.retranslate_message(device,body.get('conversation_id'),body.get('message_index'),translation_service)
-                    return self.respond(200,result)
-                except (ValueError,TypeError,TranslationError) as exc:
-                    return self.respond(400,{'error':str(exc)})
-                except Exception:
-                    return self.respond(500,{'error':'重新翻译失败，原译文已保留，请稍后重试'})
+                return self.respond(410,{'error':'8070 已移除翻译功能'})
             if self.path=='/api/developer-mode/reveal':
                 try:
                     length=int(self.headers.get('Content-Length','0'))
@@ -446,23 +430,7 @@ def main():
                 except Exception:
                     return self.respond(500,{'error':'工作台操作失败，请刷新记录；发送结果不明时请先核对手机'})
             if self.path=='/internal/translation':
-                if not hmac.compare_digest(self.headers.get('X-Control-Token',''),token):
-                    return self.respond(403,{'error':'invalid control token'})
-                try:
-                    length=int(self.headers.get('Content-Length','0'))
-                    if not 0<length<=3*1024*1024:raise ValueError()
-                    self.connection.settimeout(10)
-                    body=json.loads(self.rfile.read(length))
-                    device=body.get('device')
-                    if device not in children:raise ValueError()
-                    if body.get('action')!='status' and manager.active!=device:
-                        return self.respond(200,{'error':'???????????'})
-                    result=dispatch(translation_service,device,body)
-                    return self.respond(200,result)
-                except TranslationError as exc:
-                    return self.respond(200,{'error':str(exc)})
-                except Exception:
-                    return self.respond(200,{'error':'????????????'})
+                return self.respond(410,{'error':'8070 已移除翻译功能','disabled':True})
             if self.path!='/api/select':
                 return self.respond(404,{'error':'not found'})
             try:

@@ -13,7 +13,13 @@ def screen(width=588,height=1280,dark=False,send=False):
     image=np.full((height,width,3),24 if dark else 255,dtype=np.uint8)
     x,y,w,h=round(.19*width),round(.915*height),round(.74*width),round(.048*height)
     cv2.rectangle(image,(x,y),(x+w,y+h),(100,100,100) if dark else (230,230,230),1)
-    if send:
+    if send == 'capsule':
+        cx,cy=x+w-round(.07*width),y+h//2
+        radius,half_width=round(.015*height),round(.045*width)
+        cv2.rectangle(image,(cx-half_width+radius,cy-radius),(cx+half_width-radius,cy+radius),(40,210,50),-1)
+        for center in (cx-half_width+radius,cx+half_width-radius):
+            cv2.circle(image,(center,cy),radius,(40,210,50),-1)
+    elif send:
         cv2.circle(image,(x+w-round(.07*width),y+h//2),round(.03*width),(40,210,50),-1)
     return image
 
@@ -48,6 +54,21 @@ class VisualComposerTests(unittest.TestCase):
         with patch('visual_composer.frames',side_effect=lambda phone:updates()):
             point=send_point(None)
         self.assertTrue(.8<point['x']<.93)
+
+    def test_horizontal_send_capsule_is_recognized_at_multiple_sizes(self):
+        for width,height,dark in [(588,1280,False),(720,1560,True),(390,844,False)]:
+            with self.subTest(width=width,dark=dark):
+                point=send_point_in_frame(screen(width,height,dark,send='capsule'))
+                self.assertTrue(.8<point['x']<.93)
+                self.assertTrue(.9<point['y']<.98)
+
+    def test_square_color_patch_and_multiple_send_candidates_are_rejected(self):
+        image=screen()
+        cv2.rectangle(image,(482,1181),(536,1220),(40,210,50),-1)
+        with self.assertRaises(ValueError):send_point_in_frame(image)
+        image=screen(send='capsule')
+        cv2.circle(image,(450,1202),15,(40,210,50),-1)
+        with self.assertRaises(ValueError):send_point_in_frame(image)
 
     def test_truncated_video_is_never_used_for_touch(self):
         response=io.BytesIO(struct.pack('>I',1000)+b'bad')

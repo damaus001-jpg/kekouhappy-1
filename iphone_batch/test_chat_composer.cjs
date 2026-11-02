@@ -28,33 +28,61 @@ const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   assert((await client.evaluate('draftEl.value')).includes('💐'));
   assert.equal(await client.evaluate("document.querySelector('.chat-compose-row').nextElementSibling===null"),true);
   await client.evaluate(`
-   workspaceDevice='test-device';controlOwner='test-device';protectNotificationDraft=()=>{};window.replyCalls=[];
-   workspaceRequest=async(action,data)=>{window.replyCalls.push(action);if(action==='draft')return {id:'test-draft',english:'Hello',sendable:true,phone_number:'+15550000001'};if(action==='send')return {conversation:{...currentConversation,messages:[...currentConversation.messages,{side:'outgoing',kind:'text',text:'Hello'}]}};throw Error('unexpected action');};
-   draftEl.value='你好';draftEl.dispatchEvent(new Event('input',{bubbles:true}));
-   draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+   window.originalWorkspaceRequest=workspaceRequest;
+   workspaceDevice='test-device';controlOwner='test-device';protectNotificationDraft=()=>{};
+   window.replyCalls=[];window.rawTexts=[];
+   workspaceRequest=async(action,data)=>{window.replyCalls.push(action);
+    if(action==='direct_draft'){rawTexts.push(data.text);return {id:'raw-draft'};}
+    if(action==='send')return {conversation:{...currentConversation,messages:[...currentConversation.messages,{side:'outgoing',kind:'text',text:rawTexts.at(-1)}]}};
+    throw Error('unexpected action');
+   };
   `);
-  await pause(100);
-  assert.deepEqual(await client.evaluate('window.replyCalls'),['draft']);
-  assert.equal(await client.evaluate('draftEl.value'),'Hello');
-  await client.evaluate("controlOwner=null;draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))");
-  await pause(50);assert.deepEqual(await client.evaluate('window.replyCalls'),['draft']);
-  assert((await client.evaluate("document.getElementById('archive-status').textContent")).includes('控制权'));
-  await client.evaluate("controlOwner='test-device';syncWorkspaceControls()");
-  await client.evaluate("draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))");
-  await pause(100);
-  assert.deepEqual(await client.evaluate('window.replyCalls'),['draft','send']);
-  assert.equal(await client.evaluate('draftEl.value'),'');
+  for(const text of ['你好','Hello','中文 English 🌹','  保留空格  ']){
+   await client.evaluate(`sendBlocked=false;draftEl.value=${JSON.stringify(text)};draftEl.dispatchEvent(new Event('input',{bubbles:true}));draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));`);
+   await pause(60);
+   assert.equal(await client.evaluate('rawTexts.at(-1)'),text);
+   assert.equal(await client.evaluate('draftEl.value'),'');
+  }
+  assert.deepEqual(await client.evaluate('window.replyCalls'),Array(4).fill(['direct_draft','send']).flat());
+  assert.equal(await client.evaluate("document.querySelectorAll('.message-retranslate,.translated').length"),0);
   await client.evaluate(`
-   window.replyCalls=[];draftEl.value='中文';draftEl.dispatchEvent(new Event('input',{bubbles:true}));
+   window.replyCalls=[];sendBlocked=false;draftEl.value='中文';draftEl.dispatchEvent(new Event('input',{bubbles:true}));
    for(const options of [{isComposing:true},{shiftKey:true},{repeat:true}])draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,...options}));
   `);
   await pause(50);assert.deepEqual(await client.evaluate('window.replyCalls'),[]);
   await client.evaluate(`
-   workspaceRequest=async(action)=>{window.replyCalls.push(action);return {english:'残留中文',sendable:true};};
+   window.replyCalls=[];generatedDraft=null;sendBlocked=false;
+   cards.set('test-device',{inputReady:false});
+   draftEl.value='OK';draftEl.dispatchEvent(new Event('input',{bubbles:true}));
    draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
   `);
-  await pause(100);assert.deepEqual(await client.evaluate('window.replyCalls'),['draft']);
-  assert.equal(await client.evaluate('draftEl.value'),'中文');
+  await pause(50);assert.deepEqual(await client.evaluate('window.replyCalls'),[]);
+  assert.equal(await client.evaluate('draftEl.value'),'OK');
+  assert.equal(await client.evaluate("document.getElementById('send-reply').disabled"),true);
+  assert.match(await client.evaluate("document.getElementById('archive-status').textContent"),/控制连接不可用/);
+  await client.evaluate("cards.delete('test-device')");
+  await client.evaluate(`
+   window.originalFetch=fetch;window.replyCalls=[];window.sendAttempts=0;
+   workspaceRequest=window.originalWorkspaceRequest;
+   window.fetch=async(url,options)=>{
+    const body=JSON.parse(options.body);replyCalls.push(body.action);
+    if(body.action==='direct_draft')return {ok:true,json:async()=>({id:'manual-draft'})};
+    if(++sendAttempts===1)return {ok:false,json:async()=>({error:'未定位到唯一可用的手机发送按钮，未执行发送'})};
+    return {ok:true,json:async()=>({status:'sent_verified'})};
+   };
+   generatedDraft=null;sendBlocked=false;draftEl.value='ok';draftEl.dispatchEvent(new Event('input',{bubbles:true}));
+   draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+  `);
+  await pause(100);
+  assert.deepEqual(await client.evaluate('window.replyCalls'),['direct_draft','send']);
+  assert.equal(await client.evaluate('sendBlocked'),false);
+  assert.equal(await client.evaluate('draftEl.value'),'ok');
+  await pause(100);assert.equal(await client.evaluate('sendAttempts'),1,'a proven pre-send failure never retries itself');
+  await client.evaluate("draftEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))");
+  await pause(100);
+  assert.deepEqual(await client.evaluate('window.replyCalls'),['direct_draft','send','direct_draft','send']);
+  assert.equal(await client.evaluate('draftEl.value'),'');
+  await client.evaluate('window.fetch=window.originalFetch;sendBlocked=false');
   await client.evaluate(`
    window.replyCalls=[];generatedDraft=null;draftEl.value='Hello again';draftEl.dispatchEvent(new Event('input',{bubbles:true}));
    workspaceRequest=async(action)=>{window.replyCalls.push(action);if(action==='direct_draft')return {id:'direct'};throw Error('send result unknown');};
@@ -64,6 +92,6 @@ const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   await pause(50);assert.deepEqual(await client.evaluate('window.replyCalls'),['direct_draft','send']);
   await client.evaluate("draftEl.value='line\\n'.repeat(20);draftEl.dispatchEvent(new Event('input',{bubbles:true}))");
   assert.equal(await client.evaluate('draftEl.style.height'),'128px');
-  console.log('Composer passed: real mouse emoji picker, cursor insertion, no bottom controls, in-place translation, second Enter sends once, Han/IME/repeat protection, no uncertain retry');
+  console.log('Composer passed: real mouse emoji picker, cursor insertion, no bottom controls, raw Chinese/English first Enter sends once, no translation UI, IME/repeat protection, no uncertain retry');
  }finally{client.close();await localJson(port,'/json/close/'+target.id).catch(()=>{});}
 })().catch(error=>{console.error(error);process.exitCode=1;});

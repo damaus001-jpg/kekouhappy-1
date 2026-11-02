@@ -346,6 +346,8 @@ async def screen_service_command(udid, args, timeout):
 async def ensure_screen_services(udid):
     code, mode, error = await screen_service_command(udid, ['mounter', 'query-developer-mode-status'], 25)
     if code:
+        if 'NotPairedError' in error or 'InvalidHostIDError' in error:
+            raise RuntimeError('现有配对身份未通过，已停止自动配对；请在手机确认信任后刷新')
         raise RuntimeError('无法建立手机可信连接，请解锁手机并确认信任此电脑')
     if mode.lower() != 'true':
         raise RuntimeError('开发者模式未开启，请在手机“设置 → 隐私与安全性”开启，重启后确认')

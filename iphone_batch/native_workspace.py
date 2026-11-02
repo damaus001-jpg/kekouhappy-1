@@ -274,6 +274,27 @@ async def focus_current_composer(phone, current, record):
     await tap(phone, point)
 
 
+async def verify_reply_context(service, phone, current, record, *, prepared_body=False, prepared_text=None):
+    """Expose newer bubbles before judging an older viewport stale; never type."""
+    async with asyncio.timeout(25):
+        for attempt in range(4):
+            if current.get('phone_number') != record.get('phone_number'):
+                raise ValueError('当前会话未核验到相同的完整号码，未输入或发送')
+            if prepared_body:
+                prepared_send_control(current, record['phone_number'],
+                                      record['english'] if prepared_text is None else prepared_text)
+            elif not composer_is_empty([row['caption'] for row in current['raw_elements']]):
+                raise ValueError('手机输入框存在草稿或状态未确认，已保留原内容')
+            try:
+                validate_snapshot(current, record)
+                return current
+            except ValueError:
+                if attempt == 3:
+                    raise ValueError('最新会话消息未能核对一致，未输入或发送；请重新读取当前会话后再回复') from None
+            await scroll_history(phone, False)
+            current = await read(service)
+
+
 def prepared_send_control(prepared, number, text):
     if prepared.get('phone_number') != number:
         raise ValueError('粘贴后收件人发生变化，未执行发送')
@@ -282,12 +303,46 @@ def prepared_send_control(prepared, number, text):
     suffixes = ('', ', Text Field', ', Text View', ', Text Message, SMS', ', iMessage')
     inputs = [row for row in rows if row['caption'] in {'Message, '+text+suffix for suffix in suffixes}]
     if len(inputs) != 1:
-        raise ValueError('英文未成功填入手机短信输入框，或输入内容不一致；未执行发送')
+        raise ValueError('正文未成功填入手机短信输入框，或输入内容不一致；未执行发送')
     buttons = [row for row in rows if row['caption'].startswith('Send, Button')
                and 'Dimmed' not in row['caption'] and 'Disabled' not in row['caption']]
     if len(buttons) != 1:
         raise ValueError('手机发送按钮未就绪或不唯一，未执行发送')
     return buttons[0]
+
+
+def failed_preparation(current, record, record_path):
+    """Find our provably unsent phone body, including a newly edited reply."""
+    if current.get('phone_number') != record.get('phone_number'):
+        return None
+    for path in record_path.parent.glob('*.json'):
+        if path == record_path:
+            continue
+        try:
+            previous = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(previous, dict):
+            continue
+        if (previous.get('status') != 'failed'
+                or any(previous.get(key) != record.get(key) for key in ('device', 'phone_number'))):
+            continue
+        # Compatibility with the already failed capsule-detection attempt,
+        # which predates the explicit verified-body marker below.
+        if (previous.get('prepared_body_verified') is not True
+                and previous.get('error') != '未定位到唯一可用的手机发送按钮，未执行发送'):
+            continue
+        try:
+            prepared_send_control(current, record['phone_number'], previous['english'])
+        except (ValueError, KeyError):
+            continue
+        return previous
+    return None
+
+
+def owns_failed_preparation(current, record, record_path):
+    previous = failed_preparation(current, record, record_path)
+    return bool(previous and previous['english'] == record['english'])
 
 
 async def open_phone_conversation(service, phone, number):
@@ -391,25 +446,43 @@ async def run(args):
             key = record.get('phone_number')
             if record['device'] != args.device or not key or current['phone_number'] != key:
                 raise ValueError('当前会话未核验到相同的完整号码，请读取正确的号码会话后重新生成回复')
-            validate_snapshot(current,record)
             text = validate_send_text(record['english'])
-            captions = [r['caption'] for r in current['raw_elements']]
-            if not composer_is_empty(captions):
-                raise ValueError('手机输入框存在草稿或状态未确认，已保留原内容')
             if record.get('status') != 'draft':
                 raise ValueError('这条回复已处理，不可重复发送')
             phone = NativeConversation(); phone.base = args.base
+            previous_preparation = failed_preparation(current, record, record_path)
+            previous_text = previous_preparation['english'] if previous_preparation else None
+            reuse_prepared = previous_text == text
+            current = await verify_reply_context(service, phone, current, record,
+                                                 prepared_body=previous_preparation is not None,
+                                                 prepared_text=previous_text)
+            if previous_preparation:
+                validate_snapshot(current, previous_preparation)
+            captions = [r['caption'] for r in current['raw_elements']]
             profile = load_profile(args.device)
-            if profile:
-                await check_layout(phone, profile, captions)
-                await tap(phone, profile['input'])
+            if reuse_prepared:
+                prepared = current
             else:
-                await focus_current_composer(phone, current, record)
-            await phone.paste(text)
-            await asyncio.sleep(.5)
-            prepared = await read(service)
+                if profile:
+                    await check_layout(phone, profile, captions)
+                    await tap(phone, profile['input'])
+                elif previous_preparation:
+                    await tap(phone, await asyncio.to_thread(input_point, phone))
+                else:
+                    await focus_current_composer(phone, current, record)
+                if previous_preparation:
+                    # Recheck the owned body after focus before replacing it.
+                    focused = await read(service)
+                    prepared_send_control(focused, key, previous_text)
+                    validate_snapshot(focused, record)
+                    await phone.chord(0x04)  # Select only our verified old composer body.
+                await phone.paste(text)
+                await asyncio.sleep(.5)
+                prepared = await read(service)
             prepared_captions = [r['caption'] for r in prepared['raw_elements']]
             prepared_send_control(prepared, key, text)
+            record['prepared_body_verified'] = True
+            record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
             if profile:
                 await check_layout(phone, profile, prepared_captions)
             else:

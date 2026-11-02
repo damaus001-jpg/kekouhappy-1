@@ -68,7 +68,7 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.service.send('phone1',draft['id'],'unused',True)
         self.assertEqual(self.calls,['send'])
         case=json.loads(self.service.reply_path(draft['id']).read_text(encoding='utf-8'))
-        self.assertEqual(case['chinese'],'晚安！😊');self.assertEqual(case['status'],'sent_verified')
+        self.assertEqual(case['text'],'晚安！😊');self.assertEqual(case['chinese'],'');self.assertEqual(case['status'],'sent_verified')
         self.assertEqual(case['context'],self.service.conversation('phone1','conversation-translated')['messages'])
 
     def test_no_confirmation_or_wrong_phone_cannot_send(self):
@@ -92,7 +92,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(saved['id'],result['conversation_id'])
         self.assertEqual(len(saved['messages']),3)
         self.assertEqual(saved['messages'][-1]['text'],draft['english'])
-        self.assertEqual(saved['messages'][-1]['translation_zh'],'晚安！😊')
+        self.assertIsNone(saved['messages'][-1]['translation_zh'])
         self.assertEqual(saved['context_fingerprint'],'after-send')
         next_draft=self.service.direct_draft('phone1',saved['id'],'Hello')
         self.assertTrue(next_draft['sendable'])
@@ -138,19 +138,20 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.service.send('phone1',draft['id'],'unused',True)
         self.assertEqual(self.calls,['send'])
 
-    def test_chinese_model_output_and_tampered_body_are_blocked(self):
+    def test_raw_chinese_bypasses_translation_but_invalid_transport_is_blocked(self):
         self.response['english']='Good night 晚安'
-        with self.assertRaises(ValueError):self.service.draft('phone1','conversation-translated','晚安')
+        self.service.requester=lambda *args: self.fail('Raw sending must not request translation')
+        raw=self.service.draft('phone1','conversation-translated','晚安')
+        self.assertEqual(raw['english'],'晚安')
         draft=self.service.direct_draft('phone1','conversation-translated','12345')
-        path=self.service.reply_path(draft['id']);value=json.loads(path.read_text(encoding='utf-8'));value['english']='你好'
+        path=self.service.reply_path(draft['id']);value=json.loads(path.read_text(encoding='utf-8'));value['english']='bad\x00text'
         self.service.write(path,value)
         with self.assertRaises(ValueError):self.service.send('phone1',draft['id'],'unused',True)
         self.assertFalse(self.calls)
 
     def test_historical_records_cannot_direct_send(self):
         self.conversation['source']='saved';self.source.write_text(json.dumps(self.conversation))
-        draft=self.service.draft('phone1','conversation-translated','晚安')
-        self.assertFalse(draft['sendable'])
+        with self.assertRaises(ValueError):self.service.draft('phone1','conversation-translated','晚安')
         with self.assertRaises(ValueError):self.service.direct_draft('phone1','conversation-translated','Hello')
 
     def test_profile_discards_outgoing_and_invented_evidence_and_caches(self):
@@ -162,10 +163,10 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual([f['label'] for f in result['fields']],['姓名'])
         self.assertTrue(self.service.profile('phone1','conversation-translated')['cached'])
 
-    def test_sending_policy_allows_urls_numbers_emoji_and_blocks_all_han(self):
-        for text in ['Hello 😊','https://example.com/123','12345','👍','👨‍👩‍👧‍👦']:
+    def test_sending_policy_preserves_all_languages_and_blocks_invalid_transport(self):
+        for text in ['Hello 😊','https://example.com/123','12345','👍','👨‍👩‍👧‍👦','你好','Hello 中','https://example.com/中文','\U00020000','〇','  原文\nEnglish  ']:
             self.assertEqual(validate_send_text(text),text)
-        for text in ['你好','Hello 中','https://example.com/中文','\U00020000','〇','bad\x00text']:
+        for text in ['', '   ', 'x'*6001, 'bad\x00text']:
             with self.assertRaises(ValueError):validate_send_text(text)
 
     def test_native_composer_uses_unique_recipient_and_preserves_raw(self):
