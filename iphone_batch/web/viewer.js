@@ -1,7 +1,41 @@
-// The dashboard mounts only the selected preview; device connections stay warm.
+// Reader lifecycle stays in this dynamic asset so existing servers can load it on F5.
+class VideoConnection {
+    constructor({selected = () => true, now = () => performance.now(),
+        setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = id => clearTimeout(id)} = {}) {
+        Object.assign(this, {selected, now, setTimer, clearTimer});
+        this.state = 'connecting';
+        this.startedAt = now(); this.lastFrameAt = null;
+        this.failures = 0; this.timer = null; this.resume = null;
+    }
+    connected() { this.state = 'streaming'; }
+    frame() { this.lastFrameAt = this.now(); this.failures = 0; this.state = 'streaming'; }
+    disconnected() { this.state = 'retrying'; }
+    outageMs() { return this.now() - (this.lastFrameAt === null ? this.startedAt : this.lastFrameAt); }
+    waitRetry() {
+        this.failures++;
+        const delay = this.failures === 1 ? 0 : Math.min(
+            (this.selected() ? 100 : 500) * 2 ** Math.min(this.failures - 2, 5),
+            this.selected() ? 1000 : 3000);
+        return new Promise(resolve => {
+            this.resume = resolve;
+            this.timer = this.setTimer(() => { this.timer = null; this.resume = null; resolve(); }, delay);
+        });
+    }
+    promote() {
+        if (this.timer !== null) this.clearTimer(this.timer);
+        this.timer = null;
+        const resume = this.resume; this.resume = null;
+        if (resume) resume();
+    }
+}
+// The dashboard keeps ready previews connected; non-selected canvases draw at 1 fps.
 const batchManaged = new URLSearchParams(location.search).has('batch');
 let batchActive = !batchManaged;
 let batchVisible = !batchManaged;
+let batchSelected = !batchManaged;
+let lastCanvasDrawAt = 0;
+const BACKGROUND_DRAW_INTERVAL_MS = 1000;
+const videoConnection = new VideoConnection({selected: () => !batchManaged || batchSelected});
 let compatibleVideoAbort = null;
 let inputReady = !batchManaged, inputHealthPaused = false, inputMonitor = null, inputEpoch = 0;
 function controlAvailable() { return batchActive && inputReady; }
@@ -226,6 +260,7 @@ function releaseActive() {
 }
 canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !controlAvailable()) return;   // primary button only
+    pasteRevision++; // A new phone target cancels an unfinished paste.
     wheelInput.stop();
     e.preventDefault();
     // preventDefault on pointerdown also suppresses the implicit
@@ -267,8 +302,7 @@ window.addEventListener('blur', releaseActive);
 document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') releaseActive();
 });
-// Right-click on the canvas = Home button, matching serve-vnc. We still
-// preventDefault to suppress the browser context menu either way.
+// Right-click on the phone image = Home button, matching the original control.
 canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     postJson('/button', {name: 'home', state: 'press'}).then(() => log('button: home (right-click)'));
@@ -413,12 +447,64 @@ function deviceKeyUsages(usages, windowsEdit) {
     return [...mapped];
 }
 let lastKeyPost = Promise.resolve();
+let pastePending = false, pasteRevision = 0;
 function postKeys() {
     // Serialize POSTs so the device sees them in order even when the
     // browser fires keydown bursts faster than the HTTP round-trip.
     const snapshot = deviceKeyUsages(pressedUsages, windowsEditKeys.size > 0);
     const epoch = inputEpoch;
     lastKeyPost = lastKeyPost.then(() => {if (epoch === inputEpoch) return postJson('/key', {usages: snapshot});});
+}
+
+function pasteFeedback(message) {
+    clipboardResult(message);
+    log(message);
+    if (batchManaged) parent.postMessage({type: 'clipboard-paste-result', message},
+        new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070');
+}
+
+function queueHostPaste() {
+    if (pastePending) return;
+    pastePending = true;
+    const epoch = inputEpoch, revision = pasteRevision;
+    const current = () => epoch === inputEpoch && revision === pasteRevision && keyboardCaptureOn();
+    lastKeyPost = lastKeyPost.then(async () => {
+        if (!current()) return;
+        await pointerInput.idle();
+        if (!current()) return;
+        pasteFeedback('正在读取电脑剪贴板…');
+        const content = await readHostClipboard();
+        if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
+        if (!content.image && !content.text) throw Error('电脑剪贴板没有可粘贴的文字或图片');
+        const response = await fetch(content.image ? '/clipboard/image' : '/clipboard', {
+            method: 'POST',
+            headers: {'Content-Type': content.image ? 'image/png' : 'application/json'},
+            body: content.image || JSON.stringify({text: content.text}),
+            signal: AbortSignal.timeout(10000),
+        });
+        if (!response.ok) throw Error('传到手机剪贴板失败（HTTP ' + response.status + '）');
+        // Always write again on an explicit Ctrl+V, even if the same content was
+        // pasted before: the phone clipboard may have changed in the meantime.
+        lastShared = await fingerprint(content);
+        if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
+        const sendKeys = async usages => {
+            const result = await fetch('/manual-key', {method: 'POST',
+                headers: {'Content-Type': 'application/json'}, body: JSON.stringify({usages}),
+                signal: AbortSignal.timeout(5000)});
+            if (!result.ok) throw Error('手机粘贴按键未完成，请检查输入框');
+        };
+        try {
+            // One paste chord, followed by a release. Never send Return or
+            // replay a failed chord: the phone may already have accepted it.
+            try { await sendKeys([0xE3, HID_KEY_V]); }
+            finally { await sendKeys([]); }
+        } catch (error) {
+            if (epoch === inputEpoch && controlAvailable()) inputMonitor?.invalidate();
+            throw error;
+        }
+        if (current()) pasteFeedback('已请求粘贴' + (content.image ? '图片' : '文字') + '，请检查手机输入框后手动发送');
+    }).catch(error => pasteFeedback('粘贴未完成：' + (error.message || error)))
+        .finally(() => { pastePending = false; });
 }
 
 // Gate host-keystroke forwarding on canvas focus: keys flow to the
@@ -429,6 +515,7 @@ function postKeys() {
 const kbIndicator = document.getElementById('kb-indicator');
 function keyboardCaptureOn() { return controlAvailable() && document.activeElement === canvas; }
 function releaseAllKeys() {
+    pasteRevision++;
     windowsEditKeys.clear();
     if (pressedUsages.size) {
         pressedUsages.clear();
@@ -506,10 +593,12 @@ window.addEventListener('keydown', (e) => {
     if (usage === undefined) return;
     e.preventDefault();
     if (e.repeat) return;            // host autorepeat -- the device does its own
-    // Paste shortcut with the shared clipboard on: get the host clipboard onto
-    // the device BEFORE the device sees the V, so it pastes what was copied here.
-    if (usage === HID_KEY_V && (e.metaKey || e.ctrlKey)) {
-        lastKeyPost = lastKeyPost.then(pushHostClipboard);
+    // An explicit paste is independent of background clipboard sync. Consume V
+    // here so a failed clipboard transfer cannot paste stale phone contents.
+    const ctrlHeld = pressedUsages.has(0xE0) || pressedUsages.has(0xE4);
+    if (usage === HID_KEY_V && (e.metaKey || e.ctrlKey || ctrlHeld) && !e.altKey) {
+        queueHostPaste();
+        return;
     }
     if (e.ctrlKey && !e.metaKey && !e.altKey && ['KeyC', 'KeyV', 'KeyX', 'KeyA'].includes(e.code)) {
         windowsEditKeys.add(usage);
@@ -895,6 +984,52 @@ async function fetchCodecWithRetry() {
 // memory — we always show the most recent decoded frame.
 let pendingFrame = null;
 let rafScheduled = false;
+let frameDrawTimer = null, frameDrawRaf = null, lastDecodedFrameAt = 0;
+function cancelFrameDraw() {
+    if (frameDrawTimer !== null) clearTimeout(frameDrawTimer);
+    if (frameDrawRaf !== null) cancelAnimationFrame(frameDrawRaf);
+    frameDrawTimer = frameDrawRaf = null;
+    rafScheduled = false;
+}
+function scheduleFrameDraw() {
+    if (rafScheduled || !pendingFrame) return;
+    rafScheduled = true;
+    if (batchManaged && !batchSelected) {
+        // display:none iframes suspend rAF. A timer keeps their latest canvas
+        // warm without increasing background drawing beyond one frame/second.
+        frameDrawTimer = setTimeout(() => { frameDrawTimer = null; drawPending(); },
+            Math.max(0, BACKGROUND_DRAW_INTERVAL_MS - (performance.now() - lastCanvasDrawAt)));
+    } else {
+        frameDrawRaf = requestAnimationFrame(() => { frameDrawRaf = null; drawPending(); });
+    }
+}
+function queueVideoFrame(frame) {
+    if (pendingFrame) { try { pendingFrame.close(); } catch (_) {} }
+    pendingFrame = frame;
+    lastDecodedFrameAt = performance.now();
+    frameCount++;
+    videoConnection.frame();
+    offlineOverlay.classList.add('hidden');
+    scheduleFrameDraw();
+}
+function setBatchVideoSelected(selected) {
+    if (batchSelected === selected) return;
+    batchSelected = selected;
+    cancelFrameDraw();
+    if (selected) {
+        videoConnection.promote();
+        fitCanvasToViewport();
+        // Present the latest decoded frame immediately; do not wait for a
+        // previously suspended background rAF or the next incoming frame.
+        if (pendingFrame) drawPending();
+        else redrawWithCurrentRotation();
+        if (frameCount > 0 && performance.now() - lastDecodedFrameAt < OFFLINE_GRACE_SECS * 1000) {
+            offlineOverlay.classList.add('hidden');
+            _lastFc = frameCount; _stableSec = _nextPliSec = _nextRestartSec = 0;
+        }
+    }
+    scheduleFrameDraw();
+}
 // The most recent decoded VideoFrame, kept alive so we can redraw it
 // at a new rotation without waiting for the next decode. Closed when
 // it's replaced or when the page is unloaded.
@@ -1005,6 +1140,14 @@ function drawPending() {
     const f = pendingFrame;
     pendingFrame = null;
     if (!f) return;
+    // Keep every warm viewer decoding so selection can show its newest frame,
+    // but repaint non-selected canvases at most once per second.
+    const now = performance.now();
+    if (batchManaged && !batchSelected && now - lastCanvasDrawAt < BACKGROUND_DRAW_INTERVAL_MS) {
+        try { f.close(); } catch (_) {}
+        return;
+    }
+    lastCanvasDrawAt = now;
     const landscape = f.displayWidth > f.displayHeight;
     if (lastFrameLandscape !== null && landscape !== lastFrameLandscape && visualRotation !== 0) {
         // iOS rerendered the buffer in the new orientation — content is
@@ -1030,60 +1173,25 @@ function drawPending() {
     lastFrame = f;
 }
 
-// ----- Offline overlay + auto-recovery: show a banner if frames stop
-// flowing for ~3 s, then nudge the server back to life on a tiered
-// schedule so the viewer resumes "automatically" when the device wakes
-// or its daemon comes back. We sample frameCount once a second; if it
-// hasn't moved for OFFLINE_GRACE_SECS AND the stream has actually
-// started (>=1 drawn frame), reveal the overlay. The moment a new
-// frame lands, hide it again and reset the recovery timers.
-//
-// Recovery ladder, measured in seconds without frames once the
-// overlay is showing:
-//   +PLI_AFTER_SECS -- POST /pli (one RTCP packet, ~100-300 ms IDR)
-//   then every PLI_REPEAT_SECS -- another /pli
-//   +RESTART_AFTER_SECS -- POST /restart (no page reload). The server
-//     preserves the live /stream.bin subscriber across the restart and
-//     emits a type=2 (key-with-reset) IDR onto the existing connection;
-//     the in-page decoder rebuild path picks it up. Crucially we do NOT
-//     location.reload() here -- a reload would resuspend the
-//     AudioContext (browsers require a user gesture to play audio after
-//     navigation) and the user would silently lose sound.
+// A static/quiet screen is not a disconnected reader. Readers retry below;
+// the server watchdog handles upstream encoder stalls without a PLI storm.
 const offlineOverlay = document.getElementById('offline-overlay');
 const OFFLINE_GRACE_SECS = 3;
-const PLI_AFTER_SECS = 8;        // first PLI nudge once we've been offline this long
-const PLI_REPEAT_SECS = 6;       // keep pinging while still offline
-const RESTART_AFTER_SECS = 25;   // give up on PLI; full session restart (no reload)
-const RESTART_REPEAT_SECS = 30;  // if still offline after this much more, restart again
 let _lastFc = -1, _stableSec = 0, _nextPliSec = 0, _nextRestartSec = 0;
 setInterval(() => {
-    if (frameCount === 0) {
+    if (batchManaged && !batchSelected) {
         offlineOverlay.classList.add('hidden');
-        _lastFc = 0; _stableSec = 0; _nextPliSec = 0; _nextRestartSec = 0;
+        _lastFc = frameCount; _stableSec = _nextPliSec = _nextRestartSec = 0;
         return;
     }
-    if (frameCount === _lastFc) {
-        _stableSec += 1;
-        if (_stableSec >= OFFLINE_GRACE_SECS) {
-            offlineOverlay.classList.remove('hidden');
-            if (_stableSec >= RESTART_AFTER_SECS && _stableSec >= _nextRestartSec) {
-                _nextRestartSec = _stableSec + RESTART_REPEAT_SECS;
-                log('auto-recover: /restart (offline ' + _stableSec + 's, no reload — audio stays attached)');
-                fetch('/restart', {method: 'POST', cache: 'no-store'})
-                    .catch(err => log('auto restart err: ' + (err.message || err)));
-            } else if (_stableSec >= PLI_AFTER_SECS && _stableSec >= _nextPliSec) {
-                _nextPliSec = _stableSec + PLI_REPEAT_SECS;
-                log('auto-recover: /pli (offline ' + _stableSec + 's)');
-                fetch('/pli', {method: 'POST', cache: 'no-store'})
-                    .catch(err => log('auto pli err: ' + (err.message || err)));
-            }
-        }
-    } else {
-        if (_stableSec >= OFFLINE_GRACE_SECS) log('stream resumed after ' + _stableSec + 's');
+    if (frameCount !== _lastFc) {
         _stableSec = 0;
-        _nextPliSec = 0;
-        _nextRestartSec = 0;
         offlineOverlay.classList.add('hidden');
+    } else {
+        _stableSec++;
+        const disconnected = videoConnection.state === 'retrying' &&
+            videoConnection.outageMs() >= OFFLINE_GRACE_SECS * 1000;
+        offlineOverlay.classList.toggle('hidden', !disconnected);
     }
     _lastFc = frameCount;
 }, 1000);
@@ -1229,8 +1337,14 @@ function showInPanel(content) {
 }
 
 async function readHostClipboard() {
-    const native = await fetch('/host-clipboard', {cache:'no-store'});
-    if (native.ok) { const value = await native.json(); return {text:value.text, image:null}; }
+    const native = await fetch('/host-clipboard', {cache:'no-store', signal: AbortSignal.timeout(5000)});
+    if (native.ok) {
+        const value = await native.json();
+        const image = value.image_png
+            ? new Blob([Uint8Array.from(atob(value.image_png), c => c.charCodeAt(0))], {type: 'image/png'}) : null;
+        return {text: value.text, image};
+    }
+    if (native.status === 403) throw new Error('当前手机未获得控制权限');
     if (!navigator.clipboard) throw new Error('电脑剪贴板暂不可用');
     const content = {text: null, image: null};
     if (navigator.clipboard.read) {
@@ -1420,7 +1534,7 @@ window.addEventListener('focus', async () => {
     if (pendingHostWrite === null) { pushHostClipboard(); return; }
     if (await writeHostClipboard(pendingHostWrite)) pendingHostWrite = null;
 });
-try { if (localStorage.getItem('clipboardSync') === 'true') setClipboardSync(true); } catch (e) {}
+try { if (!batchManaged && localStorage.getItem('clipboardSync') === 'true') setClipboardSync(true); } catch (e) {}
 
 async function readCompatibleFrames(reader, onFrame, decodeImage = createImageBitmap) {
     let buffer = new Uint8Array(0), latestImage = null, decodeTask = null;
@@ -1476,19 +1590,21 @@ async function runCompatibleVideo() {
         try {
             const response = await fetch('/jpeg.bin', {cache: 'no-store', signal: compatibleVideoAbort.signal});
             if (!response.ok) throw Error('视频服务暂不可用');
+            videoConnection.connected();
             const reader = response.body.getReader();
             try {
                 await readCompatibleFrames(reader, frame => {
                     Object.defineProperties(frame, {displayWidth: {value: frame.width}, displayHeight: {value: frame.height}});
-                    if (pendingFrame) pendingFrame.close();
-                    pendingFrame = frame;
-                    if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(drawPending); }
-                    frameCount++;
+                    queueVideoFrame(frame);
                 });
             } finally { await reader.cancel().catch(() => {}); }
-        } catch (error) { if (error.name === 'AbortError') continue; log('兼容视频：' + error.message + '，正在重连'); }
+        } catch (error) {
+            videoConnection.disconnected();
+            if (error.name !== 'AbortError') log('兼容视频：' + error.message + '，正在重连');
+        }
+        videoConnection.disconnected();
         compatibleVideoAbort = null;
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await videoConnection.waitRetry();
     }
 }
 
@@ -1543,15 +1659,7 @@ async function run() {
             // pending frame slot and let requestAnimationFrame draw the
             // latest one in lockstep with the display refresh. Released
             // frames must be .close()'d to free GPU resources.
-            if (pendingFrame) {
-                try { pendingFrame.close(); } catch (e) {}
-            }
-            pendingFrame = frame;
-            if (!rafScheduled) {
-                rafScheduled = true;
-                requestAnimationFrame(drawPending);
-            }
-            frameCount++;
+            queueVideoFrame(frame);
         },
         // Decoder errors propagate asynchronously via this callback. After one,
         // the decoder transitions to 'closed' -- we re-create it and wait for
@@ -1607,11 +1715,13 @@ async function run() {
         }
     }
     if (!resp) { log('FAIL: /stream.bin unreachable'); return; }
+    videoConnection.connected();
     const reader = resp.body.getReader();
     let buf = new Uint8Array(0);
     let timestamp = 0;
     let gotKey = false;
     let sentCount = 0;
+    try {
     while (true) {
         const { value, done } = await reader.read();
         if (done) { log('stream ended'); break; }
@@ -1691,6 +1801,18 @@ async function run() {
             }
         }
     }
+    } finally {
+        try { await reader.cancel(); } catch (_) {}
+        try { decoder.close(); } catch (_) {}
+    }
+}
+async function runVideoForever() {
+    while (true) {
+        try { await run(); }
+        catch (error) { log('视频连接：' + (error.message || error) + '，正在重连'); }
+        videoConnection.disconnected();
+        await videoConnection.waitRetry();
+    }
 }
 inputMonitor = new InputHealthMonitor({
     request: async () => {
@@ -1699,7 +1821,7 @@ inputMonitor = new InputHealthMonitor({
         if (!response.ok) throw Error('控制连接检查失败（HTTP ' + response.status + '）');
         return response.json();
     },
-    eligible: () => !inputHealthPaused && !document.hidden && activePointer === null &&
+    eligible: () => !inputHealthPaused && !pastePending && !document.hidden && activePointer === null &&
         !pointerInput.running && !wheelInput.active && pressedUsages.size === 0,
     changed: state => {
         if (!state.ready && inputReady) inputEpoch++;
@@ -1712,7 +1834,7 @@ inputMonitor = new InputHealthMonitor({
     },
 });
 if (!batchManaged) inputMonitor.setActive(true);
-run().catch(e => log('fatal: ' + e.message));
+runVideoForever().catch(e => log('fatal: ' + e.message));
 
 if (batchManaged) {
     window.addEventListener('message', event => {
@@ -1733,8 +1855,9 @@ if (batchManaged) {
         if (!event.data.active) releaseActive();
         batchActive = event.data.active === true;
         inputHealthPaused = event.data.working === true;
-        inputMonitor.setActive(batchActive);
+        inputMonitor.setActive(batchActive, event.data.controlReady === true);
         batchVisible = typeof event.data.visible === 'boolean' ? event.data.visible : batchActive;
+        setBatchVideoSelected(event.data.selected === true);
         if (!batchVisible && compatibleVideoAbort) compatibleVideoAbort.abort();
         // The dashboard owns the controls; keep its embedded viewer screen-only.
         document.body.classList.add('batch-preview');

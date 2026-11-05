@@ -16,6 +16,7 @@ import hashlib
 import tempfile
 import contextlib
 import urllib.request
+from workspace_access import signed_opener
 from pathlib import Path
 from device_registry import MAX_DEVICES
 
@@ -414,7 +415,7 @@ async def run_screen(udid, port):
             try:
                 def probe():
                     # Ignore proxy environment variables for this localhost-only viewer.
-                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    opener = signed_opener()
                     with opener.open(url, timeout=0.3) as response:
                         return response.status == 200
                 if await asyncio.to_thread(probe):

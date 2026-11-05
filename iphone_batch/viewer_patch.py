@@ -1,15 +1,19 @@
-"""Local viewer assets and a same-origin, loopback-only Windows text clipboard bridge."""
+"""Local viewer assets and a same-origin, loopback-only Windows clipboard bridge."""
 import asyncio
+import base64
+import io
 import json
 import os
 import hmac
 import logging
 import time
 from pathlib import Path
+from workspace_access import AccessVerifier, HEADER
 from input_health import check_input, clear_input, record_input, ensure_input_services
 from video_idle import ensure_idle_monitor, stream_until_disconnect, touch_media, wake_media
 
 MAX_TEXT_BYTES = 1024 * 1024
+MAX_CLIPBOARD_IMAGE_BYTES = 16 * 1024 * 1024
 
 
 def viewer_script(folder):
@@ -41,7 +45,7 @@ class ReplayReader:
         return result
 
 
-def windows_clipboard(text=None, *, write=False):
+def windows_clipboard(text=None, *, write=False, include_image=False):
     import win32clipboard as clipboard
     for attempt in range(15):
         try:
@@ -56,9 +60,32 @@ def windows_clipboard(text=None, *, write=False):
             clipboard.EmptyClipboard()
             clipboard.SetClipboardText(text, clipboard.CF_UNICODETEXT)
             return None
-        if not clipboard.IsClipboardFormatAvailable(clipboard.CF_UNICODETEXT):
-            return None
-        return clipboard.GetClipboardData(clipboard.CF_UNICODETEXT)
+        value = (clipboard.GetClipboardData(clipboard.CF_UNICODETEXT)
+                 if clipboard.IsClipboardFormatAvailable(clipboard.CF_UNICODETEXT) else None)
+        if not include_image:
+            return value
+        # Read text and image while holding the same clipboard snapshot. A copied
+        # browser image may also carry a URL; the paste action prefers its image.
+        image_png = None
+        formats = (clipboard.RegisterClipboardFormat('PNG'), 17, clipboard.CF_DIB)
+        for image_format in formats:  # PNG, CF_DIBV5, CF_DIB
+            if not clipboard.IsClipboardFormatAvailable(image_format):
+                continue
+            from PIL import Image
+            raw = clipboard.GetClipboardData(image_format)
+            if not isinstance(raw, bytes) or len(raw) > 64 * 1024 * 1024:
+                raise ValueError('clipboard image exceeds size limit')
+            with Image.open(io.BytesIO(raw)) as image:
+                if image.width * image.height > 32 * 1024 * 1024:
+                    raise ValueError('clipboard image exceeds pixel limit')
+                output = io.BytesIO()
+                image.save(output, format='PNG')
+            png = output.getvalue()
+            if len(png) > MAX_CLIPBOARD_IMAGE_BYTES:
+                raise ValueError('clipboard image exceeds size limit')
+            image_png = base64.b64encode(png).decode('ascii')
+            break
+        return {'text': value, 'image_png': image_png}
     finally:
         clipboard.CloseClipboard()
 
@@ -82,6 +109,7 @@ def install():
     screen_stream.VIEWER_JS_TEMPLATE = viewer_script(folder)
     if getattr(screen_stream.ScreenStreamServer, '_batch_patched', False):
         return
+    access = AccessVerifier()
     screen_stream.ScreenStreamServer._batch_patched = True
     screen_stream.ScreenStreamServer._ensure_hid = ensure_input_services
     token = os.environ.get('IPHONE_BATCH_CONTROL_TOKEN')
@@ -126,7 +154,7 @@ def install():
         first = await reader.readline()
         parts = first.decode('latin-1').strip().split()
         if len(parts) != 3:
-            return await original(self, ReplayReader(first, reader), writer)
+            return await reply(writer, 400, {'error': 'invalid request'})
         device_token = token_for(self)
         path = parts[1].partition('?')[0]
         async def delegate(replay):
@@ -142,16 +170,8 @@ def install():
                 logging.getLogger(__name__).warning('Media wake failed: port=%s error=%s', self._http_port, type(error).__name__)
                 await reply(writer, 503, {'error': '视频或控制服务正在准备，请稍后重试'})
                 return False
-        if parts[0] == 'GET' and path in ('/codec', '/stream.bin', '/audio.bin'):
-            if not await prepare_media():
-                return
-        if path == '/viewer.js':
-            # Frontend fixes should need only F5, not a device reconnection.
-            screen_stream.VIEWER_JS_TEMPLATE = viewer_script(folder)
-        special = path in ('/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-key', '/input-health')
+        special = path in ('/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-key', '/input-health', '/input-readiness')
         restricted = device_token and (parts[0] == 'POST' or path.startswith('/clipboard') or path == '/host-clipboard')
-        if not special and not restricted:
-            return await delegate(ReplayReader(first, reader))
         prefix = bytearray(first)
         headers = {}
         for _ in range(100):
@@ -177,6 +197,15 @@ def install():
                 or (origin is not None and origin not in ('http://' + host, 'https://' + host))
                 or self._refuse_request(headers) is not None):
             return await reply(writer, 403, {'error': 'same-origin localhost access required'})
+        if not access.verify(parts[0], self._http_port, parts[1], headers.get(HEADER.lower())):
+            return await reply(writer, 403, {'error': '请从授权客户端打开短信工作台'})
+        if parts[0] == 'GET' and path in ('/codec', '/stream.bin', '/audio.bin'):
+            if not await prepare_media():
+                return
+        if path == '/viewer.js':
+            screen_stream.VIEWER_JS_TEMPLATE = viewer_script(folder)
+        if not special and not restricted:
+            return await delegate(ReplayReader(prefix, reader))
         try:
             if path == '/input-health':
                 if parts[0] != 'POST':
@@ -191,6 +220,22 @@ def install():
                 if not await prepare_media():
                     return
                 result = await check_input(self, input_lock(self), lambda: active(self))
+                return await reply(writer, 200, result)
+            if path == '/input-readiness':
+                if parts[0] != 'POST':
+                    return await reply(writer, 405, {'error': 'POST required'})
+                if not device_token or not hmac.compare_digest(headers.get('x-control-token', ''), device_token):
+                    return await reply(writer, 403, {'error': 'invalid control token'})
+                length = int(headers.get('content-length', '0'))
+                if not 0 < length <= 256:
+                    return await reply(writer, 400, {'error': 'invalid readiness request'})
+                if json.loads(await asyncio.wait_for(reader.readexactly(length), 3)) != {}:
+                    return await reply(writer, 400, {'error': 'invalid readiness request'})
+                if not await prepare_media():
+                    return
+                # Readiness probes are authorized by the dashboard token and
+                # only send an idle keyboard report; they never inject input.
+                result = await check_input(self, input_lock(self), lambda: True)
                 return await reply(writer, 200, result)
             if path in ('/manual-touch', '/manual-home', '/manual-key'):
                 if parts[0] != 'POST':
@@ -340,8 +385,8 @@ def install():
                     'archive_schema': archive_schema, 'text_detected': content.text is not None,
                     'text_length': len(content.text) if content.text is not None else 0})
             if parts[0] == 'GET':
-                text = await asyncio.to_thread(windows_clipboard)
-                return await reply(writer, 200, {'text': text})
+                content = await asyncio.to_thread(windows_clipboard, include_image=True)
+                return await reply(writer, 200, content)
             if parts[0] != 'POST':
                 return await reply(writer, 405, {'error': 'GET or POST required'})
             if not headers.get('content-type', '').startswith('application/json'):

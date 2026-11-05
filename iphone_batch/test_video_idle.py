@@ -92,6 +92,29 @@ class MediaIdleTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(task, 1)
         self.assertTrue(released.is_set())
 
+    async def test_auth_wait_applies_after_start_but_not_to_warm_stream(self):
+        events=[]
+        class FakeServer:
+            _active_service=None
+            _audio_service=object()
+            _stream_dirty=False
+            async def _ensure_fresh_stream(self, force=False):
+                self._active_service=object();events.append('started')
+            async def serve(self): pass
+        lock=asyncio.Lock()
+        install(FakeServer,lambda instance:lock)
+        item=FakeServer()
+        async def settled(seconds):
+            self.assertTrue(lock.locked())
+            self.assertEqual(events,['started'])
+            self.assertGreaterEqual(seconds,.5)
+            events.append('settled')
+        with patch('video_idle.asyncio.sleep',side_effect=settled) as wait:
+            await item._ensure_fresh_stream()
+            await item._ensure_fresh_stream()
+        self.assertEqual(events,['started','settled'])
+        wait.assert_awaited_once()
+
 
 if __name__ == '__main__':
     unittest.main()

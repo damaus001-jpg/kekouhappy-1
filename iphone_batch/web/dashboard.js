@@ -76,17 +76,25 @@ phoneHomeButton?.addEventListener('click',()=>{
  card.frame.contentWindow.postMessage({type:'device-home'},card.origin);
 });
 window.addEventListener('message',event=>{
+ if(event.data?.type==='clipboard-paste-result'){
+  const card=cards.get(active);
+  if(!card?.frame||event.source!==card.frame.contentWindow||event.origin!==card.origin)return;
+  if(typeof event.data.message==='string')notice(event.data.message.slice(0,300));
+  return;
+ }
  if(event.data?.type==='input-health-result'){
   const card=cards.get(active);
   if(!card?.frame||event.source!==card.frame.contentWindow||event.origin!==card.origin)return;
   const state=event.data;
   card.inputReady=state.ready===true;
+  card.controlReady=state.ready===true;
   syncWorkspaceControls();
   if(card.connectionNotice){
    card.connectionNotice.hidden=state.ready===true||state.state==='inactive';
    card.connectionNotice.textContent=state.state==='unavailable'?'控制连接不可用，点击设备列表刷新重试':'控制连接检查与恢复中…';
   }
   if(state.manual&&state.ready)notice('当前设备控制连接已检查'+(state.recovered?'并恢复':'，可正常操作')+'。');
+  if(state.ready&&state.prewarmed)notice('目标设备画面与操控均已就绪');
   return;
  }
  if(event.data?.type!=='device-home-result')return;
@@ -140,10 +148,18 @@ sortControl.addEventListener('change',()=>{
  render(latest,active);
 });
 let deviceMenuTarget=null;
+const trustRequests=new Set();
+const reconnectRequests=new Set(),reconnectNotices=new Map();
 const deviceMenu=document.getElementById('device-context-menu');
 function closeDeviceMenu(){deviceMenu.hidden=true;deviceMenuTarget=null;}
 function showDeviceMenu(event,device,index){
  event.preventDefault();deviceMenuTarget={device,index};deviceMenu.hidden=false;
+ const trustButton=document.getElementById('device-context-trust');
+ trustButton.disabled=devicePreview||device.ready||device.trust_pending||device.reconnecting||trustRequests.has(device.udid);
+ const reconnectButton=document.getElementById('device-context-reconnect');
+ reconnectButton.disabled=devicePreview||device.trust_pending||device.reconnecting||reconnectRequests.has(device.udid)||workspaceBusy||busy;
+ reconnectButton.textContent=device.reconnecting?'正在重新连接…':'重新连接此设备';
+ trustButton.textContent=(device.trust_pending||trustRequests.has(device.udid))?'正在等待信任确认…':'重新建立信任';
  const followup=deviceLabel(device,index).followup;
  document.getElementById('device-context-followup').setAttribute('aria-checked',String(followup));
  document.getElementById('device-context-none').setAttribute('aria-checked',String(!followup));
@@ -154,6 +170,31 @@ function showDeviceMenu(event,device,index){
 }
 document.getElementById('device-context-edit').addEventListener('click',()=>{
  const target=deviceMenuTarget;closeDeviceMenu();if(target)editDevice(target.device,target.index);
+});
+document.getElementById('device-context-trust').addEventListener('click',async()=>{
+ const target=deviceMenuTarget;closeDeviceMenu();if(!target||devicePreview)return;
+ const device=target.device,label=deviceLabel(device,target.index).number;
+ if(trustRequests.has(device.udid))return;
+ trustRequests.add(device.udid);
+ notice('设备 '+label+'：请保持手机解锁，在手机上点击“信任”并输入密码，最多等待约一分钟。');
+ try{
+  const response=await fetch('/api/devices/trust',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:device.udid}),signal:AbortSignal.timeout(100000)});
+  const result=await response.json();if(!response.ok)throw Error(result.error||'建立信任未完成');
+  notice('设备 '+label+'：'+result.message);
+ }catch(error){notice('设备 '+label+'：'+(error.name==='TimeoutError'?'等待结果超时，请查看设备状态后再重试':error.message));}
+ finally{trustRequests.delete(device.udid);refresh();}
+});
+document.getElementById('device-context-reconnect').addEventListener('click',async()=>{
+ const target=deviceMenuTarget;closeDeviceMenu();if(!target||devicePreview)return;
+ const device=target.device,label=deviceLabel(device,target.index).number;
+ if(reconnectRequests.has(device.udid)||device.reconnecting||workspaceBusy||busy)return;
+ reconnectRequests.add(device.udid);notice('设备 '+label+'：正在重新建立画面与操控连接…');
+ try{
+  const response=await fetch('/api/devices/reconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:device.udid}),signal:AbortSignal.timeout(10000)});
+  const result=await response.json();if(!response.ok)throw Error(result.error||'重新连接未完成');
+  reconnectNotices.set(device.udid,{job:result.job,label});
+ }catch(error){notice('设备 '+label+'：'+error.message);}
+ finally{reconnectRequests.delete(device.udid);refresh();}
 });
 for(const [id,followup] of [['device-context-followup',true],['device-context-none',false]]){
  document.getElementById(id).addEventListener('click',()=>{
@@ -170,7 +211,8 @@ followupControl.addEventListener('change',()=>{
  catch{notice('保存失败，请允许此页面使用本地存储后重试。');syncContactFollowup();return;}
  render(latest,active);
 });
-document.addEventListener('pointerdown',event=>{if(!deviceMenu.contains(event.target))closeDeviceMenu();});
+document.addEventListener('pointerdown',event=>{if(!deviceMenu.contains(event.target))closeDeviceMenu();},true);
+window.addEventListener('blur',closeDeviceMenu);
 document.addEventListener('keydown',event=>{if(event.key==='Escape')closeDeviceMenu();});
 document.addEventListener('scroll',closeDeviceMenu,true);
 window.addEventListener('resize',closeDeviceMenu);
@@ -299,7 +341,7 @@ document.getElementById('device-label-form').addEventListener('submit',event=>{
  document.getElementById('device-label-dialog').close();editingDevice=null;
  render(latest,active);
 });
-function sendFocus(card,on){if(card.frame) card.frame.contentWindow.postMessage({type:'device-focus',active:on,visible:card.node.parentElement?.id==='selected'&&!card.node.hidden,working:workspaceBusy},card.origin);}
+function sendFocus(card,on,selected=card.node.classList.contains('selected')){if(card.frame) card.frame.contentWindow.postMessage({type:'device-focus',active:on,visible:true,selected,working:workspaceBusy,controlReady:card.controlReady===true},card.origin);}
 function releasePreview(card){
  if(!card.frame)return;
  sendFocus(card,false);
@@ -311,12 +353,23 @@ function releasePreview(card){
 }
 function render(rows,selected,controller=controlOwner){
  latest=rows;active=selected;controlOwner=controller;
+ for(const [udid,job] of reconnectNotices){
+  const row=rows.find(device=>device.udid===udid);
+  if(!row){notice('设备 '+job.label+' 已断开，请接入后刷新设备列表');reconnectNotices.delete(udid);}
+  else if(row.reconnect_id===job.job&&!row.reconnecting){
+   notice('设备 '+job.label+'：'+(row.reconnect_state==='ready'?'系统会话与连接已重建（'+(row.reconnect_elapsed||0)+'秒），请检查左键操控':row.reconnect_error||'重新连接失败，请重试'));
+   reconnectNotices.delete(udid);
+  }else if(row.reconnect_id===job.job&&row.reconnecting){
+   const stages={stopping:'停止旧连接',resetting:'清理手机端远程会话',starting:'建立新连接',checking:'检查操控通道'};
+   notice('设备 '+job.label+'：正在'+(stages[row.reconnect_stage]||'重新连接')+'，已用时 '+(row.reconnect_elapsed||0)+' 秒…');
+  }
+ }
  syncDeviceRefreshControls();
  const connected=new Set(rows.map(device=>device.udid));
- // Release the old page before opening the next one, including its decoder,
- // video subscriptions, audio and recovery timers. Hiding an iframe is insufficient.
+ // Keep ready viewers connected so a newly selected device already has a
+ // decoded frame. Non-selected viewers throttle canvas drawing in viewer.js.
  for(const [udid,card] of cards){
-  if(udid!==selected||!rows.some(d=>d.udid===udid&&d.ready))releasePreview(card);
+  if(!rows.some(d=>d.udid===udid&&d.ready))releasePreview(card);
   if(!connected.has(udid)){card.node.remove();cards.delete(udid);}
  }
  syncDeveloperModeButton();
@@ -393,10 +446,11 @@ function render(rows,selected,controller=controlOwner){
    card={node,button,waiting,frame:null,origin:'http://127.0.0.1:'+d.port};cards.set(d.udid,card);
   }
   if(!d.ready)card.waiting.textContent=d.error||'正在启动投屏…';
-  if(d.ready&&selected===d.udid&&!card.frame){
+  card.controlReady=d.control_ready===true;
+  if(d.ready&&!card.frame){
    card.inputReady=false;
    const frame=document.createElement('iframe');frame.title=d.name+' 实时画面';frame.src=card.origin+'/?batch=1&manager='+encodeURIComponent(location.origin);frame.allow='clipboard-read; clipboard-write';
-   frame.onload=()=>sendFocus(card,controlOwner===d.udid&&active===d.udid&&!controlPaused&&!busy);card.frame=frame;card.waiting.remove();card.node.append(frame);
+   frame.onload=()=>sendFocus(card,controlOwner===d.udid&&active===d.udid&&!controlPaused&&!busy,active===d.udid);card.frame=frame;card.waiting.remove();card.node.append(frame);
    const cover=document.createElement('button');cover.className='cover';cover.textContent='选择 '+d.name;cover.setAttribute('aria-label','选择 '+d.name+' 进行控制');cover.onclick=()=>select(d.udid);card.cover=cover;card.node.append(cover);
    const connectionNotice=document.createElement('div');connectionNotice.className='input-connection-status';connectionNotice.setAttribute('role','status');connectionNotice.textContent='控制连接检查中…';card.connectionNotice=connectionNotice;card.node.append(connectionNotice);
   }
@@ -405,7 +459,7 @@ function render(rows,selected,controller=controlOwner){
   const target=document.getElementById('selected');if(card.node.parentElement!==target)target.append(card.node);
   card.node.hidden=!on;
   const controllable=on&&controlOwner===d.udid&&!controlPaused&&!busy;
-  if(card.lastActive!==controllable||card.lastVisible!==on||card.lastWorking!==workspaceBusy){sendFocus(card,controllable);card.lastActive=controllable;card.lastVisible=on;card.lastWorking=workspaceBusy;}
+  if(card.lastActive!==controllable||card.lastVisible!==on||card.lastWorking!==workspaceBusy||card.lastControlReady!==card.controlReady){sendFocus(card,controllable,on);card.lastActive=controllable;card.lastVisible=on;card.lastWorking=workspaceBusy;card.lastControlReady=card.controlReady;}
  }
  const empty=document.getElementById('empty');if(empty)empty.style.display=selected?'none':'';
  const owner=rows.find(d=>d.udid===selected);
@@ -414,8 +468,8 @@ function render(rows,selected,controller=controlOwner){
 }
 async function select(udid){
  if(devicePreview){previewSelection=udid;render(previewDevices,previewSelection);return;}
-  if(busy||workspaceBusy||refreshingDevices)return;selectionRevision++;busy=true;for(const card of cards.values()){sendFocus(card,false);card.lastActive=false;}render(latest,active);
- try{const j=await deviceRequest('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({udid})});active=j.selected??j.active;controlOwner=j.active;}
+  if(busy||workspaceBusy||refreshingDevices)return;selectionRevision++;busy=true;active=udid;controlOwner=null;for(const card of cards.values()){sendFocus(card,false);card.lastActive=false;}render(latest,active);
+ try{const j=await deviceRequest('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({udid})});active=j.selected??j.active;controlOwner=j.active;const card=cards.get(udid);if(card)card.controlReady=j.control_ready===true;}
  catch(e){active=null;controlOwner=null;notice(e.message);}
  finally{busy=false;render(latest,active);refresh();}
 }

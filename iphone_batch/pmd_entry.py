@@ -14,6 +14,9 @@ def main():
     install_pairing()
     prevent_automatic_pairing()
     import sys
+    if 'reset-workspace-session' in sys.argv:
+        from media_recovery import install_cli
+        install_cli()
     if 'serve-web' in sys.argv:
         from viewer_patch import install
         install()

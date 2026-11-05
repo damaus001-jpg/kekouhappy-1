@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch, AsyncMock
 from types import SimpleNamespace
 import viewer_patch
+from workspace_access import HEADER, signed_header
 from pymobiledevice3.remote.core_device import screen_stream
 
 viewer_patch.install()
@@ -11,6 +12,7 @@ viewer_patch.install()
 class ViewerHTTPFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.instance = object.__new__(screen_stream.ScreenStreamServer)
+        self.instance._http_tasks = set()  # upstream 11.29+ tracks owned handlers
         self.instance._password = None
         self.instance._active_service = object()  # fake media session; phone services are mocked
         self.instance._stream_dirty = False
@@ -18,10 +20,10 @@ class ViewerHTTPFixture(unittest.IsolatedAsyncioTestCase):
         self.port = self.server.sockets[0].getsockname()[1]
         self.instance._http_port = self.port
         self.clipboard = None
-        def native(text=None, *, write=False):
+        def native(text=None, *, write=False, include_image=False):
             if write:
                 self.clipboard = text
-            return self.clipboard
+            return {'text': self.clipboard, 'image_png': None} if include_image else self.clipboard
         self.mock = patch('viewer_patch.windows_clipboard', side_effect=native)
         self.mock.start()
 
@@ -30,12 +32,13 @@ class ViewerHTTPFixture(unittest.IsolatedAsyncioTestCase):
         await self.server.wait_closed()
         self.mock.stop()
 
-    async def request(self, method='GET', body=None, origin=None, path='/host-clipboard', length=None, token=None):
+    async def request(self, method='GET', body=None, origin=None, path='/host-clipboard', length=None, token=None, authorized=True):
         payload = b'' if body is None else json.dumps(body).encode()
         reader, writer = await asyncio.open_connection('127.0.0.1', self.port)
         headers = (f'{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n'
                    f'Content-Type: application/json\r\nContent-Length: {len(payload) if length is None else length}\r\n')
         if token: headers += f'X-Control-Token: {token}\r\n'
+        if authorized: headers += f'{HEADER}: {signed_header(method, f"http://127.0.0.1:{self.port}{path}")}\r\n'
         if origin: headers += f'Origin: {origin}\r\n'
         writer.write(headers.encode()+b'\r\n'+payload)
         await writer.drain()
@@ -47,6 +50,33 @@ class ViewerHTTPFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ClipboardHTTPTests(ViewerHTTPFixture):
+
+    async def test_every_viewer_entry_rejects_unsigned_browser_before_media_wake(self):
+        with patch('viewer_patch.wake_media', new_callable=AsyncMock) as wake:
+            for path in ['/', '/viewer.js', '/viewer.css', '/codec', '/stream.bin', '/audio.bin', '/jpeg.bin', '/host-clipboard']:
+                code, _ = await self.request(path=path, authorized=False)
+                self.assertEqual(code, 403, path)
+            code, _ = await self.request('POST', {'type':'contact','x':1,'y':1}, path='/manual-touch', authorized=False)
+            self.assertEqual(code,403)
+            for path in ['/touch','/key','/button','/clipboard','/clipboard/image','/control-mode','/input-readiness']:
+                code, _ = await self.request('POST', {}, path=path, authorized=False)
+                self.assertEqual(code,403,path)
+            wake.assert_not_awaited()
+
+    async def test_signed_background_probe_does_not_grant_input_ownership(self):
+        self.instance._batch_token='manager'
+        self.instance._batch_active=False
+        self.instance._ensure_hid=AsyncMock()
+        self.instance._ensure_keyboard=AsyncMock()
+        self.instance._kb_service_id=4
+        self.instance._uhs=SimpleNamespace(send_keyboard=AsyncMock())
+        code, _=await self.request('POST', {}, path='/input-readiness')
+        self.assertEqual(code,403)
+        code, _=await self.request('POST', {}, path='/input-readiness', token='manager')
+        self.assertEqual(code,200)
+        self.instance._uhs.send_keyboard.assert_awaited_once_with(4,[])
+        code, _=await self.request('POST', {'usages':[4]}, path='/manual-key', token='manager')
+        self.assertEqual(code,403)
 
     async def test_compatible_video_rejects_cross_origin_and_writes(self):
         with patch('video_compat.serve_jpeg') as serve:
@@ -185,6 +215,14 @@ class ClipboardHTTPTests(ViewerHTTPFixture):
         self.assertEqual(code, 200)
         code, data = await self.request()
         self.assertEqual(json.loads(data)['text'], value)
+
+    async def test_host_clipboard_returns_native_image_without_browser_permission(self):
+        content = {'text': None, 'image_png': 'native-png-data'}
+        with patch('viewer_patch.windows_clipboard', return_value=content) as native:
+            code, data = await self.request()
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(data), content)
+        native.assert_called_once_with(include_image=True)
 
     async def test_cross_origin_cannot_read_or_write(self):
         for method in ['GET', 'POST']:

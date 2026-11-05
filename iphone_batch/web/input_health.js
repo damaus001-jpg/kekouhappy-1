@@ -14,12 +14,16 @@ class InputHealthMonitor {
         }, ms);
     }
     publish(state, extra = {}) { this.changed({state, ready: this.ready, ...extra}); }
-    setActive(on) {
-        if (this.active === on) return;
-        this.active = on; this.revision++; this.ready = false; this.failures = 0;
+    setActive(on, prewarmed = false) {
+        if (this.active === on) {
+            if (on && !prewarmed && this.ready) this.invalidate();
+            return;
+        }
+        this.active = on; this.revision++; this.ready = on && prewarmed; this.failures = 0;
         if (this.timer !== null) this.clearTimer(this.timer);
         this.timer = null;
-        if (on) { this.publish('checking'); this.check(); }
+        if (on && this.ready) { this.publish('ready', {prewarmed: true}); this.schedule(5000); }
+        else if (on) { this.publish('checking'); this.check(); }
         else this.publish('inactive');
     }
     invalidate() {

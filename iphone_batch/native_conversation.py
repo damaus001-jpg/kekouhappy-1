@@ -1,5 +1,6 @@
 """Open uniquely identified unread phone conversations via native keyboard navigation."""
 import argparse,asyncio,json,re,sys,urllib.request,urllib.error
+from workspace_access import signed_opener
 from pathlib import Path
 from pymobiledevice3 import common
 from pymobiledevice3.lockdown import create_using_usbmux
@@ -17,7 +18,7 @@ def phone_key(value):
     if len(digits)==11 and digits.startswith('1'):return '+'+digits
     return None
 class NativeConversation:
-    def __init__(self):self.opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));self.base=None
+    def __init__(self):self.opener=signed_opener();self.base=None
     def request(self,base,path,body=None):
         # Native workflows require actual HID dispatch, not a queue-insertion ACK.
         path={'/touch':'/manual-touch','/key':'/manual-key'}.get(path,path)

@@ -1,7 +1,8 @@
-# Windows x64 / Python 3.13; captured from the validated v0.1.0 environment
+# Windows x64 / Python 3.13; upstream runtime updated to 11.49.5 on 2026-11-04
 aiofiles==25.1.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
+ansilogs==1.1.0
 antlr4-python3-runtime==4.9.3
 anyio==4.15.1
 arrow==1.4.0
@@ -14,6 +15,7 @@ av==19.0.1
 backports.zstd==1.7.0
 biplist==1.0.3
 bpylist2==4.1.1
+bytestruct==0.2.0
 certifi==2026.7.22
 cffi==2.1.1
 chardet==7.6.0
@@ -41,7 +43,7 @@ humanfriendly==10.0
 hyperframe==6.1.0
 idna==3.20
 ifaddr==0.2.0
-ipsw-parser==1.7.5
+ipsw-parser==1.9.0
 ipython==9.17.1
 ipython_pygments_lexers==1.1.1
 jedi==0.20.0
@@ -52,7 +54,7 @@ mdurl==0.1.2
 numpy==2.5.3
 omegaconf==2.3.1
 onnxruntime==1.30.0
-opack2==0.0.1
+opack2==0.2.0
 opencv-python==5.0.0.93
 opentelemetry-api==1.45.0
 packaging==26.3
@@ -62,7 +64,7 @@ pillow==12.3.0
 plumbum==2.0.2
 pmd-net-addr==0.0.3
 pmd-net-proto==0.0.3
-pmd-pytcp==0.3.7
+pmd-pytcp==0.3.9
 prompt_toolkit==3.0.53
 protobuf==7.36.2
 psutil==7.2.2
@@ -78,10 +80,10 @@ Pygments==2.21.0
 pygnuutils==0.1.1
 pyimg4==0.8.8
 pyiosbackup==0.2.4
-pykdebugparser==1.2.8
+pykdebugparser==1.10.0
 pylzss==0.3.4
 pymobiledevice==1.2.0
-pymobiledevice3==11.22.0
+pymobiledevice3==11.49.5
 pyreadline3==3.5.6
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.4

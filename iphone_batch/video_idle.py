@@ -108,6 +108,10 @@ def install(server_class, input_lock):
                 except Exception as error:
                     logging.getLogger(__name__).warning('On-demand audio start failed: %s', type(error).__name__)
             await original_fresh(instance, force=force)
+            # Upstream #2036 found 0.3s too short for iPhone 11. Honor its
+            # current minimum; pay this only on media setup, never per click.
+            from pymobiledevice3.remote.core_device import hid_service
+            await asyncio.sleep(max(.5, getattr(hid_service, 'TOUCH_AUTH_SETTLE_SECONDS', .5)))
 
     async def serve(instance):
         try:

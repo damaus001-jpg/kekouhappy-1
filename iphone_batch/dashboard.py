@@ -13,8 +13,9 @@ import urllib.request
 from urllib.parse import urlsplit, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 import controller
+from workspace_access import AccessVerifier, HEADER, signed_opener
 
 ROOT = Path(__file__).resolve().parent
 
@@ -52,7 +53,7 @@ class FocusManager:
         request = urllib.request.Request(f"http://127.0.0.1:{device['port']}/control-mode",
             data=json.dumps({'active':active}).encode(),
             headers={'Content-Type':'application/json', 'X-Control-Token':self.token}, method='POST')
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener = signed_opener()
         with opener.open(request, timeout=5) as response:
             data=json.load(response)
         if data.get('active') is not active:
@@ -118,7 +119,9 @@ def main():
     parser.add_argument('--udid',action='append')
     parser.add_argument('--port',type=int,default=8070)
     parser.add_argument('--base-port',type=int,default=8080)
+    parser.add_argument('--device-map',default=str(ROOT/'.device-data'/'workspace'/'device-map.json'))
     args=parser.parse_args()
+    access=AccessVerifier()
     requested=args.udid or [row['udid'] for row in controller.discover()]
     udids=controller.resolve_devices(requested) if requested else []
     if not 1024 <= args.port <= 65535 or not 1024 <= args.base_port <= 65535-len(udids)+1:
@@ -129,7 +132,7 @@ def main():
     devices=[{'udid':udid,'name':f'iPhone {index+1}', 'port':args.base_port+index}
              for index,udid in enumerate(udids)]
     from device_registry import DeviceRegistry
-    registry=DeviceRegistry(devices,args.base_port,args.port)
+    registry=DeviceRegistry(devices,args.base_port,args.port,state_path=args.device_map)
     manager=FocusManager(devices,token)
     children={}
     from viewer_retry import ViewerRetryPolicy
@@ -140,10 +143,16 @@ def main():
     workspace_service=WorkspaceService()
     stopping=threading.Event()
     health_pool=ThreadPoolExecutor(max_workers=8,thread_name_prefix='viewer-health')
+    input_readiness_pool=ThreadPoolExecutor(max_workers=4,thread_name_prefix='input-readiness')
+    input_readiness_lock=threading.Lock()
+    input_readiness={}
+    trust_pending=set()
+    trust_lock=threading.Lock()
     from notification_monitor import NotificationMonitor
+    from device_reconnect import DeviceReconnects, reset_phone_session
     notification_monitor=NotificationMonitor(devices,workspace_service.phone_lock,
         manager.notification_lease,workspace_service.notifications,
-        lambda d: viewer_ready(d),stopping,
+        lambda d: not reconnects.pending(d['udid']) and viewer_ready(d),stopping,
         lock_for=workspace_service.device_lock,manual_device=lambda: manager.active,
         on_new_cards=play_notification_sound)
     scan_policy_path=ROOT/'.device-data'/'workspace'/'scan-policy.json'
@@ -170,6 +179,8 @@ def main():
     def launch_viewer(device):
         port=device['port']
         generations[device['udid']]=generations.get(device['udid'],0)+1
+        with input_readiness_lock:
+            input_readiness.pop(device['udid'],None)
         env={**os.environ,'PYTHONIOENCODING':'utf-8','PYTHONUTF8':'1','IPHONE_BATCH_CONTROL_TOKEN':token,'IPHONE_BATCH_TRANSLATION_URL':f'http://127.0.0.1:{args.port}/internal/translation'}
         logs=ROOT/'.device-data'/'diagnostics'
         logs.mkdir(parents=True,exist_ok=True)
@@ -181,7 +192,7 @@ def main():
 
     def stop_viewer(device):
         import psutil
-        child=children.pop(device['udid'],None)
+        child=children.get(device['udid'])
         if child is None or child.poll() is not None:return
         try:
             process=psutil.Process(child.pid)
@@ -192,11 +203,14 @@ def main():
             allowed={str(ROOT/'controller.py'),str(ROOT/'pmd_entry.py')}
             if any(not allowed.intersection(p.cmdline()) for p in descendants):
                 raise RuntimeError('设备子进程身份变化，已取消停止')
-            process.terminate()
             for descendant in reversed(descendants):
                 try:descendant.terminate()
                 except psutil.NoSuchProcess:pass
+            process.terminate()
+            _,alive=psutil.wait_procs([process,*descendants],timeout=3)
+            if alive:raise RuntimeError('旧设备进程尚未退出，请稍后重试')
         except psutil.NoSuchProcess:pass
+        if children.get(device['udid']) is child:children.pop(device['udid'],None)
 
     def refresh_connected_devices():
         discovered=controller.discover()
@@ -208,8 +222,11 @@ def main():
             notification_monitor.update_devices(devices)
             for device in removed:stop_viewer(device)
             for device in devices:
+                if device['udid'] in trust_pending or reconnects.pending(device['udid']):continue
                 child=children.get(device['udid'])
                 if child is not None and child.poll() is None:continue
+                with input_readiness_lock:
+                    input_readiness.pop(device['udid'],None)
                 retry_policy.reset(device['udid'])
                 try:launch_viewer(device)
                 except OSError:device['error']='投屏启动失败，正在重试'
@@ -219,6 +236,7 @@ def main():
         while not stopping.wait(3):
           with registry.lock:
             for device in list(devices):
+                if device['udid'] in trust_pending or reconnects.pending(device['udid']):continue
                 child=children.get(device['udid'])
                 if child is not None and child.poll() is None:
                     continue
@@ -254,13 +272,116 @@ def main():
         child=children.get(device['udid'])
         if child is None or child.poll() is not None:return False
         try:
-            opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            opener=signed_opener()
             with opener.open(f"http://127.0.0.1:{device['port']}/",timeout=0.5) as response:
                 ready=response.status==200
                 if ready and children.get(device['udid']) is child:retry_policy.reset(device['udid'])
                 return ready
         except OSError:
             return False
+
+    def record_input_readiness(udid, future):
+        now=time.monotonic()
+        try:
+            result=future.result()
+        except Exception:
+            result={'ok':False,'state':'unavailable'}
+        with input_readiness_lock:
+            previous=input_readiness.get(udid,{})
+            if result.get('state')=='busy':
+                last_success=previous.get('last_success',0)
+                ready=bool(last_success and now-last_success<30)
+            else:
+                ready=result.get('ok') is True and result.get('state')=='ready'
+                last_success=now if ready else 0
+            input_readiness[udid]={
+                'ready':ready,'state':result.get('state','unavailable'),
+                'checked_at':now,'last_success':last_success,
+                'probe':result.get('probe')}
+
+    def probe_input_readiness(device):
+        request=urllib.request.Request(
+            f"http://127.0.0.1:{device['port']}/input-readiness", data=b'{}',
+            headers={'Content-Type':'application/json','X-Control-Token':token}, method='POST')
+        opener=signed_opener()
+        with opener.open(request,timeout=6) as response:
+            return json.load(response)
+
+    def input_readiness_snapshot(udid):
+        now=time.monotonic()
+        with input_readiness_lock:
+            value=dict(input_readiness.get(udid,{ }))
+        last_success=value.get('last_success',0)
+        ready=bool(value.get('ready') and last_success and now-last_success<30)
+        return {'control_ready':ready,
+                'control_state':value.get('state','unknown') if ready else ('stale' if last_success else value.get('state','unknown')),
+                'control_checked_age':round(now-value['checked_at'],1) if value.get('checked_at') else None}
+
+    def watch_input_readiness():
+        # Probe in small batches so a 15-phone hub is not hit with 15 new HID
+        # handshakes at once. Idle-state reports contain no pressed keys/touches.
+        while not stopping.is_set():
+            current=[device for device in devices if device['udid'] not in trust_pending and not reconnects.pending(device['udid'])]
+            for offset in range(0,len(current),4):
+                if stopping.is_set():return
+                batch=current[offset:offset+4]
+                futures=[]
+                for device in batch:
+                    future=input_readiness_pool.submit(probe_input_readiness,device)
+                    future.add_done_callback(lambda result, device=device: record_input_readiness(device['udid'],result))
+                    futures.append(future)
+                wait(futures,timeout=7)
+            stopping.wait(3)
+
+    def rebuild_device(device):
+        lock=workspace_service.device_lock(device['udid'])
+        acquired=False
+        try:
+            with registry.lock:
+                if device not in devices:raise ValueError('手机已断开，请重新接入后刷新')
+                if device['udid'] in trust_pending:raise ValueError('该手机正在等待信任确认')
+                if not workspace_service.phone_lock.acquire(blocking=False):
+                    raise ValueError('手机任务正在执行，请完成后再重新连接')
+                try:
+                    acquired=lock.acquire(blocking=False)
+                    if not acquired:raise ValueError('该手机正在处理任务，请稍后重试')
+                    with manager.lock:
+                        stop_viewer(device)
+                        if manager.active==device['udid']:manager.active=None
+                    with input_readiness_lock:input_readiness.pop(device['udid'],None)
+                finally:workspace_service.phone_lock.release()
+            # Keep only this phone's operation lock while its on-device
+            # sessions are reset. Other phones remain usable during cleanup.
+            reconnects.stage(device['udid'],'resetting')
+            device['error']='正在清理手机端远程会话…'
+            reset_phone_session(device)
+            with registry.lock:
+                if device not in devices:raise ValueError('手机已断开，请重新接入后刷新')
+                reconnects.stage(device['udid'],'starting')
+                device['error']='正在重建画面与操控连接…'
+                retry_policy.reset(device['udid'])
+                launch_viewer(device)
+        finally:
+            if acquired:lock.release()
+
+    def finish_reconnect(device):
+        reconnects.stage(device['udid'],'checking')
+        with registry.lock:
+            if device not in devices:raise ValueError('手机已断开，请重新接入后刷新')
+            if not workspace_service.phone_lock.acquire(blocking=False):return False
+            try:
+                # A user may have switched to another phone while this one
+                # reconnects. Never steal that phone's control ownership.
+                if manager.selected==device['udid']:manager.select(device['udid'],ready=True)
+            finally:workspace_service.phone_lock.release()
+        future=input_readiness_pool.submit(probe_input_readiness,device)
+        record_input_readiness(device['udid'],future)
+        if not input_readiness_snapshot(device['udid'])['control_ready']:
+            raise ValueError('画面已恢复，但操控检查未通过，请检查手机或重试重新连接')
+        device.pop('error',None)
+        return True
+
+    reconnects=DeviceReconnects(rebuild_device,viewer_ready,finish_reconnect,stopping)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*unused):
@@ -280,11 +401,12 @@ def main():
             return (self.client_address[0]=='127.0.0.1'
                 and host==f'127.0.0.1:{args.port}'
                 and self.headers.get('Origin') in (None,'http://'+host)
-                and self.headers.get('Sec-Fetch-Site')!='cross-site')
+                and self.headers.get('Sec-Fetch-Site')!='cross-site'
+                and access.verify(self.command,args.port,self.path,self.headers.get(HEADER)))
 
         def do_GET(self):
             if not self.allowed():
-                return self.respond(403,{'error':'localhost only'})
+                return self.respond(403,{'error':'请从授权客户端打开短信工作台'})
             if self.path=='/':
                 return self.respond(200,(ROOT/'web/workspace.html').read_bytes(),'text/html; charset=utf-8')
             assets = {'/dashboard.css': 'text/css; charset=utf-8', '/dashboard.js': 'text/javascript; charset=utf-8',
@@ -320,13 +442,15 @@ def main():
                 except KeyError:notifications={'state':'waiting','items':[],'card_count':0}
                 if ready:
                     device.pop('error',None)
-                rows.append({**device,'ready':ready,'active':manager.active==device['udid'],
+                rows.append({**device,'ready':ready and not reconnects.pending(device['udid']),'active':manager.active==device['udid'],
+                             **reconnects.snapshot(device['udid']),
+                             **input_readiness_snapshot(device['udid']), 'trust_pending':device['udid'] in trust_pending,
                              'notifications':notifications})
             return self.respond(200,{'devices':rows,'active':manager.active,'selected':manager.selected,'scan_enabled':notification_monitor.enabled,'translation_enabled':False})
 
         def do_POST(self):
             if not self.allowed():
-                return self.respond(403,{'error':'same-origin localhost access required'})
+                return self.respond(403,{'error':'请从授权客户端打开短信工作台'})
             if self.path=='/api/notification-scan':
                 try:
                     length=int(self.headers.get('Content-Length','0'))
@@ -339,6 +463,67 @@ def main():
                     return self.respond(400,{'error':str(exc)})
                 except Exception:
                     return self.respond(503,{'error':'遍历开关未完成，请刷新状态后重试'})
+            if self.path=='/api/devices/reconnect':
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=1024:raise ValueError('无效请求')
+                    self.connection.settimeout(10)
+                    body=json.loads(self.rfile.read(length))
+                    if not isinstance(body,dict):raise ValueError('无效请求')
+                    device=next((d for d in devices if d['udid']==body.get('device')),None)
+                    if device is None:raise ValueError('请选择已连接的手机')
+                    if device['udid'] in trust_pending:raise ValueError('该手机正在等待信任确认')
+                    identifier=reconnects.begin(device)
+                    return self.respond(202,{'ok':True,'job':identifier,'message':'正在重新连接此设备，请稍候'})
+                except (ValueError,TypeError) as exc:return self.respond(400,{'error':str(exc)})
+            if self.path=='/api/devices/trust':
+                device=None
+                acquired=False
+                lock=None
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=1024:raise ValueError('无效请求')
+                    self.connection.settimeout(100)
+                    body=json.loads(self.rfile.read(length))
+                    if not isinstance(body,dict):raise ValueError('无效请求')
+                    device=next((d for d in devices if d['udid']==body.get('device')),None)
+                    if device is None:raise ValueError('请选择已连接的手机')
+                    if reconnects.pending(device['udid']):raise ValueError('该手机正在重新连接，请稍候')
+                    if viewer_ready(device):raise ValueError('手机投屏已就绪，无需重新建立信任')
+                    lock=workspace_service.device_lock(device['udid'])
+                    acquired=lock.acquire(blocking=False)
+                    if not acquired:raise ValueError('该手机正在处理其他任务，请稍后重试')
+                    with trust_lock:
+                        if device['udid'] in trust_pending:raise ValueError('该手机正在等待信任确认')
+                        trust_pending.add(device['udid'])
+                    device['error']='正在等待信任确认，请解锁手机、点击信任并输入密码'
+                    with manager.lock:
+                        if manager.active==device['udid']:manager.active=None
+                    stop_viewer(device)
+                    process=subprocess.run([sys.executable,str(ROOT/'device_trust.py'),'--device',device['udid']],
+                        env=controller.device_environment(device['udid']),capture_output=True,encoding='utf-8',
+                        timeout=90,creationflags=0x08000000 if os.name=='nt' else 0)
+                    try:result=json.loads(process.stdout.strip().splitlines()[-1])
+                    except (ValueError,IndexError):raise ValueError('配对未返回有效结果，请检查手机连接')
+                    if process.returncode or not result.get('ok'):raise ValueError(result.get('error','建立信任失败'))
+                    with registry.lock:
+                        if device['udid'] not in {d['udid'] for d in devices}:raise ValueError('信任已建立，但手机已断开，请重新连接')
+                        retry_policy.reset(device['udid'])
+                        device['error']='信任已建立，正在检查开发者模式并启动投屏…'
+                        launch_viewer(device)
+                    return self.respond(200,{'ok':True,'message':result['message']+'；正在检查开发者模式并启动投屏'})
+                except subprocess.TimeoutExpired:
+                    if device:device['error']='信任确认超时，请解锁手机后重试'
+                    return self.respond(504,{'error':'信任确认超时，请解锁手机后重试'})
+                except (ValueError,TypeError) as exc:
+                    if device and acquired:device['error']=str(exc)
+                    return self.respond(400,{'error':str(exc)})
+                except Exception:
+                    return self.respond(503,{'error':'建立信任未完成，请检查手机连接后重试'})
+                finally:
+                    if acquired:
+                        with trust_lock:trust_pending.discard(device['udid'])
+                        lock.release()
             if self.path=='/api/devices/refresh':
                 try:
                     length=int(self.headers.get('Content-Length','0'))
@@ -416,6 +601,7 @@ def main():
                     device=next((d for d in devices if d['udid']==body.get('device')),None)
                     with workspace_service.phone_lock:
                         if device is None or manager.active!=device['udid']: raise ValueError('请先选中要操作的手机')
+                        if reconnects.pending(device['udid']):raise ValueError('该手机正在重新连接，请稍候')
                         with workspace_service.device_lock(device['udid']):
                             result=workspace_service.dispatch(device['udid'],body,f"http://127.0.0.1:{device['port']}")
                         if body.get('action')=='notifications':
@@ -441,8 +627,11 @@ def main():
                 with workspace_service.phone_lock:
                     target=next((d for d in devices if d['udid']==body['udid']),None)
                     if target is None:raise ValueError('Unknown device')
+                    if reconnects.pending(target['udid']):raise ValueError('该手机正在重新连接，请稍候')
+                    if target['udid'] in trust_pending:raise ValueError('该手机正在等待信任确认')
                     manager.select(body['udid'],ready=viewer_ready(target))
-                return self.respond(200,{'active':manager.active,'selected':manager.selected})
+                    readiness=input_readiness_snapshot(body['udid'])
+                return self.respond(200,{'active':manager.active,'selected':manager.selected,**readiness})
             except (ValueError, KeyError, TypeError):
                 return self.respond(400,{'error':'invalid device selection'})
             except Exception:
@@ -454,12 +643,14 @@ def main():
         for device in devices:
             launch_viewer(device)
         threading.Thread(target=watch_viewers,daemon=True).start()
+        threading.Thread(target=watch_input_readiness,daemon=True).start()
         threading.Thread(target=notification_monitor.run,daemon=True).start()
         controller.emit({'status':'dashboard_ready','url':f'http://127.0.0.1:{args.port}/','devices':devices})
         server.serve_forever(poll_interval=0.25)
     finally:
         stopping.set()
         health_pool.shutdown(wait=False,cancel_futures=True)
+        input_readiness_pool.shutdown(wait=False,cancel_futures=True)
         server.server_close()
         # Stop children and their upstream viewers even when the parent exits.
         import psutil

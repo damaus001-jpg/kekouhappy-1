@@ -80,7 +80,8 @@ async function nativeVideo(slow) {
         fetch: async url => { requests.push(url); return {ok: true, body: {getReader: () => ({
             read: async () => read ? {done: true} : (read = true, {value: all, done: false})
         })}}; },
-        log() {}, frameCount: 10, pendingFrame: null, navigator: {userAgent: 'test'}, setTimeout
+        log() {}, frameCount: 10, pendingFrame: null, navigator: {userAgent: 'test'}, setTimeout,
+        videoConnection: {connected(){}}
     });
     vm.runInContext(source.slice(source.indexOf('async function run()'), source.indexOf('inputMonitor = new InputHealthMonitor(')), context);
     await context.run();

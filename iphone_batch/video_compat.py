@@ -9,6 +9,7 @@ import struct
 import threading
 import time
 import urllib.request
+from workspace_access import signed_opener
 
 
 class VideoStop(threading.Event):
@@ -35,7 +36,7 @@ class VideoStop(threading.Event):
 
 def jpeg_frames(port, stopped):
     import av
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = signed_opener()
     base = f'http://127.0.0.1:{port}'
     with opener.open(base + '/codec', timeout=8) as response:
         description = base64.b64decode(json.load(response)['description'])

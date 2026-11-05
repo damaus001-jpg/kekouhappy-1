@@ -5,7 +5,7 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, 'web/viewer.js'), 'utf8');
 const read = source.slice(source.indexOf('async function readHostClipboard()'), source.indexOf('// Returns true when'));
 const write = source.slice(source.indexOf('async function writeHostClipboard(content)'), source.indexOf('async function fetchDeviceContent'));
-const context = {batchActive:true, navigator:{}, showInPanel:()=>{}, clipboardResult:()=>{}, fetch:null};
+const context = {batchActive:true, navigator:{}, AbortSignal, Blob, Uint8Array, atob, showInPanel:()=>{}, clipboardResult:()=>{}, fetch:null};
 vm.createContext(context);
 vm.runInContext(read + '\n' + write, context);
 (async () => {

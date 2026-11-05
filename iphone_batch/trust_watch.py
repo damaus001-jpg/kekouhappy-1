@@ -14,6 +14,7 @@ import time
 import urllib.request
 
 import controller
+from workspace_access import signed_opener
 
 ROOT = Path(__file__).resolve().parent
 FOLDER = ROOT / '.device-data' / 'diagnostics' / 'trust-watch'
@@ -104,7 +105,7 @@ def run(seconds):
     thread = threading.Thread(target=windows_events, args=(journal, stopped, notification_ready), daemon=True)
     thread.start()
     notification_ready.wait(3)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = signed_opener()
     known = {}
     previous_usb = None
     previous_files = {}

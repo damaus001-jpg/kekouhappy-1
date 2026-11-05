@@ -1,12 +1,14 @@
 **iOS 27：先验证 1 台，再扩展到 10 台 USB 手机**
 
+2026-11-04：当前上游依赖已升级并固定为 pymobiledevice3 11.49.5；以下早期验证记录保留其原始版本和结论。坐标触控的长期稳定性仍需继续验收。
+
 2026-10-04: USB device iPhone12,1 / iOS 27.0 / build 24A437 verified. Developer Mode is enabled. Cryptex DDI 27.1.5228.8 (27A5228h) is installed and mounted at /System/Developer. Media capability query passed. User confirmed live video, clicks and swipes work after the screen server restarted with motion-IDR disabled. Long-duration stability and multiple-device operation remain unverified.
 
 当前执行环境访问 PyPI 返回 WinError 10013。请在你自己的 PowerShell 中执行：
 
 ```powershell
 cd D:\qunkong
-.\.venv\Scripts\python.exe -m pip install -U pymobiledevice3
+.\.venv\Scripts\python.exe -m pip install -r iphone_batch\requirements.txt
 ```
 
 安装后先核对是否包含本工具使用的 session、serve-web 和 iOS 27 Cryptex DDI 处理。项目当前源码将 iOS 27 的自动开发者镜像准备转到 Cryptex1 路径，需 RSD 隧道。依据：[源码](https://github.com/doronz88/pymobiledevice3/blob/master/pymobiledevice3/services/mobile_image_mounter.py)、[排错说明](https://doronz88.github.io/pymobiledevice3/guides/troubleshooting/)。旧版是否支持要实际检查，不能只看安装成功。
@@ -78,15 +80,15 @@ Screen stability adjustment: controller.py screen now passes --no-motion-idr. In
 
 - 浏览器强制刷新后，右侧点“同步”开启双向文本同步，开关会在本浏览器保存。
 - 手机到电脑：开启同步后，在手机复制新文字，等待“已复制到电脑”，再切换电脑应用按 Ctrl+V。
-- 电脑到手机：电脑复制文字，切回投屏页面，点手机输入框后按 Ctrl+V，或在手机长按选择“粘贴”。
+- 电脑到手机：电脑复制文字或图片，切回投屏页面，点手机输入框后按 Ctrl+V；无需开启同步。文字保留中文、换行和表情，图片支持 Windows 剪贴板里的 PNG 和位图，优先粘贴图片。粘贴后检查手机输入框，再手动发送；图片发送取决于手机端的 MMS、iMessage 或其他消息服务支持。
 - 开启同步之前已经复制的手机文字，用“从手机获取”读取；面板内容可点“复制到电脑”。手动发送文字用“发送到手机”。
-- 当前 Windows 电脑的文本通过本地系统剪贴板通道传输，支持中文、换行和表情。图片仍使用上游浏览器剪贴板路径。
+- 当前 Windows 电脑的文本和图片通过本地系统剪贴板通道读取；图片统一转换为 PNG，最多 16 MiB、3200 万像素。仅复制图片文件名或文件引用不等于复制图片内容。
 - 双向同步会替换双方当前剪贴板内容。多手机同时开启同步时会竞争同一个电脑剪贴板，因此批量模式需另行设计每台手机的文本发送与接收。
 - 本地定制资源位于 web/，pmd_entry.py 在启动投屏时加载 viewer_patch.py，不修改已安装的上游库。
 
 短信气泡复制兼容：观察到部分手机复制内容的主类型为 com.apple.uikit.attributedstring，普通文本仅作为未随快速读取返回的次要类型。pasteboard_text.py 为该 UIKit 归档增加纯文本提取；普通文本仍优先。只读取归档正文 NSString / NS.string 字段，不拼接字体、链接等属性。已通过中文、换行、表情、循环引用与普通文本优先等测试。仍需使用短信气泡复制在手机上验证最终效果。诊断接口只返回类型、长度及归档字段结构，不返回复制正文。
 
-电脑键盘快捷键：点击投屏画面使其获得焦点后，Ctrl+C/V/X/A 转为 iPhone 的 Command+C/V/X/A。Ctrl+V 在双向同步开启时先读取电脑文本并同步到手机，再发送粘贴键。点击面板或离开页面时释放所有按键，电脑应用仍使用原快捷键。复制、剪切需要手机上存在选中的文字，短信气泡仍通过长按“复制”操作。键位转换已通过模拟测试，应用端实际响应需在对应手机输入框验证。
+电脑键盘快捷键：点击投屏画面使其获得焦点后，Ctrl+C/V/X/A 转为 iPhone 的 Command+C/V/X/A。Ctrl+V 每次先读取电脑剪贴板，传输成功后才向当前手机发送一次粘贴键；读取、传输失败或焦点/控制连接变化时取消，不使用手机的旧剪贴板，也不自动重试粘贴或发送。8070 内嵌投屏只按需粘贴，不恢复旧的后台双向同步开关。点击面板或离开页面时释放所有按键，电脑应用仍使用原快捷键。复制、剪切需要手机上存在选中的文字，短信气泡仍通过长按“复制”操作。应用端实际粘贴响应需在对应手机输入框验证。
 
 两台准备状态：已发现第二台 00008030-001225443E33C02E，iOS 27.0 / iPhone12,1。开发者模式已查询为 true；开发者镜像还未成功安装，当前执行环境访问 gs.apple.com 签名请求被 WinError 10013 阻止，需在用户自己的 PowerShell 执行：
 
