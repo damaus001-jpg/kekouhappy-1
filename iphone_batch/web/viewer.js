@@ -463,19 +463,25 @@ function pasteFeedback(message) {
         new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070');
 }
 
-function queueHostPaste() {
-    if (pastePending) return;
+function queueHostPaste(suppliedText = null) {
+    if (pastePending) return Promise.reject(Error('正在粘贴，请稍候'));
     pastePending = true;
     const epoch = inputEpoch, revision = pasteRevision;
     const current = () => epoch === inputEpoch && revision === pasteRevision && keyboardCaptureOn();
-    lastKeyPost = lastKeyPost.then(async () => {
-        if (!current()) return;
+    const task = lastKeyPost.then(async () => {
+        if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
         await pointerInput.idle();
-        if (!current()) return;
-        pasteFeedback('正在读取电脑剪贴板…');
-        const content = await readHostClipboard();
+        if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
+        pasteFeedback(suppliedText === null ? '正在读取电脑剪贴板…' : '正在定位手机短信输入框…');
+        const content = suppliedText === null ? await readHostClipboard() : {text: suppliedText, image: null};
         if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
         if (!content.image && !content.text) throw Error('电脑剪贴板没有可粘贴的文字或图片');
+        if (suppliedText !== null) {
+            const focus = await fetch('/manual-composer-focus', {method: 'POST',
+                headers: {'Content-Type': 'application/json'}, body: '{}', signal: AbortSignal.timeout(15000)});
+            if (!focus.ok) throw Error('未能定位手机短信输入框，请打开目标短信会话后重试');
+            if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
+        }
         const response = await fetch(content.image ? '/clipboard/image' : '/clipboard', {
             method: 'POST',
             headers: {'Content-Type': content.image ? 'image/png' : 'application/json'},
@@ -487,24 +493,22 @@ function queueHostPaste() {
         // pasted before: the phone clipboard may have changed in the meantime.
         lastShared = await fingerprint(content);
         if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
-        const sendKeys = async usages => {
-            const result = await fetch('/manual-key', {method: 'POST',
-                headers: {'Content-Type': 'application/json'}, body: JSON.stringify({usages}),
+        try {
+            // The server dispatches one chord and releases it under one input lock.
+            const result = await fetch('/manual-paste', {method: 'POST',
+                headers: {'Content-Type': 'application/json'}, body: '{}',
                 signal: AbortSignal.timeout(5000)});
             if (!result.ok) throw Error('手机粘贴按键未完成，请检查输入框');
-        };
-        try {
-            // One paste chord, followed by a release. Never send Return or
-            // replay a failed chord: the phone may already have accepted it.
-            try { await sendKeys([0xE3, HID_KEY_V]); }
-            finally { await sendKeys([]); }
         } catch (error) {
             if (epoch === inputEpoch && controlAvailable()) inputMonitor?.invalidate();
             throw error;
         }
-        if (current()) pasteFeedback('已请求粘贴' + (content.image ? '图片' : '文字') + '，请检查手机输入框后手动发送');
-    }).catch(error => pasteFeedback('粘贴未完成：' + (error.message || error)))
+        if (!current()) throw Error('控制目标已变化，粘贴结果请在原手机核对');
+        pasteFeedback('已请求粘贴' + (content.image ? '图片' : '文字') + '，请检查手机输入框后手动发送');
+    });
+    lastKeyPost = task.catch(error => pasteFeedback('粘贴未完成：' + (error.message || error)))
         .finally(() => { pastePending = false; });
+    return task;
 }
 
 // Gate host-keystroke forwarding on canvas focus: keys flow to the
@@ -597,7 +601,7 @@ window.addEventListener('keydown', (e) => {
     // here so a failed clipboard transfer cannot paste stale phone contents.
     const ctrlHeld = pressedUsages.has(0xE0) || pressedUsages.has(0xE4);
     if (usage === HID_KEY_V && (e.metaKey || e.ctrlKey || ctrlHeld) && !e.altKey) {
-        queueHostPaste();
+        queueHostPaste().catch(() => {});
         return;
     }
     if (e.ctrlKey && !e.metaKey && !e.altKey && ['KeyC', 'KeyV', 'KeyX', 'KeyA'].includes(e.code)) {
@@ -1841,6 +1845,16 @@ if (batchManaged) {
         if (event.source !== parent || event.origin !== (new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070')) return;
         if (event.data?.type === 'input-recover') {
             if (batchActive) inputMonitor.check(true);
+            return;
+        }
+        if (event.data?.type === 'paste-composer') {
+            const id = event.data.id;
+            const respond = (ok, error) => parent.postMessage({type: 'paste-composer-result', id, ok, error}, event.origin);
+            if (!controlAvailable() || typeof event.data.text !== 'string' || !event.data.text.trim()) {
+                respond(false, '手机控制连接不可用或正文为空'); return;
+            }
+            canvas.focus({preventScroll: true});
+            queueHostPaste(event.data.text).then(() => respond(true), error => respond(false, error.message));
             return;
         }
         if (event.data?.type === 'device-home') {

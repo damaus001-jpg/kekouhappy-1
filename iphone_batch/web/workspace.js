@@ -3,6 +3,7 @@ let currentConversationId=null;
 let workspaceBusy=false, generatedDraft=null;
 let pastedEnglish=false;
 let sendBlocked=false;
+let phonePastePending=null;
 const notificationProtection=new Map();
 function protectNotificationDraft(){
  if(!workspaceDevice)return;
@@ -106,7 +107,9 @@ function syncWorkspaceControls(){
  document.getElementById('summarize-contact').disabled=workspaceBusy||!available;
  if(typeof syncContactProfileControls==='function')syncContactProfileControls();
  const sendButton=document.getElementById('send-reply');
- sendButton.disabled=workspaceBusy||sendBlocked||!selected||!replyInputAvailable()||!available||!draftEl.value.trim();
+ const pasteButton=document.getElementById('paste-to-phone');
+ if(pasteButton)pasteButton.disabled=workspaceBusy||!!phonePastePending||!selected||!replyInputAvailable()||!draftEl.value.trim();
+ sendButton.disabled=workspaceBusy||!!phonePastePending||sendBlocked||!selected||!replyInputAvailable()||!available||!draftEl.value.trim();
  const sendLabel=workspaceBusy?'正在处理':sendBlocked?'请先核对发送结果':'发送回复';
  sendButton.title=sendLabel;sendButton.setAttribute('aria-label',sendLabel);
  draftEl.disabled=workspaceBusy;
@@ -190,6 +193,32 @@ function replyControlAvailable(){
  return true;
 }
 document.getElementById('send-reply').addEventListener('click',submitReplyInput);
+document.getElementById('paste-to-phone')?.addEventListener('click',()=>{
+ if(workspaceBusy||phonePastePending||!draftEl.value.trim()||!replyControlAvailable())return;
+ const card=cards.get(workspaceDevice);
+ if(!card?.frame){notice('手机投屏尚未就绪，请稍后重试');return;}
+ const id=crypto.randomUUID(),device=workspaceDevice,revision=workspaceRevision;
+ const text=draftEl.value;
+ const timer=setTimeout(()=>finishPhonePaste(id,false,'粘贴结果未确认，请先检查手机输入框，避免重复粘贴'),20000);
+ phonePastePending={id,device,revision,frame:card.frame,origin:card.origin,timer};
+ syncWorkspaceControls();notice('正在将正文粘贴到当前手机短信输入框…');
+ card.frame.contentWindow.postMessage({type:'paste-composer',id,text},card.origin);
+});
+function finishPhonePaste(id,ok,error){
+ const pending=phonePastePending;
+ if(!pending||pending.id!==id)return;
+ clearTimeout(pending.timer);phonePastePending=null;
+ if(pending.device===workspaceDevice&&pending.revision===workspaceRevision){
+  if(ok)sendBlocked=true;
+  notice(ok?'已请求粘贴正文，请核对手机会话和内容后，点击手机发送按钮。阅读区正文已保留。':error||'粘贴未完成，请检查手机输入框');
+ }
+ syncWorkspaceControls();
+}
+window.addEventListener('message',event=>{
+ const pending=phonePastePending;
+ if(!pending||event.source!==pending.frame.contentWindow||event.origin!==pending.origin||event.data?.type!=='paste-composer-result')return;
+ finishPhonePaste(event.data.id,event.data.ok===true,event.data.error);
+});
 
 draftEl.addEventListener('keydown',event=>{
  if(event.key!=='Enter'||event.shiftKey||event.isComposing||event.keyCode===229)return;
@@ -198,7 +227,7 @@ draftEl.addEventListener('keydown',event=>{
  submitReplyInput();
 });
 function submitReplyInput(){
- if(workspaceBusy||!draftEl.value.trim()||!currentConversation)return;
+ if(workspaceBusy||phonePastePending||!draftEl.value.trim()||!currentConversation)return;
  if(!replyControlAvailable())return;
  if(sendBlocked){notice('这次发送操作已处理或结果待核对；请核对手机并重新读取当前会话，禁止重复回车发送。');return;}
  const device=workspaceDevice, revision=workspaceRevision, conversation=currentConversation, text=draftEl.value;

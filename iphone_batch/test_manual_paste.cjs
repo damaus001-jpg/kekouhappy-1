@@ -31,7 +31,7 @@ function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatu
                 if (host) return host.promise;
                 return {ok: true, json: async () => ({text, image_png: image})};
             }
-            return {ok: uploadStatus === 200 || url === '/manual-key', status: uploadStatus};
+            return {ok: uploadStatus === 200 || url === '/manual-paste', status: uploadStatus};
         },
     };
     vm.createContext(context);
@@ -44,7 +44,7 @@ function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatu
     };
     const paste = () => {key('ControlLeft'); key('KeyV', {ctrlKey: false}); key('KeyV', {up: true, ctrlKey: false}); key('ControlLeft', {up: true, ctrlKey: false});};
     const idle = () => vm.runInContext('lastKeyPost', context);
-    const chords = () => requests.filter(r => r.url === '/manual-key').map(r => JSON.parse(r.options.body).usages);
+    const chords = () => requests.filter(r => r.url === '/manual-paste').map(r => JSON.parse(r.options.body));
     return {context, requests, feedback, key, paste, idle, chords};
 }
 
@@ -52,11 +52,27 @@ function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatu
     const text = setup();
     text.paste(); await text.idle();
     assert.equal(JSON.parse(text.requests.find(r => r.url === '/clipboard').options.body).text, '  中文\nHello 🙂  ');
-    assert.deepEqual(text.chords(), [[0xE3, 0x19], []]);
+    assert.deepEqual(text.chords(), [{}]);
     assert(text.feedback.some(r => r.message.includes('手动发送')));
     // Repeating the same explicit paste must refresh the phone clipboard again.
     text.paste(); await text.idle();
     assert.equal(text.requests.filter(r => r.url === '/clipboard').length, 2);
+
+    const supplied = setup();
+    await vm.runInContext("queueHostPaste('\u6b63\u6587\\n\ud83d\ude42')", supplied.context);
+    await supplied.idle();
+    assert(!supplied.requests.some(r => r.url === '/host-clipboard'));
+    assert(supplied.requests.findIndex(r => r.url === '/manual-composer-focus') < supplied.requests.findIndex(r => r.url === '/clipboard'));
+    assert.equal(JSON.parse(supplied.requests.find(r => r.url === '/clipboard').options.body).text, '\u6b63\u6587\n\ud83d\ude42');
+    assert.deepEqual(supplied.chords(), [{}]);
+
+    const focusFailed = setup();
+    const focusFetch = focusFailed.context.fetch;
+    focusFailed.context.fetch = async (url, options) => url === '/manual-composer-focus' ? {ok:false,status:400} : focusFetch(url,options);
+    await assert.rejects(vm.runInContext("queueHostPaste('body')", focusFailed.context));
+    await focusFailed.idle();
+    assert(!focusFailed.requests.some(r => r.url === '/clipboard'));
+    assert.deepEqual(focusFailed.chords(), []);
 
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=';
     const image = setup({text: 'image URL', image: png});
@@ -65,7 +81,7 @@ function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatu
     assert.equal(upload.options.body.type, 'image/png');
     assert.equal(Buffer.from(await upload.options.body.arrayBuffer()).toString('base64'), png);
     assert(!image.requests.some(r => r.url === '/clipboard'));
-    assert.deepEqual(image.chords(), [[0xE3, 0x19], []]);
+    assert.deepEqual(image.chords(), [{}]);
 
     for (const options of [{text: null}, {uploadStatus: 500}]) {
         const failed = setup(options); failed.paste(); await failed.idle();
@@ -103,11 +119,11 @@ function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatu
     const hidFetch = hidFailure.context.fetch;
     hidFailure.context.fetch = async (url, options) => {
         const response = await hidFetch(url, options);
-        if (url === '/manual-key' && JSON.parse(options.body).usages.length) return {ok: false, status: 500};
+        if (url === '/manual-paste') return {ok: false, status: 500};
         return response;
     };
     hidFailure.paste(); await hidFailure.idle();
-    assert.deepEqual(hidFailure.chords(), [[0xE3, 0x19], []]);
+    assert.deepEqual(hidFailure.chords(), [{}]);
     assert.equal(hidFailure.context.enabled, false);
 
     for (const cancel of [
@@ -126,7 +142,7 @@ function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatu
     repeated.key('KeyV'); repeated.key('KeyV', {repeat: true}); repeated.key('KeyV');
     await pause(); host.resolve({ok: true, json: async () => ({text: 'one paste'})});
     await repeated.idle();
-    assert.deepEqual(repeated.chords(), [[0xE3, 0x19], []]);
+    assert.deepEqual(repeated.chords(), [{}]);
 
     const local = setup(); local.context.document.activeElement = {};
     assert(!local.key('KeyV').prevented);

@@ -170,7 +170,7 @@ def install():
                 logging.getLogger(__name__).warning('Media wake failed: port=%s error=%s', self._http_port, type(error).__name__)
                 await reply(writer, 503, {'error': '视频或控制服务正在准备，请稍后重试'})
                 return False
-        special = path in ('/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-key', '/input-health', '/input-readiness')
+        special = path in ('/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-key', '/manual-paste', '/manual-composer-focus', '/input-health', '/input-readiness')
         restricted = device_token and (parts[0] == 'POST' or path.startswith('/clipboard') or path == '/host-clipboard')
         prefix = bytearray(first)
         headers = {}
@@ -237,7 +237,7 @@ def install():
                 # only send an idle keyboard report; they never inject input.
                 result = await check_input(self, input_lock(self), lambda: True)
                 return await reply(writer, 200, result)
-            if path in ('/manual-touch', '/manual-home', '/manual-key'):
+            if path in ('/manual-touch', '/manual-home', '/manual-key', '/manual-paste', '/manual-composer-focus'):
                 if parts[0] != 'POST':
                     return await reply(writer, 405, {'error': 'POST required'})
                 length = int(headers.get('content-length', '0'))
@@ -246,6 +246,8 @@ def install():
                 data = json.loads(await asyncio.wait_for(reader.readexactly(length), 5))
                 if not isinstance(data, dict):
                     return await reply(writer, 400, {'error': 'invalid request'})
+                if path in ('/manual-paste', '/manual-composer-focus') and data != {}:
+                    return await reply(writer, 400, {'error': 'empty request required'})
                 if path == '/manual-touch':
                     if (data.get('type') not in ('contact', 'release')
                             or any(type(data.get(key)) is not int or not 0 <= data[key] <= 65535 for key in ('x', 'y'))
@@ -269,6 +271,32 @@ def install():
                         return await reply(writer, 409, {'error': '控制连接已重建，请重新操作'})
                     async def execute():
                         await self._ensure_hid()
+                        if path in ('/manual-touch', '/manual-composer-focus'):
+                            # Register the external keyboard before focus can summon
+                            # the software keyboard. Warm clicks reuse registration.
+                            await self._ensure_keyboard()
+                        if path == '/manual-paste':
+                            try:
+                                return await originals['_handle_key'](self, b'{"usages":[227,25]}')
+                            finally:
+                                await originals['_handle_key'](self, b'{"usages":[]}')
+                        if path == '/manual-composer-focus':
+                            from native_conversation import NativeConversation
+                            from visual_composer import input_point
+                            phone = NativeConversation()
+                            phone.base = f'http://127.0.0.1:{self._http_port}'
+                            point = await asyncio.to_thread(input_point, phone, fresh=True)
+                            if not active(self) or generation != getattr(self, '_batch_input_generation', 0):
+                                return 409, b'input connection changed'
+                            coords = {key: round(point[key] * 65535) for key in ('x', 'y')}
+                            try:
+                                code, message = await originals['_handle_touch'](self, json.dumps({'type':'contact', **coords}).encode())
+                                if code != 200:
+                                    return code, message
+                                await asyncio.sleep(.08)
+                            finally:
+                                await originals['_handle_touch'](self, json.dumps({'type':'release', **coords}).encode())
+                            return 200, b'ok'
                         if path == '/manual-home':
                             return await originals['_handle_button'](self, b'{"name":"home","state":"press"}')
                         if path == '/manual-key':
@@ -283,10 +311,10 @@ def install():
                         payload = json.dumps({key: data[key] for key in ('type', 'x', 'y')}).encode()
                         return await originals['_handle_touch'](self, payload)
                     try:
-                        code, _ = await asyncio.wait_for(execute(), 4)
+                        code, _ = await asyncio.wait_for(execute(), 12 if path == '/manual-composer-focus' else 4)
                         if code == 200:
-                            kind = {'/manual-touch': '_handle_touch', '/manual-key': '_handle_key', '/manual-home': '_handle_button'}[path]
-                            record_input(self, kind, data)
+                            kind = {'/manual-touch': '_handle_touch', '/manual-key': '_handle_key', '/manual-home': '_handle_button', '/manual-paste': '_handle_key', '/manual-composer-focus': '_handle_touch'}[path]
+                            record_input(self, kind, {'type':'release'} if path == '/manual-composer-focus' else data)
                     except Exception:
                         await clear_input(self)
                         raise
@@ -404,13 +432,13 @@ def install():
                 await asyncio.to_thread(windows_clipboard, text, write=True)
             return await reply(writer, 200, {'ok': True})
         except asyncio.TimeoutError:
-            if path in ('/manual-touch', '/manual-home', '/manual-key'):
+            if path in ('/manual-touch', '/manual-home', '/manual-key', '/manual-paste', '/manual-composer-focus'):
                 return await reply(writer, 503, {'error': '控制请求未完成，请核对手机后重新操作'})
             return await reply(writer, 400, {'error': 'invalid request'})
         except (ValueError, asyncio.IncompleteReadError):
             return await reply(writer, 400, {'error': 'invalid request'})
         except Exception:
-            if path in ('/manual-touch', '/manual-home', '/manual-key'):
+            if path in ('/manual-touch', '/manual-home', '/manual-key', '/manual-paste', '/manual-composer-focus'):
                 logging.getLogger(__name__).exception('Manual phone control failed: %s', path)
                 # Never replay an input: a failed release may already have sent.
                 return await reply(writer, 500, {'error': '手机触控服务不可用，请检查连接和开发者服务'})

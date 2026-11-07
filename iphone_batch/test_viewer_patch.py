@@ -16,6 +16,7 @@ class ViewerHTTPFixture(unittest.IsolatedAsyncioTestCase):
         self.instance._password = None
         self.instance._active_service = object()  # fake media session; phone services are mocked
         self.instance._stream_dirty = False
+        self.instance._ensure_keyboard = AsyncMock()
         self.server = await asyncio.start_server(self.instance._handle_http, '127.0.0.1', 0)
         self.port = self.server.sockets[0].getsockname()[1]
         self.instance._http_port = self.port
@@ -110,6 +111,38 @@ class ClipboardHTTPTests(ViewerHTTPFixture):
         self.instance._uhs.send_keyboard.assert_awaited_once_with(9,[0xE3,0x19])
         self.assertTrue(self.instance._hid_queue.empty())
 
+    async def test_manual_paste_releases_once_without_return(self):
+        self.instance._ensure_hid=AsyncMock()
+        self.instance._kb_service_id=9
+        keys=AsyncMock()
+        self.instance._uhs=SimpleNamespace(send_keyboard=keys)
+        code,_=await self.request('POST',{},path='/manual-paste')
+        self.assertEqual(code,200)
+        self.assertEqual([call.args for call in keys.await_args_list],[(9,[227,25]),(9,[])])
+
+    async def test_manual_paste_failure_still_releases_and_never_retries(self):
+        self.instance._ensure_hid=AsyncMock()
+        self.instance._stop_hid=AsyncMock()
+        self.instance._kb_service_id=9
+        keys=AsyncMock(side_effect=[ConnectionError('lost acknowledgement'),None])
+        self.instance._uhs=SimpleNamespace(send_keyboard=keys)
+        code,_=await self.request('POST',{},path='/manual-paste')
+        self.assertEqual(code,500)
+        self.assertEqual([call.args for call in keys.await_args_list],[(9,[227,25]),(9,[])])
+
+    async def test_composer_focus_registers_keyboard_before_touch(self):
+        self.instance._ensure_hid=AsyncMock()
+        events=[]
+        async def keyboard():events.append('keyboard')
+        async def touch(*args,**kwargs):events.append('touch')
+        self.instance._ensure_keyboard=AsyncMock(side_effect=keyboard)
+        self.instance._uhs=SimpleNamespace(send_touchscreen=AsyncMock(side_effect=touch))
+        with patch('visual_composer.input_point',return_value={'x':.4,'y':.8}):
+            code,_=await self.request('POST',{},path='/manual-composer-focus')
+        self.assertEqual(code,200)
+        self.assertEqual(events,['keyboard','touch','touch'])
+        self.assertIsNone(self.instance._batch_contact)
+
     async def test_manual_key_failure_resets_connection_without_retry(self):
         self.instance._ensure_hid=AsyncMock()
         self.instance._ensure_keyboard=AsyncMock()
@@ -183,7 +216,7 @@ class ClipboardHTTPTests(ViewerHTTPFixture):
         self.instance._batch_token = 'test-token'
         self.instance._batch_active = False
         self.instance._ensure_hid = AsyncMock()
-        for path, body in [('/manual-touch',{'type':'contact','x':1,'y':2}),('/manual-home',{})]:
+        for path, body in [('/manual-touch',{'type':'contact','x':1,'y':2}),('/manual-home',{}),('/manual-paste',{}),('/manual-composer-focus',{})]:
             code, _ = await self.request('POST', body, path=path)
             self.assertEqual(code, 403)
             code, _ = await self.request('POST', body, path=path, origin='https://example.com')

@@ -61,8 +61,18 @@ def composer_rect(image):
     return best
 
 
-def input_point(phone):
-    image = frame(phone)
+def input_point(phone, *, fresh=False):
+    if fresh:
+        # Skip the hub's cached first frame after keyboard registration, which
+        # may still show the composer above the old software keyboard.
+        stream = frames(phone)
+        try:
+            next(stream)
+            image = next(stream)
+        finally:
+            stream.close()
+    else:
+        image = frame(phone)
     x,y,w,h = composer_rect(image)
     return {'x':(x+.32*w)/image.shape[1], 'y':(y+.5*h)/image.shape[0]}
 

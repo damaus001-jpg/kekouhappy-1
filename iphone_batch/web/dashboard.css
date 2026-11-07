@@ -53,6 +53,7 @@
 /* Always-visible chat input with emoji picker and a single send control. */
 .chat-composer{position:relative;overflow:visible;max-height:none;border-top:1px solid var(--line);background:#eef2ea;flex:none}
 .chat-composer .composer{padding:10px 12px 8px}.chat-compose-row{display:flex;align-items:flex-end;gap:8px}.emoji-wrap{position:relative;flex:none}
+#paste-to-phone{flex:none;height:44px;padding:0 10px;font-size:12px;white-space:nowrap}
 .chat-composer .emoji-toggle{width:42px;height:44px;padding:0;background:transparent;color:#63796c;font-size:30px;line-height:1;border-radius:50%;font-weight:400}
 .chat-composer #reply-zh{margin:0;flex:1;min-width:0;width:auto;height:44px;min-height:44px;max-height:128px;resize:none;border:1px solid #e0e7dc;border-radius:22px;background:#fff;padding:11px 16px;font-size:14px;line-height:20px;overflow-y:auto}
 .chat-composer .chat-send{width:44px;height:44px;flex:none;padding:0;border:0;border-radius:50%;background:#24846b;color:#fff;font-size:0;display:grid;place-items:center}.chat-send::before{content:'➤';font-size:22px;line-height:1;margin-left:2px}.chat-composer .chat-send:disabled{background:#dbe3d8;color:#95a491}
