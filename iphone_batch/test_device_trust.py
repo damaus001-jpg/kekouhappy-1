@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 from device_trust import repair
+from pymobiledevice3.exceptions import MuxException
 
 class TrustRepairTests(unittest.IsolatedAsyncioTestCase):
     async def run_repair(self, client, root):
@@ -53,6 +54,23 @@ class TrustRepairTests(unittest.IsolatedAsyncioTestCase):
                 await self.run_repair(client,Path(root))
         client.validate_pairing.assert_not_awaited()
         client.close.assert_awaited_once()
+
+    async def test_usbmux_save_failure_accepts_only_a_validated_local_identity(self):
+        client=self.client()
+        client.pair.side_effect=MuxException('SavePairRecord failed')
+        with tempfile.TemporaryDirectory() as root:
+            result=await self.run_repair(client,Path(root))
+        self.assertTrue(result['ok'])
+        self.assertFalse(result['system_record_saved'])
+        client.validate_pairing.assert_awaited_once()
+
+    async def test_usbmux_failure_with_rejected_identity_still_fails(self):
+        client=self.client()
+        client.pair.side_effect=MuxException('SavePairRecord failed')
+        client.validate_pairing.return_value=False
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(MuxException):
+                await self.run_repair(client,Path(root))
 
 if __name__=='__main__':
     unittest.main()

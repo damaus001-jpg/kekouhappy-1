@@ -168,7 +168,8 @@ def device_environment(udid):
            if not key.startswith('PYMOBILEDEVICE3_') and key != 'USBMUXD_SOCKET_ADDRESS'}
     env.update(PYTHONIOENCODING='utf-8', PYTHONUTF8='1', NO_COLOR='1',
                PYMOBILEDEVICE3_UDID=udid,
-               PYMOBILEDEVICE3_USBMUX='127.0.0.1:27015')
+               PYMOBILEDEVICE3_USBMUX='127.0.0.1:27015',
+               PYMOBILEDEVICE3_DEFAULT_FALLBACK='tunneld')
     return env
 
 

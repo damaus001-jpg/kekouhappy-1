@@ -1,0 +1,85 @@
+name: Bug Report
+description: File a bug report for pymobiledevice3
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please fill out the form below. Reports with concrete reproduction steps, version details, and logs are much faster to triage.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce this?
+      description: Share the exact command or API usage, what device or service was involved, and the steps needed to reproduce the issue.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Paste the output of `pymobiledevice3 doctor`. It reports the host OS, Python and
+        pymobiledevice3 versions, which transports this machine can use, and — when a device is
+        attached — its model, OS version, pairing, developer mode and developer image state.
+        Most of what we would otherwise ask for in follow-up questions is in there.
+
+        If `doctor` itself fails, say so and fill this in by hand instead.
+      render: shell
+      placeholder: |
+        $ pymobiledevice3 doctor
+        pymobiledevice3 4.26.0 on macOS-15.4-arm64, python 3.12.3
+
+        This works:
+          Device plugged in    iPhone (00008030-...), and usbmux lists it
+          Device               iPhone15,4 running 18.4, paired
+          ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: >-
+        Run the failing command again with `-v` before the subcommand (e.g. `pymobiledevice3 -v lockdown info`)
+        and paste its whole output: without it, an error shows only its message, not the traceback.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: search
+    attributes:
+      label: Search
+      options:
+        - label: I searched for existing open and closed issues before opening this
+          required: true
+  - type: textarea
+    id: ai-assistance
+    attributes:
+      label: AI assistance
+      description: If AI tools helped draft or analyze this report, disclose the tool and extent. Otherwise write `none`.
+      placeholder: none
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Code of Conduct
+      description: By submitting this issue, you agree to follow this project's [Code of Conduct](https://github.com/doronz88/pymobiledevice3/blob/master/CODE_OF_CONDUCT.md).
+      options:
+        - label: I agree to follow this project's Code of Conduct
+          required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add anything else that may be relevant, including links, screenshots, or related issues.
+    validations:
+      required: false

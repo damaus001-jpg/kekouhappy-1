@@ -28,13 +28,13 @@ class VideoConnection {
         if (resume) resume();
     }
 }
-// The dashboard keeps ready previews connected; non-selected canvases draw at 1 fps.
+// The dashboard keeps ready previews connected; draw once every three seconds.
 const batchManaged = new URLSearchParams(location.search).has('batch');
 let batchActive = !batchManaged;
 let batchVisible = !batchManaged;
 let batchSelected = !batchManaged;
 let lastCanvasDrawAt = 0;
-const BACKGROUND_DRAW_INTERVAL_MS = 1000;
+const BACKGROUND_DRAW_INTERVAL_MS = 3000;
 const videoConnection = new VideoConnection({selected: () => !batchManaged || batchSelected});
 let compatibleVideoAbort = null;
 let inputReady = !batchManaged, inputHealthPaused = false, inputMonitor = null, inputEpoch = 0;
@@ -212,13 +212,24 @@ function touchCoords(e) {
     };
 }
 
+function reportManualInputFailure(path, error) {
+    const message = error?.message || '控制输入失败，请检查手机连接';
+    log(path + ' err: ' + message);
+    if (batchManaged) {
+        try {
+            parent.postMessage({type: 'manual-input-result', ok: false, message},
+                new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070');
+        } catch (feedbackError) { log('控制失败提示未送达父页面：' + feedbackError.message); }
+    }
+}
+
 async function postJson(path, payload) {
-    if (!controlAvailable()) return;
     // Note: do NOT pass {keepalive: true} -- that triggers fetch's
     // "send during page unload" path which has body-size limits and
     // queues requests differently; we want plain HTTP/1.1 keep-alive
     // (the default) so pointer events stream over one TCP.
     try {
+        if (!controlAvailable()) throw Error('当前手机控制连接尚未就绪，请检查连接后重新操作');
         if (path === '/key') path = '/manual-key';
         if (path === '/touch') path = '/manual-touch';
         if (path === '/button' && payload.name === 'home' && payload.state === 'press') path = '/manual-home';
@@ -229,7 +240,12 @@ async function postJson(path, payload) {
             signal: AbortSignal.timeout(5000),
         });
         if (!response.ok) throw Error('控制输入失败（HTTP ' + response.status + '）');
-    } catch (e) { log(path + ' err: ' + e.message); inputMonitor?.invalidate(); }
+        return true;
+    } catch (error) {
+        reportManualInputFailure(path, error);
+        inputMonitor?.invalidate();
+        return false;
+    }
 }
 
 let activePointer = null;
@@ -239,7 +255,7 @@ const pointerInput = new PointerInput(async payload => {
     const response = await fetch('/manual-touch', {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload), signal: AbortSignal.timeout(5000)});
     if (!response.ok) throw Error('触摸操作失败，请检查手机连接');
-}, error => {activePointer = null; log(error.message); inputMonitor?.invalidate();});
+}, error => {activePointer = null; reportManualInputFailure('/manual-touch', error); inputMonitor?.invalidate();});
 const wheelInput = new WheelInput(pointerInput, {
     bounds: () => canvas.getBoundingClientRect(),
     coords: touchCoords,
@@ -259,7 +275,12 @@ function releaseActive() {
     pointerInput.end(lastCoords);
 }
 canvas.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || !controlAvailable()) return;   // primary button only
+    if (e.button !== 0) return;   // primary button only
+    if (!controlAvailable()) {
+        reportManualInputFailure('/manual-touch', Error('当前手机控制连接尚未就绪，请检查连接后重新操作'));
+        inputMonitor?.invalidate();
+        return;
+    }
     pasteRevision++; // A new phone target cancels an unfinished paste.
     wheelInput.stop();
     e.preventDefault();
@@ -305,13 +326,17 @@ document.addEventListener('visibilitychange', () => {
 // Right-click on the phone image = Home button, matching the original control.
 canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    postJson('/button', {name: 'home', state: 'press'}).then(() => log('button: home (right-click)'));
+    releaseActive();
+    pointerInput.idle()
+        .then(() => postJson('/button', {name: 'home', state: 'press'}))
+        .then(ok => { if (ok) log('Home 请求已发送（右键），请核对手机画面'); })
+        .catch(error => reportManualInputFailure('/manual-home', error));
 });
 
 document.querySelectorAll('button[data-btn]:not(.hw)').forEach(btn => {
     btn.addEventListener('click', () => {
         const name = btn.dataset.btn;
-        postJson('/button', {name, state: 'press'}).then(() => log('button: ' + name));
+        postJson('/button', {name, state: 'press'}).then(ok => { if (ok) log('button request sent: ' + name); });
     });
 });
 
@@ -337,14 +362,14 @@ document.querySelectorAll('.hw[data-btn]').forEach(btn => {
         e.preventDefault();
         try { btn.setPointerCapture(e.pointerId); } catch (_) {}
         downAt = performance.now();
-        chain = chain.then(() => postJson('/button', {name, state: 'down'})).then(() => log('button: ' + shown));
+        chain = chain.then(() => postJson('/button', {name, state: 'down'})).then(ok => { if (ok) log('button request sent: ' + shown); });
     });
     btn.addEventListener('pointerup', release);
     btn.addEventListener('pointercancel', release);
     btn.addEventListener('lostpointercapture', release);
     // Keyboard activation (Enter / Space on a focused button) has no hold.
     btn.addEventListener('click', (e) => {
-        if (e.detail === 0) postJson('/button', {name, state: 'press'}).then(() => log('button: ' + shown));
+        if (e.detail === 0) postJson('/button', {name, state: 'press'}).then(ok => { if (ok) log('button request sent: ' + shown); });
     });
 });
 window.addEventListener('blur', () => {
@@ -382,14 +407,24 @@ async function swipe(direction) {
     const xEnd   = direction === 'left' ? 5000  : 60000;
     const steps = 10;
     const dt = 20;  // ms between samples
-    await postJson('/touch', {type: 'contact', x: xStart, y: yMid});
-    for (let i = 1; i <= steps; i++) {
-        const x = Math.round(xStart + (xEnd - xStart) * (i / steps));
-        await new Promise(r => setTimeout(r, dt));
-        await postJson('/touch', {type: 'contact', x, y: yMid});
+    let contactAttempted = false, releaseAttempted = false, lastX = xStart;
+    try {
+        contactAttempted = true;
+        if (!await postJson('/touch', {type: 'contact', x: xStart, y: yMid})) return false;
+        for (let i = 1; i <= steps; i++) {
+            lastX = Math.round(xStart + (xEnd - xStart) * (i / steps));
+            await new Promise(r => setTimeout(r, dt));
+            if (!await postJson('/touch', {type: 'contact', x: lastX, y: yMid})) return false;
+        }
+        releaseAttempted = true;
+        if (!await postJson('/touch', {type: 'release', x: xEnd, y: yMid})) return false;
+        log('swipe request sent: ' + direction);
+        return true;
+    } finally {
+        // A failed contact response may still have pressed the phone. Release
+        // once without replaying it; postJson still enforces control ownership.
+        if (contactAttempted && !releaseAttempted) await postJson('/touch', {type: 'release', x: lastX, y: yMid});
     }
-    await postJson('/touch', {type: 'release', x: xEnd, y: yMid});
-    log('swipe ' + direction);
 }
 document.querySelectorAll('button[data-swipe]').forEach(btn => {
     btn.addEventListener('click', () => swipe(btn.dataset.swipe));
@@ -589,7 +624,7 @@ window.addEventListener('keydown', (e) => {
         const name = CTRL_HOTKEYS[key];
         if (name) {
             e.preventDefault();
-            postJson('/button', {name, state: 'press'}).then(() => log('hotkey: ' + name));
+            postJson('/button', {name, state: 'press'}).then(ok => { if (ok) log('hotkey request sent: ' + name); });
             return;
         }
     }
@@ -1000,7 +1035,7 @@ function scheduleFrameDraw() {
     rafScheduled = true;
     if (batchManaged && !batchSelected) {
         // display:none iframes suspend rAF. A timer keeps their latest canvas
-        // warm without increasing background drawing beyond one frame/second.
+        // warm without drawing more than once every three seconds.
         frameDrawTimer = setTimeout(() => { frameDrawTimer = null; drawPending(); },
             Math.max(0, BACKGROUND_DRAW_INTERVAL_MS - (performance.now() - lastCanvasDrawAt)));
     } else {
@@ -1139,15 +1174,15 @@ function drawFrame(f) {
 function redrawWithCurrentRotation() {
     if (lastFrame) drawFrame(lastFrame);
 }
-function drawPending() {
+function drawPending(force = false) {
     rafScheduled = false;
     const f = pendingFrame;
     pendingFrame = null;
     if (!f) return;
     // Keep every warm viewer decoding so selection can show its newest frame,
-    // but repaint non-selected canvases at most once per second.
+    // but repaint non-selected canvases at most once every three seconds.
     const now = performance.now();
-    if (batchManaged && !batchSelected && now - lastCanvasDrawAt < BACKGROUND_DRAW_INTERVAL_MS) {
+    if (!force && batchManaged && !batchSelected && now - lastCanvasDrawAt < BACKGROUND_DRAW_INTERVAL_MS) {
         try { f.close(); } catch (_) {}
         return;
     }
@@ -1841,8 +1876,27 @@ if (!batchManaged) inputMonitor.setActive(true);
 runVideoForever().catch(e => log('fatal: ' + e.message));
 
 if (batchManaged) {
+    let snapshotBusy = false, lastSnapshotAt = -Infinity;
     window.addEventListener('message', event => {
         if (event.source !== parent || event.origin !== (new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070')) return;
+        if (event.data?.type === 'monitor-snapshot') {
+            if (snapshotBusy || typeof event.data.id !== 'string' || event.data.id.length > 80 || performance.now() - lastSnapshotAt < 2800) return;
+            if (!pendingFrame && !lastFrame) return;
+            // Reuse the warm decoder and present its newest frame; no new stream.
+            if (pendingFrame) { cancelFrameDraw(); drawPending(true); }
+            if (!canvas.width || !canvas.height) return;
+            const thumbnail = document.createElement('canvas');
+            const ratio = Math.min(1, 240 / canvas.width, 520 / canvas.height);
+            thumbnail.width = Math.max(1, Math.round(canvas.width * ratio));
+            thumbnail.height = Math.max(1, Math.round(canvas.height * ratio));
+            thumbnail.getContext('2d').drawImage(canvas, 0, 0, thumbnail.width, thumbnail.height);
+            snapshotBusy = true; lastSnapshotAt = performance.now();
+            thumbnail.toBlob(image => {
+                snapshotBusy = false;
+                if (image) parent.postMessage({type:'monitor-snapshot-result',id:event.data.id,image,state:videoConnection.state},event.origin);
+            }, 'image/jpeg', .65);
+            return;
+        }
         if (event.data?.type === 'input-recover') {
             if (batchActive) inputMonitor.check(true);
             return;

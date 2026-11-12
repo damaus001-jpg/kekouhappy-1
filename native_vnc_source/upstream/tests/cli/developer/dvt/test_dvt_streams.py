@@ -1,0 +1,258 @@
+import datetime
+import ipaddress
+import json
+from typing import cast
+
+import pytest
+
+from pymobiledevice3.cli.cli_common import OutputFormat
+from pymobiledevice3.cli.developer import dvt as dvt_module
+from pymobiledevice3.lockdown_service_provider import LockdownServiceProvider
+from pymobiledevice3.services.dvt.instruments.network_monitor import (
+    AddressV4,
+    ConnectionDetectionEvent,
+    SocketAddress,
+)
+
+pytestmark = [pytest.mark.cli]
+
+_FAKE_SERVICE_PROVIDER = cast(LockdownServiceProvider, object())
+
+
+class _FakeDvtProvider:
+    def __init__(self, service_provider):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _fake_stream(items):
+    class _Stream:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def __aiter__(self):
+            return self._generate()
+
+        async def _generate(self):
+            for item in items:
+                yield item
+
+    return _Stream
+
+
+@pytest.fixture(autouse=True)
+def _fake_dvt(monkeypatch):
+    monkeypatch.setattr(dvt_module, "DvtProvider", _FakeDvtProvider)
+
+
+def test_energy_emits_ndjson_records(monkeypatch, capsys):
+    samples = [{"energy.cost": 1.5}, {"energy.cost": 2.5}]
+    monkeypatch.setattr(dvt_module, "EnergyMonitor", _fake_stream(samples))
+
+    dvt_module.dvt_energy(_FAKE_SERVICE_PROVIDER, ["123"])
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert [json.loads(line) for line in lines] == samples
+
+
+def test_network_statistics_emits_one_ndjson_record_per_pid(monkeypatch, capsys):
+    time = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    samples = [
+        {
+            123: {"pid": 123, "net.bytes": 10, "time": time},
+            456: {"pid": 456, "net.bytes": 20, "time": time},
+        }
+    ]
+    monkeypatch.setattr(dvt_module, "NetworkStatistics", _fake_stream(samples))
+
+    dvt_module.dvt_network_statistics(_FAKE_SERVICE_PROVIDER, [123, 456])
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert [json.loads(line) for line in lines] == [
+        {"pid": 123, "net.bytes": 10, "time": "2026-01-01T00:00:00+00:00"},
+        {"pid": 456, "net.bytes": 20, "time": "2026-01-01T00:00:00+00:00"},
+    ]
+
+
+def test_notifications_emits_ndjson_records(monkeypatch, capsys):
+    events = [{"execName": "app", "state": 4}]
+    monkeypatch.setattr(dvt_module, "Notifications", _fake_stream(events))
+
+    dvt_module.dvt_notifications(_FAKE_SERVICE_PROVIDER)
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert [json.loads(line) for line in lines] == events
+
+
+def test_graphics_emits_ndjson_records(monkeypatch, capsys):
+    samples = [{"CoreAnimationFramesPerSecond": 60}]
+    monkeypatch.setattr(dvt_module, "Graphics", _fake_stream(samples))
+
+    dvt_module.dvt_graphics(_FAKE_SERVICE_PROVIDER)
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert [json.loads(line) for line in lines] == samples
+
+
+def test_fps_emits_one_ndjson_record_per_sample(monkeypatch, capsys):
+    class _FakeGraphics(_fake_stream([])):
+        async def fps(self):
+            for fps in (60, 0):
+                yield fps
+
+    monkeypatch.setattr(dvt_module, "Graphics", _FakeGraphics)
+
+    dvt_module.dvt_fps(_FAKE_SERVICE_PROVIDER)
+
+    records = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    assert [record["fps"] for record in records] == [60, 0]
+    for record in records:
+        assert datetime.datetime.fromisoformat(record["timestamp"]).tzinfo is not None
+
+
+def _connection_event() -> ConnectionDetectionEvent:
+    def address(ip: str, port: int) -> SocketAddress:
+        return SocketAddress(
+            length=0x10,
+            family=2,
+            port=port,
+            data=AddressV4(address=ipaddress.IPv4Address(ip), _zero=b"\x00" * 8),
+        )
+
+    return ConnectionDetectionEvent(
+        local_address=address("10.0.0.1", 5000),
+        remote_address=address("17.0.0.1", 443),
+        interface_index=1,
+        pid=42,
+        recv_buffer_size=0,
+        recv_buffer_used=0,
+        serial_number=7,
+        kind=1,
+    )
+
+
+def test_netstat_json_emits_connection_records(monkeypatch, capsys):
+    monkeypatch.setattr(dvt_module, "NetworkMonitor", _fake_stream([_connection_event()]))
+
+    dvt_module.netstat(_FAKE_SERVICE_PROVIDER, output_format=OutputFormat.JSON)
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert [json.loads(line) for line in lines] == [
+        {
+            "event": "connection_detected",
+            "local": {"address": "10.0.0.1", "port": 5000},
+            "remote": {"address": "17.0.0.1", "port": 443},
+            "pid": 42,
+            "interface_index": 1,
+        }
+    ]
+
+
+def test_netstat_text_prints_connection_line_to_stdout(monkeypatch, capsys):
+    monkeypatch.setattr(dvt_module, "NetworkMonitor", _fake_stream([_connection_event()]))
+
+    dvt_module.netstat(_FAKE_SERVICE_PROVIDER, output_format=OutputFormat.TEXT)
+
+    captured = capsys.readouterr()
+    assert "10.0.0.1:5000 -> 17.0.0.1:443" in captured.out
+
+
+def test_netstat_json_emits_null_for_an_undecodable_address(monkeypatch, capsys):
+    event = _connection_event()
+    event.remote_address = SocketAddress(length=8, family=0, port=0, data=None)
+    monkeypatch.setattr(dvt_module, "NetworkMonitor", _fake_stream([event]))
+
+    dvt_module.netstat(_FAKE_SERVICE_PROVIDER, output_format=OutputFormat.JSON)
+
+    (line,) = capsys.readouterr().out.strip().splitlines()
+    assert json.loads(line)["remote"] == {"address": None, "port": 0}
+
+
+class _FakeOslogMessage:
+    device_time = datetime.datetime(2026, 10, 11, 21, 27, 0, 803022)
+    process = 42
+    message_type = "Default"
+    sender_image_path = "/usr/lib/libfoo.dylib"
+    subsystem = "com.apple.test"
+    category = "general"
+    message = None
+    name = "hello world"
+
+
+def test_oslog_json_emits_ndjson_records(monkeypatch, capsys):
+    monkeypatch.setattr(dvt_module, "ActivityTraceTap", _fake_stream([_FakeOslogMessage()]))
+
+    dvt_module.dvt_oslog(_FAKE_SERVICE_PROVIDER, output_format=OutputFormat.JSON)
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["pid"] == 42
+    assert record["message_type"] == "Default"
+    assert record["subsystem"] == "com.apple.test"
+    assert record["category"] == "general"
+    assert record["image_name"] == "libfoo.dylib"
+    assert record["message"] == "hello world"
+    assert record["timestamp"] == "2026-10-11T21:27:00.803022"
+    assert record["format_string"] is None
+    assert record["arguments"] == []
+
+
+class _FakeOslogFormattedMessage(_FakeOslogMessage):
+    format_string = "pid %d of %s"
+    message = (
+        (b"narrative-text\x00", b"pid \x00"),
+        (b"uint64\x00\x00", b"\x2a\x00"),
+        (b"narrative-text\x00", b" of \x00"),
+        (b"string\x00\x00", b"launchd\x00\x00"),
+    )
+
+
+def test_oslog_json_carries_the_format_string_and_its_arguments(monkeypatch, capsys):
+    monkeypatch.setattr(dvt_module, "ActivityTraceTap", _fake_stream([_FakeOslogFormattedMessage()]))
+
+    dvt_module.dvt_oslog(_FAKE_SERVICE_PROVIDER, output_format=OutputFormat.JSON)
+
+    record = json.loads(capsys.readouterr().out)
+    assert record["message"] == "pid 42 of launchd"
+    assert record["format_string"] == "pid %d of %s"
+    assert record["arguments"] == [{"type": "uint64", "value": 42}, {"type": "string", "value": "launchd"}]
+
+
+class _FakeOslogMessageWithoutDeviceTime(_FakeOslogMessage):
+    device_time = None
+
+
+def test_oslog_falls_back_to_the_host_clock(monkeypatch, capsys):
+    monkeypatch.setattr(dvt_module, "ActivityTraceTap", _fake_stream([_FakeOslogMessageWithoutDeviceTime()]))
+    before = datetime.datetime.now()
+
+    dvt_module.dvt_oslog(_FAKE_SERVICE_PROVIDER, output_format=OutputFormat.JSON)
+
+    (line,) = capsys.readouterr().out.strip().splitlines()
+    assert before <= datetime.datetime.fromisoformat(json.loads(line)["timestamp"]) <= datetime.datetime.now()
+
+
+class _FakeOslogLimitMessage(_FakeOslogMessage):
+    format_string = "limit on pid %d"
+    message = ((b"narrative-text\x00", b"limit on pid \x00"), (b"uint64\x00", b"\xff" * 8 + b"\x00"))
+
+
+def test_oslog_prints_arguments_per_their_conversion(monkeypatch, capsys):
+    monkeypatch.setattr(dvt_module, "ActivityTraceTap", _fake_stream([_FakeOslogLimitMessage()]))
+
+    dvt_module.dvt_oslog(_FAKE_SERVICE_PROVIDER, output_format=OutputFormat.JSON)
+
+    (line,) = capsys.readouterr().out.strip().splitlines()
+    assert json.loads(line)["message"] == "limit on pid -1"

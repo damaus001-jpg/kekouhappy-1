@@ -1,0 +1,59 @@
+name: Feature Request
+description: Request a new feature or enhancement
+labels: [enhancement, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the problem first, then the proposed solution. Concrete workflows and examples make feature requests easier to evaluate.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the limitation, pain point, or missing workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Describe the solution you'd like
+      description: Explain the behavior, command, or API you want to exist.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Describe alternatives you've considered
+      description: Include workarounds, competing approaches, or reasons you rejected other options.
+    validations:
+      required: true
+  - type: checkboxes
+    id: search
+    attributes:
+      label: Search
+      options:
+        - label: I searched for existing open and closed issues before opening this
+          required: true
+  - type: textarea
+    id: ai-assistance
+    attributes:
+      label: AI assistance
+      description: If AI tools helped draft or analyze this request, disclose the tool and extent. Otherwise write `none`.
+      placeholder: none
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Code of Conduct
+      description: By submitting this issue, you agree to follow this project's [Code of Conduct](https://github.com/doronz88/pymobiledevice3/blob/master/CODE_OF_CONDUCT.md).
+      options:
+        - label: I agree to follow this project's Code of Conduct
+          required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add context, examples, links, screenshots, or prior art here.
+    validations:
+      required: false

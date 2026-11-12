@@ -1,8 +1,128 @@
+/* A thumbnail wall; the existing viewers remain the only video subscribers. */
+class GlobalMonitor {
+ constructor({pick, menu, refresh, sort}) {
+  Object.assign(this,{pick,menu,refresh,sort});this.visible=true;this.tiles=new Map();this.sequence=0;
+  this.grid=document.getElementById('monitor-grid');
+  this.section=document.getElementById('global-monitor');this.fullscreenButton=document.getElementById('monitor-fullscreen');
+  this.fullscreenButton.addEventListener('click',()=>this.toggleFullscreen());
+  document.addEventListener('fullscreenchange',()=>this.syncFullscreen());
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&this.section.classList.contains('monitor-window-fullscreen'))void this.exitFullscreen();});
+  document.getElementById('monitor-refresh').addEventListener('click',refresh);
+  document.getElementById('monitor-sort').addEventListener('change',event=>sort(event.target.value));
+  window.addEventListener('message',event=>this.receive(event));
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)this.tick();});
+  this.timer=setInterval(()=>this.tick(),250);
+  window.addEventListener('pagehide',()=>{clearInterval(this.timer);for(const tile of this.tiles.values())this.revoke(tile);});
+ }
+ openWorkbench(){document.querySelector('main').scrollIntoView({behavior:'smooth',block:'start'});}
+ scrollToTop(){document.getElementById('global-monitor').scrollIntoView({behavior:'smooth',block:'start'});}
+ isFullscreen(){return document.fullscreenElement===this.section||this.section.classList.contains('monitor-window-fullscreen');}
+ syncFullscreen(){const on=this.isFullscreen();this.fullscreenButton.textContent=on?'退出全屏 · Esc':'全屏监看';this.fullscreenButton.setAttribute('aria-pressed',String(on));}
+ async exitFullscreen(){
+  if(document.fullscreenElement===this.section)await document.exitFullscreen();
+  this.section.classList.remove('monitor-window-fullscreen');document.body.classList.remove('monitor-fullscreen-open');this.syncFullscreen();
+ }
+ async toggleFullscreen(){
+  try{
+   if(this.isFullscreen()){await this.exitFullscreen();return;}
+   if(!this.section.requestFullscreen)throw Error('unsupported');
+   await this.section.requestFullscreen();
+  }catch(error){
+   this.section.classList.add('monitor-window-fullscreen');document.body.classList.add('monitor-fullscreen-open');
+   document.getElementById('monitor-notice').textContent='当前客户端未开放浏览器全屏，已铺满窗口；按 Esc 退出。';
+  }
+  this.syncFullscreen();
+ }
+ revoke(tile){if(tile.url){URL.revokeObjectURL(tile.url);tile.url=null;}}
+ render(ordered,cards,sortValue) {
+  this.cards=cards;
+  const connected=new Set(ordered.map(row=>row.device.udid));
+  for(const [id,tile] of this.tiles)if(!connected.has(id)){this.revoke(tile);tile.node.remove();this.tiles.delete(id);}
+  document.getElementById('monitor-count').textContent=ordered.length+' 台设备 · '+[...this.tiles.values()].filter(tile=>tile.url&&tile.device?.ready).length+' 台已显示 · '+ordered.filter(row=>row.device.ready).length+' 台投屏就绪';
+  document.getElementById('monitor-empty').hidden=ordered.length!==0;
+  document.getElementById('monitor-sort').value=sortValue;
+  const now=Date.now();
+  ordered.forEach(({device,index,label,followupCount},position)=>{
+   let tile=this.tiles.get(device.udid);
+   if(!tile){
+    const node=document.createElement('button');node.type='button';node.className='monitor-tile';node.dataset.udid=device.udid;
+    const heading=document.createElement('span');heading.className='monitor-tile-heading';
+    const number=document.createElement('strong'),badge=document.createElement('span');badge.className='monitor-badge';heading.append(number,badge);
+    const screen=document.createElement('span');screen.className='monitor-screen';
+    const image=document.createElement('img');image.alt='';image.hidden=true;image.draggable=false;
+    const placeholder=document.createElement('span');placeholder.className='monitor-placeholder';screen.append(image,placeholder);
+    const state=document.createElement('span');state.className='monitor-state';
+    const followup=document.createElement('span');followup.className='monitor-followup';
+    node.append(heading,screen,state,followup);
+    tile={node,number,badge,image,placeholder,state,followup,nextAt:now+position*3000/Math.max(1,ordered.length),url:null,received:0,pending:null};
+    node.addEventListener('click',()=>this.pick(device.udid));
+    node.addEventListener('contextmenu',event=>this.menu(event,tile.device,tile.index));
+    this.tiles.set(device.udid,tile);
+   }
+   tile.device=device;tile.index=index;
+   tile.node.classList.toggle('monitor-selected',device.udid===this.selected);
+   const frame=cards.get(device.udid)?.frame;
+   if(tile.frame!==frame){tile.frame=frame;tile.pending=null;tile.received=0;tile.firstRequestAt=0;this.revoke(tile);tile.image.hidden=true;tile.image.removeAttribute('src');}
+   tile.number.textContent='设备 '+label.number;
+   const count=device.notifications?.card_count??device.notifications?.items?.length??0;
+   tile.badge.textContent=count?String(count):'';tile.badge.hidden=!count;
+   tile.followup.textContent=followupCount?'待跟进 '+followupCount:label.followup?'待跟进':'\u00a0';
+   tile.node.title=device.name+' · '+device.udid.slice(-8)+' · 点击进入操作；右键管理设备';
+   tile.node.setAttribute('aria-label','设备 '+label.number+'，'+(device.ready?'点击进入操作':device.error||'正在准备投屏'));
+   this.updateState(tile,now);this.grid.append(tile.node);
+  });
+ }
+ updateState(tile,now){
+  const ready=tile.device.ready,stale=tile.received&&now-tile.received>10000;
+  const waiting=ready&&!tile.received&&tile.firstRequestAt&&now-tile.firstRequestAt>15000;
+  tile.node.classList.toggle('monitor-stale',!!stale||tile.streamState==='retrying'||!ready);
+  tile.placeholder.hidden=!!tile.url;
+  tile.placeholder.textContent=ready?(waiting?'尚未收到画面，请点击检查':'等待画面…'):tile.device.error||'正在准备投屏…';
+  tile.state.textContent=!ready?tile.device.error||'正在准备投屏':stale?'更新中断 · 保留上次画面':tile.streamState==='retrying'?'画面重连中':tile.received?'每 3 秒更新':waiting?'首帧等待超时':'等待首帧';
+ }
+ tick(){
+  if(!this.visible||document.hidden||!this.cards)return;
+  const now=Date.now();
+  for(const [id,tile] of this.tiles){
+   this.updateState(tile,now);
+   if(!tile.device.ready||!tile.frame||now<tile.nextAt)continue;
+   if(tile.pending&&now-tile.requested<6000)continue;
+   const card=this.cards.get(id);if(card?.frame!==tile.frame)continue;
+   tile.pending='monitor-'+(++this.sequence);tile.requested=now;tile.nextAt=now+3000;if(!tile.firstRequestAt)tile.firstRequestAt=now;
+   card.frame.contentWindow.postMessage({type:'monitor-snapshot',id:tile.pending},card.origin);
+  }
+ }
+ receive(event){
+  if(event.data?.type!=='monitor-snapshot-result'||!this.visible)return;
+  for(const [id,tile] of this.tiles){
+   const card=this.cards?.get(id);
+   if(!card?.frame||event.source!==card.frame.contentWindow||event.origin!==card.origin||event.data.id!==tile.pending)continue;
+   tile.pending=null;tile.streamState=event.data.state;
+   const blob=event.data.image;
+   if(!(blob instanceof Blob)||blob.type!=='image/jpeg'||blob.size>1024*1024)return;
+   const previous=tile.url;tile.url=URL.createObjectURL(blob);tile.image.src=tile.url;tile.image.hidden=false;
+   if(previous)URL.revokeObjectURL(previous);
+   tile.received=Date.now();this.updateState(tile,tile.received);return;
+  }
+ }
+}
+
 
 const cards=new Map();let active=null;let busy=false;let latest=[];let controlPaused=false;
 let selectionRevision=0;
 let controlOwner=null;
 const devicePreview=location.hash==='#preview-devices';
+const globalMonitor=typeof GlobalMonitor==='function'?new GlobalMonitor({
+ pick:udid=>select(udid),menu:(event,device,index)=>showDeviceMenu(event,device,index),
+ refresh:()=>refreshDevices(),sort:value=>{sortControl.value=value;sortControl.dispatchEvent(new Event('change'));}
+}):null;
+if(globalMonitor){
+ const back=document.createElement('button');back.id='monitor-back';back.type='button';back.className='secondary monitor-back';back.textContent='↑ 全局监看';
+ back.addEventListener('click',()=>showGlobalMonitor());document.querySelector('.devices').prepend(back);
+}
+function showGlobalMonitor(){
+ closeDeviceMenu();globalMonitor?.scrollToTop();
+}
 const autoScanSwitch=document.getElementById('auto-scan');
 const autoScanStatus=document.getElementById('auto-scan-status');
 let autoScanEnabled=true,autoScanUpdating=false,scanRevision=0;
@@ -76,6 +196,18 @@ phoneHomeButton?.addEventListener('click',()=>{
  card.frame.contentWindow.postMessage({type:'device-home'},card.origin);
 });
 window.addEventListener('message',event=>{
+ if(event.data?.type==='manual-input-result'){
+  const card=cards.get(active);
+  if(!card?.frame||event.source!==card.frame.contentWindow||event.origin!==card.origin)return;
+  if(event.data.ok===false&&typeof event.data.message==='string'){
+   const device=latest.find(row=>row.udid===active);
+   const label=device?deviceLabel(device,latest.indexOf(device)).number:'';
+   const message=event.data.message.slice(0,300);
+   notice('设备 '+label+'：'+message);
+   if(card.connectionNotice){card.connectionNotice.hidden=false;card.connectionNotice.textContent=message;}
+  }
+  return;
+ }
  if(event.data?.type==='clipboard-paste-result'){
   const card=cards.get(active);
   if(!card?.frame||event.source!==card.frame.contentWindow||event.origin!==card.origin)return;
@@ -93,8 +225,8 @@ window.addEventListener('message',event=>{
    card.connectionNotice.hidden=state.ready===true||state.state==='inactive';
    card.connectionNotice.textContent=state.state==='unavailable'?'控制连接不可用，点击设备列表刷新重试':'控制连接检查与恢复中…';
   }
-  if(state.manual&&state.ready)notice('当前设备控制连接已检查'+(state.recovered?'并恢复':'，可正常操作')+'。');
-  if(state.ready&&state.prewarmed)notice('目标设备画面与操控均已就绪');
+  if(state.manual&&state.ready)notice('当前设备输入连接'+(state.recovered?'已重新建立':'检查通过')+'，请确认实际操控效果。');
+  if(state.ready&&state.prewarmed)notice('已切换设备，输入连接已准备');
   return;
  }
  if(event.data?.type!=='device-home-result')return;
@@ -353,6 +485,7 @@ function releasePreview(card){
 }
 function render(rows,selected,controller=controlOwner){
  latest=rows;active=selected;controlOwner=controller;
+ if(globalMonitor)globalMonitor.selected=selected;
  for(const [udid,job] of reconnectNotices){
   const row=rows.find(device=>device.udid===udid);
   if(!row){notice('设备 '+job.label+' 已断开，请接入后刷新设备列表');reconnectNotices.delete(udid);}
@@ -432,6 +565,7 @@ function render(rows,selected,controller=controlOwner){
   document.getElementById('screen-device').textContent=label?'· 设备 '+label.number+(label.followup?' / 待跟进':''):'';
   document.getElementById('empty').style.display='';
   for(const id of ['capture-current','refresh-messages','send-reply'])document.getElementById(id).disabled=true;
+  globalMonitor?.render(ordered,cards,sortControl.value);
   return;
  }
  for(const d of rows){
@@ -458,15 +592,20 @@ function render(rows,selected,controller=controlOwner){
   const on=selected===d.udid;card.node.classList.toggle('selected',on);card.button.textContent=on&&controlOwner===d.udid?'正在控制':'选择控制';card.button.disabled=!d.ready||busy;
   const target=document.getElementById('selected');if(card.node.parentElement!==target)target.append(card.node);
   card.node.hidden=!on;
-  const controllable=on&&controlOwner===d.udid&&!controlPaused&&!busy;
-  if(card.lastActive!==controllable||card.lastVisible!==on||card.lastWorking!==workspaceBusy||card.lastControlReady!==card.controlReady){sendFocus(card,controllable,on);card.lastActive=controllable;card.lastVisible=on;card.lastWorking=workspaceBusy;card.lastControlReady=card.controlReady;}
+  const foreground=on;
+  const controllable=foreground&&controlOwner===d.udid&&!controlPaused&&!busy;
+  if(card.lastActive!==controllable||card.lastVisible!==foreground||card.lastWorking!==workspaceBusy||card.lastControlReady!==card.controlReady){sendFocus(card,controllable,foreground);card.lastActive=controllable;card.lastVisible=foreground;card.lastWorking=workspaceBusy;card.lastControlReady=card.controlReady;}
  }
  const empty=document.getElementById('empty');if(empty)empty.style.display=selected?'none':'';
  const owner=rows.find(d=>d.udid===selected);
  const ownerLabel=owner?deviceLabel(owner,rows.indexOf(owner)):null;
  document.getElementById('screen-device').textContent=ownerLabel?'· 设备 '+ownerLabel.number+(ownerLabel.followup?' / 待跟进':''):'';
+ globalMonitor?.render(ordered,cards,sortControl.value);
 }
 async function select(udid){
+ if(busy||workspaceBusy||refreshingDevices||phonePastePending)return;
+ if(globalMonitor?.isFullscreen()){await globalMonitor.exitFullscreen();if(busy||workspaceBusy||refreshingDevices||phonePastePending)return;}
+ globalMonitor?.openWorkbench();
  if(devicePreview){previewSelection=udid;render(previewDevices,previewSelection);return;}
   if(busy||workspaceBusy||refreshingDevices)return;selectionRevision++;busy=true;active=udid;controlOwner=null;for(const card of cards.values()){sendFocus(card,false);card.lastActive=false;}render(latest,active);
  try{const j=await deviceRequest('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({udid})});active=j.selected??j.active;controlOwner=j.active;const card=cards.get(udid);if(card)card.controlReady=j.control_ready===true;}

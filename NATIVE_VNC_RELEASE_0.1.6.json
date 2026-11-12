@@ -1,0 +1,23 @@
+{
+  "version": "0.1.6",
+  "artifact": "releases/PhoneWorkbench-0.1.6-Setup.exe",
+  "bytes": 195220260,
+  "sha256": "d2ced1c38a30edbbc6d001efa0913900bb5b2ec16632963e14b8244075935e3b",
+  "platform": "Windows 10/11 x64",
+  "runtime_bundled": true,
+  "apple_usb_driver_bundled": false,
+  "installer_signed": false,
+  "checks": {
+    "isolated_python_imports": "passed",
+    "tcl_runtime": "8.6.15",
+    "reference_cli_help_without_phone_connections": "passed",
+    "temporary_install": "passed",
+    "installed_exe_offline_check": "passed",
+    "temporary_uninstall": "passed",
+    "portable_device_slot_assignment": "passed",
+    "phone_function_acceptance": "pending"
+  },
+  "runtime_data_bundled": false,
+  "phone_ui_started_during_packaging": false,
+  "remote_push": false
+}

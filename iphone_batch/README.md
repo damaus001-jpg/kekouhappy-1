@@ -2,6 +2,8 @@
 
 Start with [SINGLE_DEVICE.md](SINGLE_DEVICE.md). USB-only discovery, exclusive device ownership, device info, developer-image preparation and USB monitoring are available.
 
+**当前本地恢复点：v0.1.6（2026-11-12）**。原 8070 源码保留在本目录；第二套原生 VNC 源码及恢复步骤见 [native_vnc_source](../native_vnc_source/README.md)，未验收项见 [本次存档](../SESSION_ARCHIVE_2026-11-12.md)。以下早期原型说明保留供追溯，不代表当前全部功能和设备状态。
+
 **苹果手机批量控制原型**
 
 Windows 本地命令行工具，使用 pymobiledevice3。支持只读设备发现、批量点击/拖动、ASCII 输入、JSON 动作脚本，以及单台浏览器投屏。多台设备操作由不同子进程并行执行；每台设备脚本按顺序执行，相邻触控动作共用一次媒体会话。它是技术验证原型，尚无图形化群控界面，也没有真机验证。
@@ -18,7 +20,7 @@ Windows 本地命令行工具，使用 pymobiledevice3。支持只读设备发�
 .\.venv\Scripts\python.exe iphone_batch\controller.py devices
 ```
 
-手机应通过 USB 连接，解锁并信任电脑；开发者功能还需对应开发者模式、DDI 与服务支持。默认隧道根据项目版本和 iOS 版本选择，iOS 17.0–17.3.1 在 Windows 上可能需要管理员权限的 tunneld。
+手机应通过 USB 连接，解锁并信任电脑；开发者功能还需对应开发者模式、DDI 与服务支持。工作台后台启动时会请求管理员授权，启动项目管理的 `pymobiledevice3 remote tunneld`，并让各设备子进程使用 USB 共享隧道；关闭后台会通过本机接口停止该守护进程。隧道日志位于 `iphone_batch/.device-data/logs/tunneld.log`。Wi-Fi 隧道发现已关闭，避免同一手机的无线连接与 USB 隧道互相抢占。
 
 先预览，不会操作设备，也不要求已安装 pymobiledevice3：
 

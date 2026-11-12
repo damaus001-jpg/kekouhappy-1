@@ -1,4 +1,4 @@
-# Windows x64 / Python 3.13; upstream runtime updated to 11.49.5 on 2026-11-04
+# Windows x64 / Python 3.13; pymobiledevice3 11.50.3 includes the 11.50.2 USB tunnel recovery fixes.
 aiofiles==25.1.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
@@ -83,7 +83,7 @@ pyiosbackup==0.2.4
 pykdebugparser==1.10.0
 pylzss==0.3.4
 pymobiledevice==1.2.0
-pymobiledevice3==11.49.5
+pymobiledevice3==11.50.3
 pyreadline3==3.5.6
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.4

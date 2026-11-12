@@ -34,7 +34,8 @@ def conversations(device, directory=None):
                             'baseline_complete': value.get('baseline_complete', False),
                             'incremental': value.get('incremental'),
                             'messages': [{key: m.get(key) for key in (
-                                'sequence', 'side', 'time', 'text', 'kind', 'translation_zh',
+                                'sequence', 'side', 'time', 'date', 'date_label', 'date_precision',
+                                'date_year', 'date_source', 'element_id', 'text', 'kind', 'translation_zh',
                                 'message_id', 'guid', 'database_id', 'transport', 'is_read', 'record_source',
                                 'has_attachments', 'decode_error')}
                                 for m in value.get('messages', [])]})

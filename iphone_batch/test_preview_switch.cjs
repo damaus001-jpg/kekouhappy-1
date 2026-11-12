@@ -2,7 +2,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
 const source=fs.readFileSync(require('node:path').join(__dirname,'web/dashboard.js'),'utf8');
 const context=vm.createContext({});
 vm.runInContext(`let devicePreview=false,busy=false,workspaceBusy=false,refreshingDevices=false,
-selectionRevision=0,active='old',controlOwner='old',latest=[];
+selectionRevision=0,active='old',controlOwner='old',latest=[],phonePastePending=null,globalMonitor=null;
 const cards=new Map([['old',{}],['new',{}]]),renders=[],focus=[];
 function sendFocus(card,on){focus.push(on);}
 function render(rows,selected){renders.push({selected,owner:controlOwner,busy});}

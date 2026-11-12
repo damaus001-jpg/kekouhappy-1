@@ -280,6 +280,20 @@ def main():
         except OSError:
             return False
 
+    def viewer_video_ready(device):
+        """Reconnect is complete only after the phone has supplied a decodable video config."""
+        child=children.get(device['udid'])
+        if child is None or child.poll() is not None:return False
+        try:
+            opener=signed_opener()
+            with opener.open(f"http://127.0.0.1:{device['port']}/codec",timeout=8) as response:
+                info=json.load(response)
+            ready=bool(info.get('codec') and info.get('description'))
+            if ready and children.get(device['udid']) is child:retry_policy.reset(device['udid'])
+            return ready
+        except (OSError,ValueError,TypeError):
+            return False
+
     def record_input_readiness(udid, future):
         now=time.monotonic()
         try:
@@ -354,11 +368,19 @@ def main():
             # sessions are reset. Other phones remain usable during cleanup.
             reconnects.stage(device['udid'],'resetting')
             device['error']='正在清理手机端远程会话…'
-            reset_phone_session(device)
+            reset_error=None
+            try:
+                reset_phone_session(device)
+            except Exception as error:
+                # The cleanup command can fail on a stale USB tunnel even when
+                # a fresh viewer session can still be established. Preserve
+                # the failure for diagnostics, then make that bounded attempt.
+                reset_error=str(error)[:320]
             with registry.lock:
                 if device not in devices:raise ValueError('手机已断开，请重新接入后刷新')
                 reconnects.stage(device['udid'],'starting')
-                device['error']='正在重建画面与操控连接…'
+                device['error']=('会话清理未确认，正在直接重建投屏：'+reset_error
+                    if reset_error else '正在重建画面与操控连接…')
                 retry_policy.reset(device['udid'])
                 launch_viewer(device)
         finally:
@@ -381,7 +403,7 @@ def main():
         device.pop('error',None)
         return True
 
-    reconnects=DeviceReconnects(rebuild_device,viewer_ready,finish_reconnect,stopping)
+    reconnects=DeviceReconnects(rebuild_device,viewer_video_ready,finish_reconnect,stopping)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*unused):

@@ -302,14 +302,20 @@ class WorkspaceService:
                             snapshot.get('record_count') == len(prior['messages']) and
                             all(m.get('record_source') == 'backup-snapshot' for m in prior['messages']))
             if not baseline or not snapshot.get('history_complete') or prior.get('pending_windows'):
-                return self.capture_complete(device, base, expected_contact=contact, reason='baseline-missing')
+                try:
+                    current = self.native(device, 'capture', base)
+                except Exception as exc:
+                    raise ValueError('当前气泡读取未完成，已保存记录未更改：' + str(exc)) from exc
+                if current.get('phone_number') != contact:
+                    raise ValueError('读取期间会话发生切换，未合并不同号码的消息')
+                return self._save_visible_capture(device, contact, identity, current, prior)
             history = self._capture_history(device, contact, prior)
             window = []
             reason = None
             try:
                 current = self.native(device, 'capture', base)
             except Exception as exc:
-                reason = '气泡遍历未完成：' + str(exc)
+                raise ValueError('当前气泡读取未完成，已保存记录未更改：' + str(exc)) from exc
             else:
                 if current.get('phone_number') != contact:
                     raise ValueError('读取期间会话发生切换，未合并不同号码的消息')
@@ -334,14 +340,8 @@ class WorkspaceService:
                                     or not latest.get('context_fingerprint')):
                                 reason = '气泡与完整历史无法唯一衔接'
             if reason:
-                pending = [*prior.get('pending_windows', []),
-                           {'captured': datetime.now().isoformat(), 'messages': window, 'reason': reason}]
-                self.ledger.commit(device, contact, history, window, False, snapshot, pending,
-                                   conversation_id=prior.get('conversation_id'))
-                try:
-                    return self.capture_complete(device, base, expected_contact=contact, reason=reason)
-                except Exception as exc:
-                    raise ValueError(f'增量未确认，数据库补读失败：{exc}；已有历史和本次现场已保留，未报为读取完成') from exc
+                return self._save_visible_capture(device, contact, identity, current, prior,
+                                                  reason=reason)
             added = len(messages)-len(history)
             saved = self.ledger.commit(device, contact, messages, window, True, snapshot,
                                        baseline_complete=True, conversation_id=prior.get('conversation_id'))
@@ -359,6 +359,50 @@ class WorkspaceService:
             return {'conversation_id': Path(translated['output']).stem, 'contact': identity['contact'],
                     'phone_number': contact, 'message_count': len(messages), 'scope': scope,
                     'history_complete': False, 'baseline_complete': True, 'mode': 'incremental', 'added': added}
+
+    def _save_visible_capture(self, device, contact, identity, current, prior, reason=None):
+        """Show the live viewport immediately; never start a database backup here."""
+        window = current.get('messages') or []
+        if not window:
+            raise ValueError('当前会话没有可显示的气泡，已保存记录未更改')
+        history = prior.get('messages', []) if prior else []
+        snapshot = (prior or {}).get('snapshot') or {}
+        pending = list((prior or {}).get('pending_windows', []))
+        if history:
+            merged, aligned = append_verified_window(history, window)
+        else:
+            merged, aligned = window, True
+        uncertain = bool(reason or current.get('unclassified') or not current.get('context_fingerprint'))
+        if uncertain:
+            aligned = False
+            pending.append({'captured': datetime.now().isoformat(), 'messages': window,
+                            'reason': reason or '当前可见气泡衔接未确认'})
+        keep_history = merged if aligned else history
+        saved = self.ledger.commit(device, contact, keep_history, window, aligned, snapshot, pending,
+            baseline_complete=bool((prior or {}).get('baseline_complete')),
+            conversation_id=(prior or {}).get('conversation_id'))
+        display_messages = saved['messages'] if aligned else window
+        scope = f'已即时读取当前可见气泡 {len(window)} 条；'
+        if aligned:
+            scope += f'累计保存 {len(display_messages)} 条。'
+        else:
+            scope += '与已有历史未能确认衔接，本次气泡单独显示，原历史已保留。'
+        scope += '完整历史尚未同步；需要完整历史时，请使用“同步完整历史”。'
+        value = {**identity, **current, 'device': device, 'created': datetime.now().isoformat(),
+                 'messages': display_messages, 'native_context': window,
+                 'history_complete': False, 'baseline_complete': bool((prior or {}).get('baseline_complete')),
+                 'snapshot': snapshot, 'scope': scope,
+                 'incremental': {'mode': 'visible-only', 'overlap_confirmed': aligned,
+                                 'reason': reason}}
+        path = self.root/'diagnostics'/('sms-live-'+device[-8:]+'-'+uuid.uuid4().hex+'.json')
+        self.write(path, value)
+        translated = self.translator(path)
+        if aligned:
+            self._remember_capture(device, contact, translated)
+        return {'conversation_id': Path(translated['output']).stem, 'contact': identity['contact'],
+                'phone_number': contact, 'message_count': len(display_messages), 'scope': scope,
+                'history_complete': False, 'baseline_complete': value['baseline_complete'],
+                'mode': 'visible-only', 'added': len(window)}
 
     def capture_complete(self, device, base, *, expected_contact=None, reason='manual-full'):
         with self.phone_lock:

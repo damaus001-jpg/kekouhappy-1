@@ -2,7 +2,8 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const source = fs.readFileSync(path.join(__dirname, 'web/dashboard.js'), 'utf8');
+const completeSource = fs.readFileSync(path.join(__dirname, 'web/dashboard.js'), 'utf8');
+const source = completeSource.slice(completeSource.indexOf('const cards=new Map();'));
 const html = fs.readFileSync(path.join(__dirname, 'web/workspace.html'), 'utf8');
 const stored = new Map();
 
@@ -11,7 +12,7 @@ function build(preview=true) {
  function element(tag) {
   return {children: [], listeners: {}, style: {}, attrs: {}, dataset:{}, value: '', textContent: '',
    contentWindow:tag==='iframe'?{messages:[],postMessage(message,origin){this.messages.push({message,origin});}}:undefined,
-   remove(){if(this.parentElement){const parent=this.parentElement;parent.children=parent.children.filter(x=>x!==this);this.parentElement=null;}},querySelector(){return null;},classList: {toggle() {}}, setAttribute(k,v) {this.attrs[k]=v;},
+   remove(){if(this.parentElement){const parent=this.parentElement;parent.children=parent.children.filter(x=>x!==this);this.parentElement=null;}},querySelector(){return null;},classList: {toggle() {},contains(){return false;}}, setAttribute(k,v) {this.attrs[k]=v;},
    append(...xs) {for(const x of xs){x.remove();x.parentElement=this;this.children.push(x);}}, replaceChildren() {for(const x of this.children)x.parentElement=null;this.children=[];},
    addEventListener(k,f) {this.listeners[k]=f;}, showModal() {this.open=true;},
    close() {this.open=false;}, focus() {}, contains(t) {return t===this;},
@@ -118,34 +119,42 @@ console.log('Device UI passed: available viewers first in both sorts, stable lab
  render(phones,null,null);
  `,live.context);
  const frames=()=>vm.runInContext('[...cards.values()].filter(c=>c.frame).map(c=>c.frame)',live.context);
- assert.equal(frames().length,0,'unselected devices never mount a viewer');
+ assert.equal(frames().length,20,'all ready devices keep a warm viewer for the monitor');
  vm.runInContext("render(phones,'phone-19','phone-19')",live.context);
- assert.equal(frames().length,1,'only the selected device mounts a viewer out of 20');
- const first=frames()[0];first.onload();
+ assert.equal(frames().length,20);
+ const first=frames()[19];first.onload();
  assert.equal(first.contentWindow.messages.at(-1).message.visible,true);
  vm.runInContext("render(phones,'phone-19','phone-19')",live.context);
- assert.equal(frames()[0],first,'polling retains the current viewer');
+ assert.equal(frames()[19],first,'polling retains the current viewer');
  vm.runInContext("render(phones,'phone-0','phone-0')",live.context);
- assert.equal(frames().length,1);
- assert.equal(first.parentElement,null,'switching releases the old iframe and its decoder');
- assert.equal(first.onload,null,'a removed viewer cannot send a stale load notification');
+ assert.equal(frames().length,20);
+ assert.notEqual(first.parentElement,null,'switching retains the warm iframe and its decoder');
  const second=frames()[0];
  assert.notEqual(second,first);
  vm.runInContext("render(phones,'phone-0',null)",live.context);
  assert.equal(frames()[0],second,'temporary control pause does not restart selected video');
  vm.runInContext("render(phones,'phone-19','phone-19')",live.context);
- assert.notEqual(frames()[0],first,'returning opens a fresh stream instead of replaying old frames');
+ assert.equal(frames()[19],first,'returning reuses the warmed stream');
  vm.runInContext("phones[19].ready=false;render(phones,'phone-19',null)",live.context);
- assert.equal(frames().length,0,'unready selection releases video');
+ assert.equal(frames().length,19,'unready selection releases only its own video');
  vm.runInContext('render([],null,null)',live.context);
  assert.equal(frames().length,0);
- console.log('Selected video lifecycle passed: 20 standby devices, one viewer, polling reuse, switch/reselect, control pause and disconnect');
+ console.log('Warm viewer lifecycle passed: 20 devices, reuse across selection, control pause and disconnect cleanup');
 }
 
 (async()=>{
  const recovery=build(false);
  vm.runInContext("loadWorkspace=()=>{};render([{udid:'one',name:'iPhone',port:8080,ready:true}],'one','one');refresh=async()=>{};",recovery.context);
  const card=vm.runInContext("cards.get('one')",recovery.context);
+ const failureEvent={origin:card.origin,source:card.frame.contentWindow,data:{type:'manual-input-result',ok:false,message:'测试输入失败'}};
+ const previousNotice=recovery.nodes.get('archive-status').textContent;
+ recovery.emit({...failureEvent,source:{}});
+ recovery.emit({...failureEvent,origin:'https://example.com'});
+ assert.equal(recovery.nodes.get('archive-status').textContent,previousNotice,'foreign source/origin cannot display input errors');
+ recovery.emit(failureEvent);
+ assert.match(recovery.nodes.get('archive-status').textContent,/测试输入失败/);
+ assert.equal(card.connectionNotice.hidden,false,'actual manual input errors are visible over the phone');
+ assert.equal(card.connectionNotice.textContent,'测试输入失败');
  const healthEvent={origin:card.origin,source:card.frame.contentWindow,data:{type:'input-health-result',state:'ready',ready:true}};
  recovery.emit({...healthEvent,source:{}});
  assert.notEqual(card.connectionNotice.hidden,true,'foreign window cannot claim input is ready');

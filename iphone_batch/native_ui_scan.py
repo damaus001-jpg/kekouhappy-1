@@ -11,16 +11,21 @@ class ScanResult(list):
     elapsed = 0
 
 
-async def scan(s,limit=90,seconds=22,settle=.15,start_from_last=True,stop_when=None):
+async def scan(s,limit=90,seconds=22,settle=.15,start_from_last=True,stop_when=None,reverse=False):
+    beginning=Direction.Last if reverse else Direction.First
+    away=Direction.First if reverse else Direction.Last
+    async def advance():
+        if reverse:await s.move_focus(Direction.Previous)
+        else:await s.move_focus_next()
     await s.set_app_monitoring_enabled(True);await s.set_monitored_event_type()
     await asyncio.sleep(.1)
     while not s._event_queue.empty():s._event_queue.get_nowait()
     # First may produce no event when the inspector is already at First.
     # Move away before restarting at the beginning; never skip its first row.
     if start_from_last:
-        await s.move_focus(Direction.Last)
+        await s.move_focus(away)
     else:
-        await s.move_focus_next()
+        await advance()
     # Wait for the Last acknowledgement instead of relying on a fixed delay.
     deadline=time.monotonic()+.8
     while time.monotonic()<deadline:
@@ -28,7 +33,7 @@ async def scan(s,limit=90,seconds=22,settle=.15,start_from_last=True,stop_when=N
         except asyncio.TimeoutError:break
         if name=='hostInspectorCurrentElementChanged:':break
     while not s._event_queue.empty():s._event_queue.get_nowait()
-    await s.move_focus(Direction.First)
+    await s.move_focus(beginning)
     out=ScanResult();seen=set();started=time.monotonic();anchor=None;wrapping=False;start_retries=0
     try:
         while len(out)<limit and time.monotonic()-started<seconds:
@@ -36,7 +41,7 @@ async def scan(s,limit=90,seconds=22,settle=.15,start_from_last=True,stop_when=N
             except asyncio.TimeoutError:
                 if not out and start_retries<2:
                     start_retries+=1
-                    await s.move_focus(Direction.First);continue
+                    await s.move_focus(beginning);continue
                 # An unacknowledged Next must never be followed by another Next:
                 # a delayed event could otherwise make us skip a contact.
                 out.reason='event_timeout';break
@@ -54,14 +59,14 @@ async def scan(s,limit=90,seconds=22,settle=.15,start_from_last=True,stop_when=N
                     continue  # Keep waiting for the already-requested Next.
                 if key==anchor and len(out)>1:
                     wrapping=True
-                    await s.move_focus_next();continue
+                    await advance();continue
                 out.reason='repeated_element';break
             if anchor is None:anchor=key
             seen.add(key);out.append(i)
             if stop_when is not None and stop_when(i):
                 out.reason='target_found';break
             if settle:await asyncio.sleep(settle)
-            await s.move_focus_next()
+            await advance()
         else:
             out.reason='limit' if len(out)>=limit else 'time_limit'
     finally:

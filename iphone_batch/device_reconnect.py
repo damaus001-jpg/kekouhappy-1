@@ -11,10 +11,10 @@ def reset_phone_session(device):
     import psutil
     command=controller.command_for(device['udid'],['developer','core-device','display','reset-workspace-session'])
     process=subprocess.Popen(command,env=controller.device_environment(device['udid']),
-        stdout=subprocess.PIPE,stderr=subprocess.PIPE,encoding='utf-8',
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,encoding='utf-8',errors='replace',
         creationflags=0x08000000 if os.name=='nt' else 0)
     try:
-        stdout,_=process.communicate(timeout=28)
+        stdout,stderr=process.communicate(timeout=28)
     except subprocess.TimeoutExpired:
         # Windows venv launchers have a real Python child. Stop the diagnostic
         # process tree as well, so a timeout cannot leave a late media teardown.
@@ -32,7 +32,10 @@ def reset_phone_session(device):
     try:result=json.loads(stdout.strip().splitlines()[-1])
     except (ValueError,IndexError):result={}
     if process.returncode or result.get('remote_session_reset') is not True or result.get('input_events_sent') is not False:
-        raise ValueError('手机端媒体/触控会话清理未确认完成，请检查连接后重试')
+        detail=(stderr or stdout).strip().splitlines()
+        detail='；'.join(line.strip() for line in detail[-2:] if line.strip())[-320:]
+        reason=f'，设备返回：{detail}' if detail else ''
+        raise ValueError(f'手机端媒体/触控会话清理未确认完成（退出码 {process.returncode}）{reason}')
     return result
 
 class DeviceReconnects:

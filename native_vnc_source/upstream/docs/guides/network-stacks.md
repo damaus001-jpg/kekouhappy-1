@@ -1,0 +1,345 @@
+# Understanding the network stacks
+
+Every pymobiledevice3 command reaches the device through one of five transport paths. This
+guide shows what each path actually looks like — which sockets exist, what needs root, and
+how a device disconnect is detected.
+
+!!! note "Background reading"
+    You don't need this page to use pymobiledevice3: commands pick the right path on their own. For
+    choosing between paths day-to-day, see [iOS 17+ tunnels](ios17-tunnels.md).
+
+A few terms used throughout: **usbmuxd** is the host daemon (part of iTunes/Apple Devices on
+Windows, built into macOS, a separate package on Linux) that multiplexes connections to USB
+devices; **lockdownd** is the device daemon that pairs with hosts and starts services; **RSD**
+(RemoteServiceDiscovery) is the service index that iOS 17+ exposes inside an encrypted tunnel.
+
+## USB lockdown via usbmuxd
+
+The classic path, used by everything that does not need an RSD tunnel (`afc`, `backup2`,
+`syslog`, `apps`, ...) and the one most commands take. No TCP on the host at all: the client
+speaks the usbmux protocol over usbmuxd's unix socket, and usbmuxd multiplexes device-port
+streams over the USB link.
+
+```mermaid
+flowchart LR
+    cli["pymobiledevice3"] -->|"/var/run/usbmuxd<br/>(unix socket)"| mux["usbmuxd"]
+    mux -->|USB| dev["iOS device<br/>lockdownd + services"]
+```
+
+- **Root:** not required.
+- **Disconnect:** usbmuxd owns the link — on unplug it closes your socket immediately
+  (kernel EOF, no probing needed).
+- On Windows usbmuxd's socket is loopback TCP (`127.0.0.1:27015`) instead of a unix socket.
+
+## Wi-Fi lockdown (mobdev2)
+
+The same lockdown protocol, carried over the LAN to port 62078 (`--mobdev2` /
+`get_mobdev2_lockdowns`). Devices are discovered over bonjour.
+
+```mermaid
+flowchart LR
+    cli["pymobiledevice3"] -->|"TCP :62078 over Wi-Fi"| dev["iOS device<br/>lockdownd + services"]
+```
+
+- **Root:** not required.
+- **Disconnect:** a Wi-Fi link can die silently, so these connections run TCP keep-alive
+  (idle 3 s / interval 3 s) — a vanished device errors out within seconds.
+
+## Kernel tunnel (`start-tunnel` / `tunneld`)
+
+iOS 17+ developer services live behind an encrypted tunnel to an RSD endpoint. The kernel
+tunnel terminates that tunnel in a kernel TUN interface (`utunN` on macOS; this section uses the
+macOS name), making the device's tunnel address (`fdxx::1`) kernel-routable — reachable by
+**any process**, including external tools like `lldb`.
+
+```mermaid
+flowchart LR
+    subgraph host["host (root required)"]
+        cli["pymobiledevice3<br/>(or any tool)"]
+        utun["utunX<br/>fdxx::/64"]
+        td["start-tunnel / tunneld"]
+    end
+    cli -->|"kernel TCP6 to [fdxx::1]"| utun
+    utun --> td
+    td -->|"encrypted tunnel over<br/>USB (CoreDeviceProxy) or Wi-Fi"| dev["iOS device<br/>RSD + services"]
+```
+
+- **Root:** required (creating `utun` needs it); `tunneld` is the daemon form that shares
+  tunnels across processes, queryable over HTTP (`--tunnel`).
+- **Disconnect:** the `utun` interface disappears with the tunnel, erroring connections
+  out; service connections also run TCP keep-alive.
+- Highest host→device throughput; together with the native tunnel (macOS), the only path
+  external tools can use.
+
+### Why this path suspends `remoted` on macOS (and why that needs root)
+
+Root is needed here for **two** independent reasons. The obvious one is creating the `utun`.
+The second is `remoted` contention, and it is worth spelling out because it is easy to
+misdiagnose.
+
+Discovery on this path is bonjour **plus a direct RSD connection**: `get_rsds()` browses
+`_remoted._tcp` and then opens the device's RSD RemoteXPC endpoint (port `58783`) on the USB NCM
+link (`fe80::…%enX`). macOS `remoted` owns that link — it keeps its own RemoteXPC session to the
+device open at all times (`lsof` shows an ESTABLISHED `…->[fe80::…]:58783`). While `remoted` is
+running, the device **resets** a second, independent RSD root channel opened by pymobiledevice3 —
+seen as an HTTP/2 `RST_STREAM` with `error_code=5`, or a plain connection reset, during the
+check-in handshake. So discovery finds the device but yields no usable RSD.
+
+`stop_remoted()` SIGSTOPs `remoted` for the duration of the handshake and resumes it afterwards;
+suspending a root-owned daemon is what needs root. With `remoted` suspended the handshake succeeds
+reliably, and the device will even accept *several* concurrent RSD sessions — which shows the reset
+is caused by `remoted` owning the link, not by any device-side one-session cap.
+
+> **This is not a pairing problem.** A long-standing assumption held that the device *closes the
+> host's RSD fd during pairing*, forcing `remoted` to race us — hence `sudo`. That is not what
+> happens. The contention reproduces against an already-paired device with no pairing in flight,
+> and completing a pairing does **not** tear down existing RSD connections (the device simply adds
+> the new tunnel endpoint; `remotepairingdeviced` logs no control-channel teardown). The trigger is
+> only that `remoted` is an always-on RSD client for the NCM link. Verified empirically on
+> iPhone18,4 / iOS 26.6.1, and against the iOS 17.0, 26.6 and 27 device daemons.
+>
+> The no-root [userspace tunnel](#userspace-tunnel-the-no-root-default) sidesteps all of this: it
+> reaches RSD through the `CoreDeviceProxy` lockdown service over usbmux, never touching the NCM
+> link or `remoted`.
+
+## Userspace tunnel (the no-root default)
+
+The default for RSD-required commands on iOS 17.4+ over USB. The kernel interface is
+replaced by a pure-Python TCP/IP stack ([pmd-pytcp](https://github.com/doronz88/pmd-pytcp))
+running on the process's own event loop — no root anywhere, and no kernel TCP anywhere:
+
+```mermaid
+flowchart TB
+    subgraph proc["pymobiledevice3 process"]
+        svc["Developer services<br/>(DVT, os_trace, AFC, ...)"]
+        rsd["RemoteServiceDiscoveryService<br/><i>open_connection = dial plane</i>"]
+        dp["UserspaceDialPlane<br/>one socketpair relay per connection<br/>(no listener)"]
+        stack["pmd-pytcp<br/>pure-asyncio TCP/IP stack"]
+        tun["UserspaceTun<br/>L2 bridge: datagram socketpair<br/>+ 14-byte Ethernet shim"]
+        cdp["CoreDeviceProxy transport<br/>(lockdown service connection)"]
+    end
+    usbmuxd["usbmuxd<br/>(unix socket)"]
+    dev["iOS device<br/>RSD + services at fdxx::1"]
+
+    svc --> rsd --> dp
+    dp <-->|"pytcp TCP session<br/>over the tunnel"| stack
+    stack <--> tun
+    tun <-->|"encrypted tunnel frames"| cdp
+    cdp <--> usbmuxd <-->|USB| dev
+```
+
+Key properties that fall out of this shape:
+
+- **No root anywhere** — there is no kernel interface; the "network" to the device lives
+  entirely inside the process.
+- **The tunnel address is in-process only.** `fdxx::1` exists on the pytcp stack, not in
+  the kernel routing table, so external tools cannot reach it — the RSD reports this via
+  `is_in_process_tunnel`.
+- **One tunnel per process.** The pytcp stack is a process-global singleton; every
+  open/close transition serializes on a lifecycle lock, and concurrent
+  `establish_userspace_rsd()` callers share the winning tunnel instead of racing it.
+
+### Dialing a service connection
+
+Services call the RSD's injected `open_connection`, which creates a `socketpair()`, hands
+one end to the caller and starts a relay task on the other:
+
+```mermaid
+sequenceDiagram
+    participant S as ServiceConnection
+    participant D as dial()
+    participant H as relay task
+    participant P as pytcp socket
+    participant Dev as device service
+
+    S->>D: open_connection(fdxx::1, port)
+    D->>D: socketpair()
+    D->>H: spawn relay task (port, other end)
+    D-->>S: (reader, writer)
+    H->>P: connect_tcp(fdxx::1, port)
+    P->>Dev: SYN ... over the tunnel
+    loop two pump tasks
+        S->>P: bytes (client → device)
+        P->>S: bytes (device → client)
+    end
+    Note over H,P: client EOF fully closes the pytcp socket<br/>(FIN reaches the device — orphan reaper owns the tail)<br/>device EOF reaches the client as write_eof
+```
+
+Why a socketpair for the hand-off: nothing listens, so no other process can reach the
+device's services through the relay (a loopback TCP listener was connectable by any local
+process for the tunnel's whole lifetime). It also never depends on how the platform
+completes a connect: iSH's `AF_UNIX` connect blocks until the peer accepts, which deadlocked
+the event loop when the dial plane accepted its own connections (#2068). On Windows CPython
+emulates `socketpair()` over loopback TCP and verifies the peer before returning it.
+
+### Device disconnect and teardown
+
+Nothing on the relay path can detect a vanished device (both relay endpoints are the same
+process, so keep-alive would only probe the local kernel), so the tunnel watches its own
+transport: when the CoreDeviceProxy connection dies — USB unplug makes usbmuxd close it
+immediately — a watcher task tears the whole tunnel down, surfacing errors to every
+blocked service read within about a second:
+
+```mermaid
+sequenceDiagram
+    participant U as usbmuxd
+    participant T as transport read task
+    participant W as transport watcher
+    participant A as aclose()
+    participant DP as dial plane
+    participant S as blocked service reads
+
+    U--xT: connection closed (unplug)
+    T->>W: wait_closed() returns
+    W->>A: tear down (serialized on the lifecycle lock)
+    A->>DP: __aexit__
+    DP->>DP: cancel relay tasks, let pending FINs leave
+    DP->>S: EOF / connection error
+    Note over S: e.g. `dvt oslog` exits ~1 s after the cable is pulled
+```
+
+Teardown details worth knowing when reading the code:
+
+- The dial plane sets a `_closing` gate so no new relay starts, then cancels every in-flight
+  relay task (a relay parked on device traffic never finishes on its own, issue #1756),
+  repeating the cancel because Python <= 3.11 can swallow a cancellation that races an inner
+  future. It then waits briefly for the FINs of just-closed connections to leave before the
+  stack stops, so the device does not keep stale connections.
+- `aclose()` returning means the process-global stack is really stopped: an explicit close
+  that races the watcher's teardown waits for it instead of returning early, so
+  close-then-reopen is safe.
+- The CLI keeps its tunnel for the process lifetime and closes it at interpreter exit
+  (~3 ms), so the device always sees clean FINs.
+
+## Native remoted tunnel (macOS only)
+
+`--native` (or `PYMOBILEDEVICE3_NATIVE=1`) reaches the RSD by **piggybacking Apple's own
+`remoted` tunnel** instead of building one. It needs no root, no entitlement and no Xcode, and
+does not suspend `remoted` (contrast the kernel/bonjour path; see the callout above).
+
+!!! warning "It competes with `remoted` for the device"
+    The device's `remoted` treats every incoming RSD connection from the same **source IP** (port
+    ignored) as the same peer, and replaces that peer's existing connection with the new one before
+    reading any handshake. On this tunnel `remoted` and pymobiledevice3 connect from the same host
+    address, so opening ours evicts `remoted`'s (`Device connection interrupted` in its log);
+    `remoted` redials about a second later and evicts ours back. No handshake field changes this.
+    On iOS 27.2+ the device also re-attaches (closing every advertised service port) when a peer's
+    handshake UUID differs from the one it last sent, so ours has to present `remoted`'s UUID here.
+
+    Commands therefore fail intermittently (`ConnectionResetError`, or `ConnectionRefusedError`
+    after a re-attach), and after a few rounds `remoted` stops redialing, so Xcode/`devicectl` lose
+    the device until `remoted` restarts or the device is replugged
+    ([#1994](https://github.com/doronz88/pymobiledevice3/issues/1994)). This is why the native
+    tunnel is opt-in: the userspace tunnel brings up a tunnel of its own, with its own host
+    address, so the device keeps it apart from `remoted`.
+
+```mermaid
+flowchart LR
+    subgraph host["host (no root)"]
+        cli["pymobiledevice3"]
+        rp["remotepairingd<br/>(RemotePairing.framework)"]
+        rd["remoted"]
+    end
+    dev["iOS device<br/>RSD + services at fdxx::1"]
+
+    cli -->|"XPC: browse / CreateAssertion"| rp
+    cli -->|"socket table<br/>(find remoted's RSD port)"| rd
+    rp -.->|"keeps the tunnel alive"| rd
+    rd -->|"encrypted CoreDevice tunnel"| dev
+    cli -->|"TCP6 to [fdxx::1]:rsd_port<br/>(kernel-routable)"| dev
+```
+
+How it works (all via `ctypes` + libxpc, no pyobjc):
+
+1. Ask `com.apple.CoreDevice.remotepairingd` (provided by the base-OS `RemotePairing.framework`,
+   present on stock macOS — it backs iPhone Mirroring — **not** the Xcode-only `CoreDevice.framework`)
+   to browse for the device and open its per-device XPC endpoint.
+2. `RemotePairing.CreateAssertionCommand` returns the device's in-tunnel `tunnelIPAddress` and an
+   assertion identifier that keeps Apple's tunnel up for as long as the handle is held.
+3. Find the in-tunnel RSD port by matching `remoted`'s own TCP connection to that tunnel address
+   in the `net.inet.tcp.pcblist_n` socket table (no root). Starting with macOS 27, the kernel shows
+   other processes' sockets only to a platform binary whose non-platform ancestors are all Apple or
+   Developer ID signed, which hides root-owned `remoted` from us and from any `sysctl` we spawn
+   directly. So `/usr/sbin/sysctl` is run double-forked: once launchd adopts it, it has no other
+   ancestors and sees the whole table. If the table still comes back without a single connection,
+   the scan falls back to one `nettop -L 1 -m tcp` sample, which sees every socket only because
+   nettop is Apple-signed with `com.apple.private.network.statistics` (about 4x slower).
+4. Connect a normal TCP socket to `[tunnelIPAddress]:rsd_port` — the tunnel address is
+   kernel-routable — and run the standard RSD handshake.
+
+- **Root:** not required. **Xcode:** not required.
+- **Running as root anyway (CI runners, LaunchDaemons):** `remotepairingd` is an XPCService
+  declaring `ServiceType = User`, so launchd registers it **per-uid, in a logged-in user's domain
+  and never in the system/root domain**. Whether a root process can reach it depends entirely on
+  which bootstrap namespace it inherited, not on its uid: plain `sudo` from a logged-in user's
+  terminal inherits that user's namespace and works unchanged, while a LaunchDaemon or anything
+  under `launchctl asuser 0` lands in a domain where the service is simply not registered and gets
+  `XPC_ERROR_CONNECTION_INVALID` back.
+
+  So the ordinary lookup is always tried first, and only if the daemon reports the service missing
+  is another uid's domain searched, via the libxpc SPI `xpc_connection_set_target_uid`. That keeps
+  the process root — it reaches selectively into one domain rather than relocating itself — and it
+  reacts to what actually happened instead of guessing from the uid. The probe is free: the error
+  arrives about 0.2 ms after `xpc_connection_activate`, not at a timeout. The outcome is memoized
+  per process, so later browses go straight to the domain that answered.
+
+  The retry resolves the uid from the console user (owner of `/dev/console`). On a host with no
+  console user — a headless CI runner — set `PYMOBILEDEVICE3_NATIVE_TARGET_UID` to the uid that
+  holds the pairing; that also seeds the memo, skipping the first attempt entirely. Setting it to
+  `0` pins the ordinary lookup and disables retargeting. The SPI is root-only and **traps the
+  process** when a non-root caller invokes it, so a seeded uid is refused with a warning unless the
+  effective uid is 0.
+- **Reachability:** the tunnel address is a real kernel route (Apple's tunnel), so unlike the
+  userspace tunnel it *is* reachable by other tools; it lives only while the handle (its assertion)
+  is held. `remote start-tunnel --native` publishes this address for other processes (no `sudo`;
+  without `--native` it builds the classic root tunnel). `--rsd` recognizes such an address by the
+  interface it routes through (`remotectl dumpstate` names remoted's) and presents `remoted`'s UUID
+  there, like `--native` does. `remote browse` lists the devices
+  `remotepairingd` reports — that is the macOS default, since browsing opens no RSD connection
+  (`--no-native` forces the bonjour browse).
+- **When it is used:** only when asked for (`--native`, `PYMOBILEDEVICE3_NATIVE=1`, or
+  `PYMOBILEDEVICE3_DEFAULT_FALLBACK=native`), and automatically for iOS 17.0-17.3 on macOS, which
+  the userspace tunnel cannot serve (no CoreDeviceProxy). The built-in default everywhere is the
+  userspace tunnel.
+- **Changing the preference:** `PYMOBILEDEVICE3_DEFAULT_FALLBACK=native|userspace|tunneld` sets which
+  transport the automatic selection prefers. Set it to `native` to prefer this tunnel, or `tunneld`
+  to route to the privileged daemon.
+- **Throughput:** rides the kernel-routable tunnel, so it avoids the userspace stack's per-packet
+  Python overhead. Fair same-device AFC comparison on a physical iPhone 17-class device: device->host
+  is USB-bound and on par with the userspace tunnel (~36 MB/s both), while host->device is ~1.8x
+  faster (~36 vs ~20 MB/s — the userspace stack keeps its send segments deliberately small) and
+  per-request latency is ~1.6x lower (~8 vs ~13 ms). All with no root.
+
+## Device auxiliary metadata (`RemoteServiceDiscoveryService.auxiliary_metadata`)
+
+Alongside the tunnel, the pairing layer carries the device's **`deviceKVSData`** — a binary-plist
+key-value store keyed by preference domain (e.g. `com.apple.WebInspector`,
+`com.apple.mobile.wireless_lockdown`), plus a `NULL` bucket of loose device properties. It is
+**not** part of the RSD handshake (`peer_info`); it rides the RemotePairing handshake / the host
+`remotepairingd`. When the transport that built the RSD had it, it is decoded onto
+`RemoteServiceDiscoveryService.auxiliary_metadata` (`{domain: {key: value}}`), with
+`get_auxiliary_metadata(domain)` and a typed
+`is_remote_web_inspector_enabled()` (whether Safari/WebKit remote inspection is enabled — no
+service is opened) reading from it.
+
+Availability differs by transport, because only some perform a metadata-carrying pairing handshake:
+
+- **Native (`--native`, macOS):** the host `remotepairingd` exposes its *merged, persisted* KVS, which
+  reliably includes `com.apple.WebInspector`. `is_remote_web_inspector_enabled()` returns a real
+  `True`/`False` here.
+- **`tunneld` / RemotePairing-over-bonjour:** the RemotePairing handshake carries the device's
+  **base** KVS. A fresh handshake omits lazily-registered domains like `com.apple.WebInspector`, so
+  `is_remote_web_inspector_enabled()` is typically `None` (unknown).
+- **Userspace (the no-root default, CoreDeviceProxy, iOS 17.4+):** the tunnel is established without a
+  pair-verify handshake, so no `deviceKVSData` is exchanged — `auxiliary_metadata` is empty and the
+  helper returns `None`.
+
+`None` means *unknown on this transport*, not *disabled*. Use `--native` on macOS when you need a
+definitive Web Inspector answer.
+
+From the CLI, `pymobiledevice3 remote auxiliary-metadata` prints the whole decoded map as JSON (it
+uses the same transport selection as `rsd-info`, so pass `--native` on macOS for the full map):
+
+```shell
+pymobiledevice3 remote auxiliary-metadata --native | jq '.["com.apple.WebInspector"].EnableRemoteInspection'
+```

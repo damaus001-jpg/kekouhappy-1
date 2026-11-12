@@ -1,0 +1,388 @@
+import asyncio
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Optional, cast
+
+import pytest
+
+from pymobiledevice3.exceptions import NotMountedError, RSDRequiredError
+from pymobiledevice3.lockdown import LockdownClient
+from pymobiledevice3.lockdown_service_provider import LockdownServiceProvider
+from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
+from pymobiledevice3.service_connection import ServiceConnection
+from pymobiledevice3.services import mobile_image_mounter
+from pymobiledevice3.services.cryptexd import DDI_CRYPTEX_IDENTIFIER, CryptexdService, InstalledCryptex
+from pymobiledevice3.services.mobile_image_mounter import (
+    MobileImageMounterService,
+    PersonalizedDdi,
+    PersonalizedImageMounter,
+)
+
+
+@pytest.mark.asyncio
+async def test_is_image_mounted_agrees_with_copy_devices(lockdown: LockdownClient) -> None:
+    # Regression: LookupImage may return an empty ImageSignature for a mounted Personalized image,
+    # making is_image_mounted() miss it and a subsequent MountImage fail with "already mounted"
+    async with MobileImageMounterService(lockdown=lockdown) as mounter:
+        mounted_types = {device.get("DiskImageType") for device in await mounter.copy_devices()}
+        for image_type in ("Developer", "Personalized"):
+            assert await mounter.is_image_mounted(image_type) == (image_type in mounted_types)
+
+
+class _LegacyConnection:
+    """mobile_storage_proxy as seen on legacy iOS (observed on iOS 12.5.7): LookupImage works,
+    but an unknown command such as CopyDevices is answered with UnknownCommand and the daemon
+    then hangs up the connection."""
+
+    def __init__(self) -> None:
+        self.hung_up = False
+        self.commands: list[str] = []
+
+    async def send_recv_plist(self, data: dict[str, Any]) -> dict[str, Any]:
+        if self.hung_up:
+            raise ConnectionResetError("Connection lost")
+        command = data["Command"]
+        self.commands.append(command)
+        if command == "LookupImage":
+            return {"ImagePresent": False}
+        self.hung_up = True
+        return {"Error": "UnknownCommand"}
+
+    async def close(self) -> None:
+        pass
+
+
+class _LegacyLockdown:
+    def __init__(self) -> None:
+        self.connections: list[_LegacyConnection] = []
+
+    async def start_lockdown_service(self, name: str, include_escrow_bag: bool = False) -> ServiceConnection:
+        connection = _LegacyConnection()
+        self.connections.append(connection)
+        return cast(ServiceConnection, connection)
+
+
+@pytest.mark.asyncio
+async def test_is_image_mounted_survives_copy_devices_hangup() -> None:
+    # Regression: the CopyDevices fallback left the mounter on a connection the legacy daemon
+    # had hung up on, so the next command (e.g. upload_image's ReceiveBytes) failed with
+    # ConnectionResetError('Connection lost')
+    lockdown = _LegacyLockdown()
+    mounter = MobileImageMounterService(lockdown=cast(LockdownServiceProvider, lockdown))
+    assert not await mounter.is_image_mounted("Developer")
+
+    # the next command must not run on the hung-up connection
+    with pytest.raises(NotMountedError):
+        await mounter.lookup_image("Developer")
+
+    # and further mounted-checks must not provoke the hangup again
+    assert not await mounter.is_image_mounted("Developer")
+    copy_devices_sent = [
+        command for connection in lockdown.connections for command in connection.commands if command == "CopyDevices"
+    ]
+    assert len(copy_devices_sent) == 1
+
+
+def _rsd(cryptexd_features: Optional[list[str]], os_version: str = "27.0") -> RemoteServiceDiscoveryService:
+    """An RSD whose handshake offers cryptexd advertising *cryptexd_features*, or no cryptexd at all."""
+    rsd = RemoteServiceDiscoveryService(("127.0.0.1", 0))
+    services: dict[str, Any] = {}
+    if cryptexd_features is not None:
+        services[CryptexdService.SERVICE_NAME] = {"Port": "1024", "Properties": {"Features": cryptexd_features}}
+    rsd.peer_info = {"Properties": {"OSVersion": os_version}, "Services": services}
+    return rsd
+
+
+@pytest.mark.parametrize(
+    ("features", "expected"),
+    [
+        (["CryptexInstall", "ReadIdentifiers"], True),
+        # no advertisement is not evidence of a missing capability; the device stays the authority
+        ([], True),
+        (["ReadIdentifiers"], False),
+        (None, False),
+    ],
+)
+def test_uses_cryptex_image_over_rsd(features: Optional[list[str]], expected: bool) -> None:
+    assert mobile_image_mounter.uses_cryptex_image(_rsd(features)) is expected
+
+
+def test_uses_cryptex_image_never_over_plain_lockdown() -> None:
+    # cryptexd is only reachable over an RSD tunnel
+    lockdown = cast(LockdownServiceProvider, SimpleNamespace(product_version="27.0"))
+    assert not mobile_image_mounter.uses_cryptex_image(lockdown)
+
+
+class _AutoMountCalls:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.calls: list[str] = []
+
+        async def raise_if_cannot_mount(mounter: Any) -> None:
+            self.calls.append("precheck")
+
+        async def auto_install_ddi(cryptexd: Any, restore_dir: Any = None) -> InstalledCryptex:
+            self.calls.append("cryptex")
+            return InstalledCryptex(DDI_CRYPTEX_IDENTIFIER, "1")
+
+        async def mount(mounter: Any, *args: Any, **kwargs: Any) -> None:
+            self.calls.append("personalized")
+
+        async def close(mounter: Any) -> None: ...
+
+        async def connect(mounter: Any) -> None: ...
+
+        # Faked too: `async with` connects, and the fake RSD offers no mounter service -- which
+        # conftest turns into a skip rather than a failure, hiding every test through this path
+        monkeypatch.setattr(PersonalizedImageMounter, "connect", connect)
+        monkeypatch.setattr(PersonalizedImageMounter, "raise_if_cannot_mount", raise_if_cannot_mount)
+        monkeypatch.setattr(PersonalizedImageMounter, "mount", mount)
+        monkeypatch.setattr(PersonalizedImageMounter, "close", close)
+        monkeypatch.setattr(CryptexdService, "auto_install_ddi", auto_install_ddi)
+        monkeypatch.setattr(mobile_image_mounter, "fetch_personalized_ddi", lambda: (Path(), Path(), Path()))
+
+
+@pytest.mark.asyncio
+async def test_auto_mount_installs_the_cryptex_ddi_over_rsd(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = _AutoMountCalls(monkeypatch)
+
+    await mobile_image_mounter.auto_mount(_rsd(["CryptexInstall"]))
+
+    # the mounter still gates on already-mounted and developer mode before cryptexd installs
+    assert recorder.calls == ["precheck", "cryptex"]
+
+
+@pytest.mark.asyncio
+async def test_auto_mount_falls_back_to_the_personalized_ddi(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = _AutoMountCalls(monkeypatch)
+
+    await mobile_image_mounter.auto_mount(_rsd(["ReadIdentifiers"]))
+
+    assert recorder.calls == ["personalized"]
+
+
+UDID = "00008030-000215140A9A802E"
+
+
+def _usb_lockdown(product_version: str) -> LockdownServiceProvider:
+    """A plain-lockdown provider: only what auto_mount reads before choosing an image."""
+    return cast(LockdownServiceProvider, SimpleNamespace(product_version=product_version, udid=UDID))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["27.0", "27.2"])
+async def test_auto_mount_requires_rsd_where_the_cryptex_is_the_ddi(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    # From CRYPTEX_IMAGE_MIN_VERSION the cryptex is the DDI; over plain lockdown auto_mount asks for
+    # RSD, which the CLI answers by retrying over a no-root tunnel.
+    recorder = _AutoMountCalls(monkeypatch)
+
+    with pytest.raises(RSDRequiredError) as exc_info:
+        await mobile_image_mounter.auto_mount(_usb_lockdown(version))
+
+    assert exc_info.value.product_version == version
+    assert exc_info.value.identifier == UDID
+    assert recorder.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["17.0", "17.3.1", "17.4", "26.0.1"])
+async def test_auto_mount_keeps_the_personalized_ddi_over_usb_below_the_cutoff(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    # Below iOS 27 the cryptex install is unverified -- iOS 26's cryptexd aborts on it (#1991) --
+    # so plain USB keeps mounting the PersonalizedDMG rather than being told to get a tunnel
+    recorder = _AutoMountCalls(monkeypatch)
+
+    await mobile_image_mounter.auto_mount(_usb_lockdown(version))
+
+    assert recorder.calls == ["personalized"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over_rsd", [False, True], ids=["usb", "rsd"])
+async def test_auto_mount_can_force_the_personalized_dmg_from_the_cutoff(
+    monkeypatch: pytest.MonkeyPatch, over_rsd: bool
+) -> None:
+    # A virtual iPhone 27.0 whose sandbox denies cryptexd staging still mounts the PersonalizedDMG
+    recorder = _AutoMountCalls(monkeypatch)
+    lockdown = _rsd(["CryptexInstall"], os_version="27.0") if over_rsd else _usb_lockdown("27.0")
+
+    await mobile_image_mounter.auto_mount(lockdown, image=PersonalizedDdi.PERSONALIZED_DMG)
+
+    assert recorder.calls == ["personalized"]
+
+
+@pytest.mark.asyncio
+async def test_auto_mount_can_force_the_cryptex_below_the_cutoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = _AutoMountCalls(monkeypatch)
+
+    await mobile_image_mounter.auto_mount(_rsd(["CryptexInstall"], os_version="26.4"), image=PersonalizedDdi.CRYPTEX)
+
+    assert recorder.calls == ["precheck", "cryptex"]
+
+
+@pytest.mark.asyncio
+async def test_auto_mount_forced_cryptex_requires_rsd(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = _AutoMountCalls(monkeypatch)
+
+    with pytest.raises(RSDRequiredError):
+        await mobile_image_mounter.auto_mount(_usb_lockdown("26.4"), image=PersonalizedDdi.CRYPTEX)
+
+    assert recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_mount_rejects_a_forced_image_below_ios_17() -> None:
+    with pytest.raises(ValueError):
+        await mobile_image_mounter.auto_mount(_usb_lockdown("16.7"), image=PersonalizedDdi.PERSONALIZED_DMG)
+
+
+@pytest.mark.parametrize("version", ["17.0", "17.4", "26.0.1"])
+def test_uses_cryptex_image_only_from_the_cutoff(version: str) -> None:
+    # Regression (#1991): iOS 26's cryptexd aborts installing the DDI cryptex with
+    # "asset already present: Cryptex1,GenericVolume", so an RSD tunnel alone must not pick it
+    assert not mobile_image_mounter.uses_cryptex_image(_rsd(["CryptexInstall"], os_version=version))
+
+
+@pytest.mark.asyncio
+async def test_auto_mount_over_rsd_below_the_cutoff_mounts_the_personalized_ddi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _AutoMountCalls(monkeypatch)
+
+    await mobile_image_mounter.auto_mount(_rsd(["CryptexInstall"], os_version="26.0.1"))
+
+    assert recorder.calls == ["personalized"]
+
+
+class _SerialMounter:
+    """The pre-iOS 14 image mounter as observed on iOS 13.3: mobile_storage_proxy serves one host
+    connection at a time (a second one is not answered until the first closes), answers an unknown
+    command such as CopyDevices with UnknownCommand and then hangs up."""
+
+    has_developer_mode = False  # Developer Mode appeared in iOS 16
+
+    def __init__(self) -> None:
+        self.connections: list[_SerialMounterConnection] = []
+        self.mounted = False
+
+    async def start_lockdown_service(self, name: str, include_escrow_bag: bool = False) -> ServiceConnection:
+        connection = _SerialMounterConnection(self)
+        self.connections.append(connection)
+        return cast(ServiceConnection, connection)
+
+    @property
+    def product_version(self) -> str:
+        return "13.3"
+
+
+class _SerialMounterConnection:
+    def __init__(self, device: _SerialMounter) -> None:
+        self.device = device
+        self.closed = False
+        self.hung_up = False
+
+    async def _served(self) -> None:
+        if any(other is not self and not other.closed for other in self.device.connections):
+            await asyncio.Event().wait()  # never answered while another client holds the proxy
+        if self.hung_up:
+            raise ConnectionResetError("Connection lost")
+
+    async def send_recv_plist(self, data: dict[str, Any]) -> dict[str, Any]:
+        await self._served()
+        command = data["Command"]
+        if command == "LookupImage":
+            if self.device.mounted:
+                return {"ImagePresent": True, "ImageSignature": [b"signature"]}
+            return {"ImagePresent": False}
+        if command == "ReceiveBytes":
+            return {"Status": "ReceiveBytesAck"}
+        if command == "MountImage":
+            self.device.mounted = True
+            return {"Status": "Complete"}
+        self.hung_up = True
+        return {"Error": "UnknownCommand"}
+
+    async def sendall(self, payload: bytes) -> None:
+        await self._served()
+
+    async def recv_plist(self) -> dict[str, Any]:
+        await self._served()
+        return {"Status": "Complete"}
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _xcode_with_image(root: Path, version: str) -> Path:
+    image = mobile_image_mounter._developer_disk_image_path(root, version)
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"image")
+    image.with_name(f"{image.name}.signature").write_bytes(b"signature")
+    return root
+
+
+@pytest.mark.asyncio
+async def test_auto_mount_developer_releases_the_mounter(tmp_path: Path) -> None:
+    """Regression: auto_mount_developer() left its mounter connection open, and a pre-iOS 14 device
+    serves one at a time, so every later mounter command (doctor's, a lookup) hung."""
+    device = _SerialMounter()
+    lockdown = cast(LockdownServiceProvider, device)
+    await asyncio.wait_for(
+        mobile_image_mounter.auto_mount_developer(lockdown, xcode=str(_xcode_with_image(tmp_path, "13.3"))), 5
+    )
+    assert device.mounted
+    assert all(connection.closed for connection in device.connections)
+    async with MobileImageMounterService(lockdown=lockdown) as mounter:
+        assert await asyncio.wait_for(mounter.is_image_mounted("Developer"), 5)
+
+
+@pytest.mark.asyncio
+async def test_list_images_falls_back_to_lookup_without_copy_devices() -> None:
+    device = _SerialMounter()
+    lockdown = cast(LockdownServiceProvider, device)
+    async with MobileImageMounterService(lockdown=lockdown) as mounter:
+        assert await asyncio.wait_for(mounter.list_images(), 5) == []
+    device.mounted = True
+    async with MobileImageMounterService(lockdown=lockdown) as mounter:
+        assert await asyncio.wait_for(mounter.list_images(), 5) == [
+            {"DiskImageType": "Developer", "IsMounted": True, "ImageSignature": b"signature"}
+        ]
+    assert all(connection.closed for connection in device.connections)
+
+
+@pytest.mark.asyncio
+async def test_auto_mount_developer_downloads_into_the_home_cache_not_an_installed_xcode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An installed Xcode belongs to its installer (often root): a missing image is downloaded into
+    the per-user cache instead of into the Xcode bundle."""
+    downloads: list[Path] = []
+
+    def download(version: str, image_path: Path, signature: Path) -> None:
+        downloads.append(image_path)
+        image_path.parent.mkdir(parents=True)
+        image_path.write_bytes(b"image")
+        signature.write_bytes(b"signature")
+
+    monkeypatch.setattr(mobile_image_mounter, "get_home_folder", lambda: tmp_path)
+    monkeypatch.setattr(mobile_image_mounter, "_download_developer_disk_image", download)
+    device = _SerialMounter()
+    # a version no Xcode ships, so /Applications/Xcode.app (when present) never has it
+    await asyncio.wait_for(
+        mobile_image_mounter.auto_mount_developer(cast(LockdownServiceProvider, device), version="99.9"), 5
+    )
+    assert downloads == [mobile_image_mounter._developer_disk_image_path(tmp_path / "Xcode.app", "99.9")]
+
+
+def test_auto_mount_accepts_an_xcode_directory(tmp_path: Path) -> None:
+    """Regression: --xcode was declared a file, so it rejected every Xcode.app (a directory)."""
+    import typer.main
+
+    from pymobiledevice3.cli import mounter as mounter_cli
+
+    command = cast(Any, typer.main.get_command(mounter_cli.cli)).commands["auto-mount"]
+    # Parsing converts the option the way an invocation would (a file-only type raises BadParameter).
+    context = command.make_context("auto-mount", ["--xcode", str(tmp_path)])
+    assert str(context.params["xcode"]) == str(tmp_path)

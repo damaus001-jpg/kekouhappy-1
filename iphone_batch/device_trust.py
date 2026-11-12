@@ -7,6 +7,7 @@ import uuid
 
 async def repair(udid, cache, factory=None):
     from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.exceptions import MuxException
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
     factory = factory or create_using_usbmux
     client = await factory(serial=udid, connection_type='USB', autopair=False,
@@ -22,7 +23,16 @@ async def repair(udid, cache, factory=None):
             backup = cache / 'trust-backups' / (udid + '-' + uuid.uuid4().hex + '.plist')
             backup.parent.mkdir(parents=True, exist_ok=True)
             backup.write_bytes(previous.read_bytes())
-        await client.pair(timeout=60, private_key=private_key)
+        try:
+            await client.pair(timeout=60, private_key=private_key)
+        except MuxException:
+            # Pair() saves the local identity before writing Apple's usbmux
+            # cache. That second write can fail after phone-side trust already
+            # succeeded. Accept it only when the new identity starts a session.
+            if not await client.validate_pairing():
+                raise
+            return {'ok': True, 'message': '信任连接已建立（本地配对身份已验证）',
+                    'system_record_saved': False}
         if not await client.validate_pairing():
             raise ValueError('手机尚未接受配对身份，请解锁并完成信任确认')
         return {'ok': True, 'message': '信任连接已建立'}

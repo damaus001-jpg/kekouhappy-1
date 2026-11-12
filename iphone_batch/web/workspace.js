@@ -49,7 +49,7 @@ document.addEventListener('pointerdown',event=>{if(!emojiPicker.contains(event.t
 document.addEventListener('keydown',event=>{if(event.key==='Escape')closeEmojiPicker();});
 window.addEventListener('resize',positionEmojiPicker);
 document.addEventListener('scroll',positionEmojiPicker,true);
-function notice(text){document.getElementById('archive-status').textContent=text;}
+function notice(text){document.getElementById('archive-status').textContent=text;const monitorNotice=document.getElementById('monitor-notice');if(monitorNotice)monitorNotice.textContent=text;}
 function renderConversation(){
  closeEmojiPicker();
  sendBlocked=false;
@@ -103,7 +103,7 @@ function syncWorkspaceControls(){
   if(card.lastWorking!==workspaceBusy){sendFocus(card,card.lastActive===true);card.lastWorking=workspaceBusy;}
  }
  const selected=!!workspaceDevice&&(typeof controlOwner==='undefined'||controlOwner===workspaceDevice), available=!!currentConversation;
- for(const id of ['capture-current','refresh-messages'])document.getElementById(id).disabled=workspaceBusy||!selected;
+ for(const id of ['capture-current','sync-full-history','refresh-messages'])document.getElementById(id).disabled=workspaceBusy||!selected;
  document.getElementById('summarize-contact').disabled=workspaceBusy||!available;
  if(typeof syncContactProfileControls==='function')syncContactProfileControls();
  const sendButton=document.getElementById('send-reply');
@@ -140,14 +140,16 @@ async function operation(text, action){
  }
  finally{workspaceBusy=false;if(!sendBlocked)sendButton.textContent='确认发送';else if(sendButton.textContent==='正在核验…')sendButton.textContent='发送已处理';syncWorkspaceControls();}
 }
-document.getElementById('capture-current').addEventListener('click',()=>{
+async function captureConversation(full=false){
  const device=workspaceDevice, revision=workspaceRevision;
-  operation('正在读取会话：优先核对气泡增量；首次读取或发现缺口时自动读取数据库，请保持手机解锁及 USB 连接…',async()=>{
-  const result=await workspaceRequest('capture',{},device);if(revision!==workspaceRevision)return;
+ operation(full?'正在同步手机短信数据库，可能需要较长时间…':'正在读取手机屏幕当前可见的气泡…',async()=>{
+  const result=await workspaceRequest('capture',full?{full:true}:{},device);if(revision!==workspaceRevision)return;
   await loadWorkspace(device,true,result.conversation_id);
   notice('已读取 '+result.contact+'；'+(result.scope||'历史范围待核对')+'。');
  });
-});
+}
+document.getElementById('capture-current').addEventListener('click',()=>captureConversation(false));
+document.getElementById('sync-full-history').addEventListener('click',()=>captureConversation(true));
 document.getElementById('summarize-contact').addEventListener('click',()=>{
  const conversation=currentConversation;
  if(!conversation)return;
