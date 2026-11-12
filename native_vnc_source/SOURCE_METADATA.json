@@ -1,5 +1,5 @@
 {
-  "archive_version": "v0.1.6",
+  "archive_version": "v0.1.7",
   "upstream_commit": "121233618daef62059eb998e8466e6976459ea8b",
   "upstream_remote": "https://github.com/doronz88/pymobiledevice3.git",
   "upstream_working_tree_modified": true,

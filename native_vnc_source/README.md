@@ -1,4 +1,4 @@
-# 原生 VNC 开发版源码 · v0.1.6
+# 原生 VNC 开发版源码 · v0.1.7
 
 这是第二套方案的可追踪源码存档，与原项目 `iphone_batch/` 一起保存在同一个本地 Git 提交中。
 
@@ -30,4 +30,4 @@ py -3.13 native_vnc_source/restore_runtime.py
 
 第一版安装包构建入口为 `tools/build_native_vnc_installer.py`，说明见 `tools/NATIVE_VNC_PACKAGING.md`。安装版自带 Python，不借用开发版虚拟环境；安装包不包含配对记录和业务数据。
 
-完整当前状态和未验收项见根目录 `NATIVE_VNC_STATUS_2026-11-11.md` 与 `SESSION_ARCHIVE_2026-11-12.md`。程序保持关闭；恢复源码不等于手机功能已完成验收。
+完整当前状态和未验收项见根目录 `NATIVE_VNC_STATUS_2026-11-11.md` 与 `SESSION_ARCHIVE_2026-11-12_v0.1.7.md`。程序保持关闭；恢复源码不等于手机功能已完成验收。

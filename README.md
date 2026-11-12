@@ -1,6 +1,6 @@
 # 短信工作台
 
-Windows x64 本地 iPhone 短信工作台，当前版本 **v0.1.6**。本恢复点保存两套源码：原 8070 工作台保留在 `iphone_batch/`，原生 VNC 开发版及参考项目工作树保存在 [native_vnc_source/](native_vnc_source/README.md)。开发版使用原生桌面控件和 VNC，不内嵌 8070 网页；气泡只读界面结构，不用截图或 OCR。多机性能、输入与发送仍待实机验收。当前范围见 [2026-11-12 存档](SESSION_ARCHIVE_2026-11-12.md)、[VNC 状态记录](NATIVE_VNC_STATUS_2026-11-11.md) 和 [会话记录](SESSION_NOTES.md)。本恢复点只存本地 Git，未推送远端。
+Windows x64 本地 iPhone 短信工作台，当前版本 **v0.1.7**。本恢复点保存两套源码：原 8070 工作台保留在 `iphone_batch/`，原生 VNC 开发版及参考项目工作树保存在 [native_vnc_source/](native_vnc_source/README.md)。开发版使用原生桌面控件和 VNC，不内嵌 8070 网页；气泡只读界面结构，不用截图或 OCR。多机性能、输入与发送仍待实机验收。当前范围见 [2026-11-12 存档](SESSION_ARCHIVE_2026-11-12_v0.1.7.md)、[VNC 状态记录](NATIVE_VNC_STATUS_2026-11-11.md) 和 [会话记录](SESSION_NOTES.md)。本恢复点只存本地 Git，未推送远端。
 
 ## 原生 VNC 客户端安装包
 

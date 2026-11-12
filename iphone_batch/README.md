@@ -2,7 +2,7 @@
 
 Start with [SINGLE_DEVICE.md](SINGLE_DEVICE.md). USB-only discovery, exclusive device ownership, device info, developer-image preparation and USB monitoring are available.
 
-**当前本地恢复点：v0.1.6（2026-11-12）**。原 8070 源码保留在本目录；第二套原生 VNC 源码及恢复步骤见 [native_vnc_source](../native_vnc_source/README.md)，未验收项见 [本次存档](../SESSION_ARCHIVE_2026-11-12.md)。以下早期原型说明保留供追溯，不代表当前全部功能和设备状态。
+**当前本地恢复点：v0.1.7（2026-11-12）**。原 8070 源码保留在本目录；第二套原生 VNC 源码及恢复步骤见 [native_vnc_source](../native_vnc_source/README.md)，未验收项见 [本次存档](../SESSION_ARCHIVE_2026-11-12_v0.1.7.md)。以下早期原型说明保留供追溯，不代表当前全部功能和设备状态。
 
 **苹果手机批量控制原型**
 

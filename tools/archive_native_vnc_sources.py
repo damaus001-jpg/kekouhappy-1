@@ -52,7 +52,7 @@ def main():
     remote=git('remote','get-url','origin').decode().strip()
     url=urlsplit(remote)
     if url.hostname:remote=urlunsplit((url.scheme,url.hostname,url.path,'',''))
-    metadata={'archive_version':'v0.1.6','upstream_commit':git('rev-parse','HEAD').decode().strip(),
+    metadata={'archive_version':'v'+(ROOT/'VERSION').read_text(encoding='utf-8').strip().removeprefix('v'),'upstream_commit':git('rev-parse','HEAD').decode().strip(),
         'upstream_remote':remote,'upstream_working_tree_modified':True,
         'upstream_files':len(files),'client_files':CLIENTS,'text_line_endings':'LF (archive normalized)',
         'installed_packages':{n:importlib.metadata.version(n) for n in
