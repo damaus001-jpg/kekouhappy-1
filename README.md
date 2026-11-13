@@ -1,10 +1,10 @@
 # 短信工作台
 
-Windows x64 本地 iPhone 短信工作台，当前版本 **v0.1.7**。本恢复点保存两套源码：原 8070 工作台保留在 `iphone_batch/`，原生 VNC 开发版及参考项目工作树保存在 [native_vnc_source/](native_vnc_source/README.md)。开发版使用原生桌面控件和 VNC，不内嵌 8070 网页；气泡只读界面结构，不用截图或 OCR。多机性能、输入与发送仍待实机验收。当前范围见 [2026-11-12 存档](SESSION_ARCHIVE_2026-11-12_v0.1.7.md)、[VNC 状态记录](NATIVE_VNC_STATUS_2026-11-11.md) 和 [会话记录](SESSION_NOTES.md)。本恢复点只存本地 Git，未推送远端。
+Windows x64 本地 iPhone 短信工作台，当前版本 **v0.1.8**。本目录现在只作为原 8070 工作台的开发工作区；原生 VNC 开发版已迁到平级独立项目 [qunkong-vnc](../qunkong-vnc/README.md)，独立维护源码、环境、数据和本地 Git。以后开发“手机群控－开发版”，请从 `C:\xiangmu\qunkong-vnc` 打开 Codex，不在本目录修改 VNC。原 v0.1.7 双源码恢复点仍保留在本仓库 Git 标签中。拆分范围见 [2026-11-13 存档](SESSION_ARCHIVE_2026-11-13_v0.1.8.md) 和 [会话记录](SESSION_NOTES.md)。本次只存本地 Git，未推送远端。
 
-## 原生 VNC 客户端安装包
+## VNC 项目迁移说明
 
-首个安装包为 `releases/PhoneWorkbench-0.1.6-Setup.exe`，自带 Python 和运行依赖，供其他 Windows 10/11 x64 电脑安装；本机已有开发版可继续直接使用。安装版与开发版目录独立，请勿同时连接同一批手机。Apple USB 驱动及手机首次信任需要在目标电脑准备，不包含开发电脑的私钥或业务数据。构建、离线检查和验收边界见 [打包说明](tools/NATIVE_VNC_PACKAGING.md)。
+VNC 开发、启动、打包和后续本地存档均在平级 `qunkong-vnc` 项目进行，见其 [项目说明](../qunkong-vnc/README.md) 和 [打包说明](../qunkong-vnc/tools/NATIVE_VNC_PACKAGING.md)。本目录不再维护 VNC 源码或运行副本。原 `releases/PhoneWorkbench-0.1.6-Setup.exe` 仅作为历史安装产物保留。
 
 ## 原项目源码环境安装
 
