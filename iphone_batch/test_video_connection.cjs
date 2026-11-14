@@ -1,6 +1,6 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const source=fs.readFileSync(require('node:path').join(__dirname,'web/viewer.js'),'utf8');
-const context=vm.createContext({});
+const context=vm.createContext({window:{}});
 vm.runInContext(source.slice(source.indexOf('class VideoConnection {'),source.indexOf('// The dashboard keeps ready previews'))+'\nglobalThis.Connection=VideoConnection;',context);
 (async()=>{
  let now=0,selected=false,id=0;const tasks=new Map(),delays=[];

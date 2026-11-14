@@ -18,6 +18,8 @@ class VideoStop(threading.Event):
         super().__init__()
         self.connection = None
         self.connection_lock = threading.Lock()
+        self.diagnostics = {'received_at': None, 'decoded_at': None, 'errors': 0,
+                            'key_wait_at': None, 'pli_requests': 0, 'failure': None}
 
     def bind(self, connection):
         with self.connection_lock:
@@ -48,6 +50,22 @@ def jpeg_frames(port, stopped):
         return decoder
 
     decoder = new_decoder()
+    diagnostics = stopped.diagnostics
+    key_requests = 0
+    next_request = 0
+    def request_key():
+        nonlocal key_requests, next_request
+        now = time.monotonic()
+        if key_requests >= 3 or now < next_request:
+            return
+        key_requests += 1
+        next_request = now + 2 * 2 ** (key_requests - 1)
+        diagnostics['pli_requests'] += 1
+        try:
+            with opener.open(urllib.request.Request(base + '/pli', method='POST'), timeout=4):
+                pass
+        except Exception:
+            diagnostics['failure'] = 'pli-failed'
     next_image = 0
     got_key = False
     with opener.open(base + '/stream.bin', timeout=8) as stream:
@@ -66,19 +84,34 @@ def jpeg_frames(port, stopped):
             packet = stream.read(size)
             if len(packet) != size:
                 return
+            diagnostics['received_at'] = time.monotonic()
+            if packet[0] not in (0, 1, 2):
+                raise ValueError('Invalid video packet type')
             if packet[0] == 2:
                 decoder = new_decoder()
             if packet[0] in (0, 2):
                 got_key = True
+                diagnostics['key_wait_at'] = None
             if not got_key:
+                request_key()
+                if (diagnostics['key_wait_at'] is not None
+                        and time.monotonic() - diagnostics['key_wait_at'] > 15):
+                    raise TimeoutError('JPEG decoder key wait expired')
                 continue
             try:
                 frames = decoder.decode(av.Packet(packet[1:]))
             except av.FFmpegError:
+                diagnostics['errors'] += 1
+                if got_key:
+                    key_requests = 0
+                    next_request = 0
+                diagnostics['key_wait_at'] = time.monotonic()
                 got_key = False
                 decoder = new_decoder()
+                request_key()
                 continue
             for frame in frames:
+                diagnostics['decoded_at'] = time.monotonic()
                 now = time.monotonic()
                 if now < next_image:
                     continue
@@ -98,6 +131,7 @@ class JpegHub:
     def __init__(self, port):
         self.port = port
         self.stopped = VideoStop()
+        self.diagnostics = self.stopped.diagnostics
         self.changed = asyncio.Condition()
         self.latest = None
         self.sequence = 0
@@ -126,8 +160,8 @@ class JpegHub:
 
         try:
             await asyncio.to_thread(pump)
-        except Exception:
-            pass
+        except Exception as error:
+            self.diagnostics['failure'] = type(error).__name__
         finally:
             self.stopped.set()
             async with self.changed:
@@ -147,6 +181,8 @@ class JpegHub:
                         pass
                     if self.stopped.is_set():
                         break
+                    if self.sequence == sequence:
+                        continue
                     jpeg, sequence = self.latest, self.sequence
                 if jpeg is None:
                     continue

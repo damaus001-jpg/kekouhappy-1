@@ -45,6 +45,18 @@ class ReconnectTests(unittest.TestCase):
         jobs.begin({'udid':'eleven'})
         self.assertIn('超时',self.wait_done(jobs,'eleven')['reconnect_error'])
 
+    def test_bounded_startup_queue_wait_does_not_expire_reconnect(self):
+        waiting=threading.Event();waiting.set()
+        checked=threading.Event();finished=[]
+        def queued(_):checked.set();return waiting.is_set()
+        jobs=DeviceReconnects(lambda _:None,lambda _:True,lambda _:finished.append(1) or True,
+            threading.Event(),timeout=.1,queued=queued)
+        jobs.begin({'udid':'eleven'});self.assertTrue(checked.wait(1))
+        time.sleep(.3)
+        self.assertTrue(jobs.pending('eleven'));self.assertEqual(finished,[])
+        waiting.clear()
+        self.assertEqual(self.wait_done(jobs,'eleven')['reconnect_state'],'ready')
+
     def test_reconnecting_one_device_does_not_mark_other_devices_busy(self):
         release=threading.Event()
         jobs=DeviceReconnects(lambda _:release.wait(1),lambda _:True,lambda _:True,threading.Event())

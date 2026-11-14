@@ -49,7 +49,15 @@ document.addEventListener('pointerdown',event=>{if(!emojiPicker.contains(event.t
 document.addEventListener('keydown',event=>{if(event.key==='Escape')closeEmojiPicker();});
 window.addEventListener('resize',positionEmojiPicker);
 document.addEventListener('scroll',positionEmojiPicker,true);
-function notice(text){document.getElementById('archive-status').textContent=text;const monitorNotice=document.getElementById('monitor-notice');if(monitorNotice)monitorNotice.textContent=text;}
+function notice(text){
+ document.getElementById('archive-status').textContent=text;
+ const monitorNotice=document.getElementById('monitor-notice');
+ const passive=/^(仅显示所选手机的保存记录|选择手机后加载|正在加载已保存|已保存记录)/.test(text)||text===currentConversation?.scope;
+ if(monitorNotice&&(!passive||!monitorNotice.dataset.operation)){
+  monitorNotice.textContent=text;
+  if(/^设备\s/.test(text))monitorNotice.dataset.operation='true';
+ }
+}
 function renderConversation(){
  closeEmojiPicker();
  sendBlocked=false;

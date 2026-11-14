@@ -1,7 +1,7 @@
 import asyncio
 import json
 import unittest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, Mock
 from types import SimpleNamespace
 import viewer_patch
 from workspace_access import HEADER, signed_header
@@ -51,6 +51,56 @@ class ViewerHTTPFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ClipboardHTTPTests(ViewerHTTPFixture):
+    async def test_browser_video_report_is_signed_bounded_and_not_input_authorization(self):
+        report={'client':'browser1','mode':'hevc','state':'streaming','selected':True,
+                'receive_age_ms':12,'decode_age_ms':5000,'queue':0}
+        with patch('viewer_patch.wake_media',new_callable=AsyncMock) as wake:
+            code,_=await self.request('POST',report,path='/video-health',authorized=False)
+            self.assertEqual(code,403)
+            with patch('viewer_patch.policy_allows_input',return_value=False):
+                code,_=await self.request('POST',report,path='/video-health')
+            self.assertEqual(code,200)
+            code,data=await self.request(path='/video-health')
+            self.assertEqual(json.loads(data)['browser'][0]['decode_age_ms'],5000)
+            code,_=await self.request('POST',{'client':'bad','body':'rejected'},path='/video-health')
+            self.assertEqual(code,400)
+            wake.assert_not_awaited()
+
+    async def test_live_readonly_policy_blocks_input_even_with_stale_owner_flag(self):
+        self.instance._batch_token='manager'
+        self.instance._batch_active=True
+        with patch('viewer_patch.policy_allows_input',return_value=False), patch('viewer_patch.wake_media',new_callable=AsyncMock) as wake:
+            for path in ('/manual-touch','/input-health','/input-readiness'):
+                code,_=await self.request('POST',{},path=path,token='manager')
+                self.assertEqual(code,403,path)
+            code,_=await self.request('POST',{'active':True},path='/control-mode',token='manager')
+            self.assertEqual(code,403)
+            wake.assert_not_awaited()
+
+    async def test_signed_background_video_recovery_does_not_require_input_ownership(self):
+        self.instance._batch_token = 'manager'
+        self.instance._batch_active = False
+        self.instance._rtcp_dest = ('::1', 1234)
+        self.instance._subscribers = {object(): object()}
+        self.instance._request_recovery_idr = Mock()
+        with patch('viewer_patch.wake_media', new_callable=AsyncMock) as wake:
+            code, _ = await self.request('POST', {}, path='/pli', authorized=False)
+            self.assertEqual(code, 403)
+            self.instance._request_recovery_idr.assert_not_called()
+            code, _ = await self.request('POST', {}, path='/pli')
+            self.assertEqual(code, 202)
+            self.instance._request_recovery_idr.assert_called_once_with(reason='browser-pli')
+            self.assertFalse(self.instance._batch_active)
+            wake.assert_not_awaited()
+
+    async def test_video_health_requires_signature_and_never_wakes_media(self):
+        with patch('viewer_patch.wake_media', new_callable=AsyncMock) as wake:
+            code, _ = await self.request(path='/video-health', authorized=False)
+            self.assertEqual(code, 403)
+            code, data = await self.request(path='/video-health')
+            self.assertEqual(code, 200)
+            self.assertIn('rtp_packets', json.loads(data))
+            wake.assert_not_awaited()
 
     async def test_every_viewer_entry_rejects_unsigned_browser_before_media_wake(self):
         with patch('viewer_patch.wake_media', new_callable=AsyncMock) as wake:

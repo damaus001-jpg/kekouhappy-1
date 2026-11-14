@@ -39,9 +39,10 @@ def reset_phone_session(device):
     return result
 
 class DeviceReconnects:
-    def __init__(self, rebuild, ready, finish, stopping, timeout=75):
+    def __init__(self, rebuild, ready, finish, stopping, timeout=75, queued=lambda device:False):
         self.rebuild,self.ready,self.finish=rebuild,ready,finish
         self.stopping,self.timeout=stopping,timeout
+        self.queued=queued
         self.lock=threading.Lock()
         self.jobs={}
 
@@ -73,7 +74,17 @@ class DeviceReconnects:
         try:
             deadline=started+self.timeout
             self.rebuild(device)
+            waited_for_startup=False
             while not self.stopping.is_set():
+                if self.queued(device):
+                    # The startup queue owns its CPU/startup deadlines. Do not
+                    # report a reconnect failure while that bounded work waits.
+                    waited_for_startup=True
+                    self.stopping.wait(.25)
+                    continue
+                if waited_for_startup:
+                    deadline=time.monotonic()+self.timeout
+                    waited_for_startup=False
                 if time.monotonic()>=deadline:
                     raise ValueError('重新连接超时，请检查 USB、手机解锁及设备状态后重试')
                 if self.ready(device) and self.finish(device):

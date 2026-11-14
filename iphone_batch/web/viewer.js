@@ -7,8 +7,13 @@ class VideoConnection {
         this.startedAt = now(); this.lastFrameAt = null;
         this.failures = 0; this.timer = null; this.resume = null;
     }
-    connected() { this.state = 'streaming'; }
-    frame() { this.lastFrameAt = this.now(); this.failures = 0; this.state = 'streaming'; }
+    connected() { this.state = 'streaming'; this.connectedAt = this.now(); }
+    frame() {
+        this.lastFrameAt = this.now();
+        // One cached bootstrap frame must not erase reconnect backoff.
+        if (this.lastFrameAt - this.connectedAt >= 2000) this.failures = 0;
+        this.state = 'streaming';
+    }
     disconnected() { this.state = 'retrying'; }
     outageMs() { return this.now() - (this.lastFrameAt === null ? this.startedAt : this.lastFrameAt); }
     waitRetry() {
@@ -28,6 +33,27 @@ class VideoConnection {
         if (resume) resume();
     }
 }
+// Numeric metadata only; never record payloads, URLs, clipboard or error text.
+const videoDiagnostics = {
+    receivedAt: null, submittedAt: null, decodedAt: null, paintedAt: null, queue: 0,
+    keyWaitAt: null, packets: 0, submitted: 0, decoded: 0, painted: 0, events: [], counts: {},
+    mode: 'connecting', decoderState: 'unknown',
+    record(reason) {
+        this.counts[reason]=(this.counts[reason]||0)+1;
+        this.events.push({at: performance.now(), reason});
+        if (this.events.length > 128) this.events.shift();
+    },
+    snapshot() {
+        const now = performance.now();
+        return {at: now, receivedAt: this.receivedAt, submittedAt: this.submittedAt, decodedAt: this.decodedAt,
+            paintedAt: this.paintedAt, queue: this.queue,
+            keyWaitMs: this.keyWaitAt === null ? 0 : now - this.keyWaitAt,
+            packets: this.packets, decoded: this.decoded, painted: this.painted,
+            hidden: document.hidden, selected: batchSelected, connection: videoConnection.state,
+            events: this.events.slice()};
+    }
+};
+window.videoHealth = () => videoDiagnostics.snapshot();
 // The dashboard keeps ready previews connected; draw once every three seconds.
 const batchManaged = new URLSearchParams(location.search).has('batch');
 let batchActive = !batchManaged;
@@ -37,6 +63,59 @@ let lastCanvasDrawAt = 0;
 const BACKGROUND_DRAW_INTERVAL_MS = 3000;
 const videoConnection = new VideoConnection({selected: () => !batchManaged || batchSelected});
 let compatibleVideoAbort = null;
+let nativeVideoAbort = null, videoStopped = false;
+let videoSessionTask=null, lastSourcePackets=null;
+const localReaderRecoveries=[];
+const videoClientId=Math.random().toString(36).slice(2,14);
+let videoReportBusy=false;
+let videoReportTimer=null;
+function observeSourceProgress(source){
+    const packets=source.source_packets??source.rtp_packets;
+    const sourceAge=source.source_au_age_ms??source.last_au_age_ms;
+    const progressing=Number.isFinite(packets)&&lastSourcePackets!==null&&packets>lastSourcePackets&&Number.isFinite(sourceAge)&&sourceAge<1000;
+    lastSourcePackets=packets;
+    if(videoStopped||document.hidden||(batchManaged&&!batchSelected)||!progressing||videoConnection.state!=='streaming')return;
+    const now=performance.now();
+    if(videoDiagnostics.receivedAt===null||now-videoDiagnostics.receivedAt<4000)return;
+    while(localReaderRecoveries.length&&now-localReaderRecoveries[0]>=60000)localReaderRecoveries.shift();
+    if(localReaderRecoveries.length>=2||(localReaderRecoveries.length&&now-localReaderRecoveries.at(-1)<5000))return;
+    localReaderRecoveries.push(now);
+    videoDiagnostics.record('reader-no-progress');
+    // The phone is demonstrably producing AUs, but this client has stopped
+    // consuming. Cancel only this local fetch; never restart the phone source.
+    if(videoDiagnostics.mode==='jpeg')compatibleVideoAbort?.abort();else nativeVideoAbort?.abort();
+    videoConnection.disconnected();videoConnection.promote();
+}
+function sendVideoReport(){
+    if(videoReportBusy||videoStopped)return;
+    const now=performance.now(),age=value=>value===null?null:Math.max(0,Math.round(now-value));
+    const report={client:videoClientId,mode:videoDiagnostics.mode,decoder_state:videoDiagnostics.decoderState,
+        state:videoConnection.state,selected:batchSelected,hidden:document.hidden,
+        pending_frame:!!pendingFrame,draw_scheduled:rafScheduled,
+        receive_age_ms:age(videoDiagnostics.receivedAt),submit_age_ms:age(videoDiagnostics.submittedAt),
+        decode_age_ms:age(videoDiagnostics.decodedAt),paint_age_ms:age(videoDiagnostics.paintedAt),
+        queue:videoDiagnostics.queue,key_wait_ms:videoDiagnostics.keyWaitAt===null?0:age(videoDiagnostics.keyWaitAt),
+        packets:videoDiagnostics.packets,submitted:videoDiagnostics.submitted,decoded:videoDiagnostics.decoded,painted:videoDiagnostics.painted,
+        decode_errors:(videoDiagnostics.counts['sync-decode-error']||0)+(videoDiagnostics.counts['async-decode-error']||0),
+        queue_resets:videoDiagnostics.counts['decode-queue-timeout']||0,reconnects:videoDiagnostics.counts['reader-retry']||0,
+        paint_errors:videoDiagnostics.counts['paint-error']||0,paint_fallbacks:videoDiagnostics.counts['paint-timer-fallback']||0,
+        key_timeouts:videoDiagnostics.counts['key-wait-timeout']||0,
+        reader_resyncs:videoDiagnostics.counts['reader-no-progress']||0,
+        page_restores:videoDiagnostics.counts['page-restored']||0};
+    videoReportBusy=true;
+    fetch('/video-health',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(report),signal:AbortSignal.timeout(3000)})
+        .then(async response=>{
+            if(response.ok)return response.json();
+            // Older running phone services still expose read-only source
+            // health; the local recovery guard can work before a reload.
+            const health=await fetch('/video-health',{cache:'no-store',signal:AbortSignal.timeout(3000)});
+            if(health.ok)return health.json();
+        }).then(source=>{if(source)observeSourceProgress(source);})
+        .catch(()=>{}).finally(()=>{videoReportBusy=false;});
+}
+function startVideoReports(){if(videoReportTimer===null)videoReportTimer=setInterval(sendVideoReport,2000);}
+startVideoReports();
+window.addEventListener('pagehide',()=>{clearInterval(videoReportTimer);videoReportTimer=null;});
 let inputReady = !batchManaged, inputHealthPaused = false, inputMonitor = null, inputEpoch = 0;
 function controlAvailable() { return batchActive && inputReady; }
 if (batchManaged) document.body.classList.add('batch-preview');
@@ -998,7 +1077,7 @@ async function fetchCodecWithRetry() {
             await new Promise(r => setTimeout(r, delays[attempt - 1]));
         }
         try {
-            const resp = await fetch('/codec', { cache: 'no-store' });
+            const resp = await fetch('/codec', { cache: 'no-store', signal: AbortSignal.timeout(15000) });
             if (!resp.ok) { lastErr = 'HTTP ' + resp.status; continue; }
             // /codec returns JSON: {codec, description} where description is a
             // base64 hvcC record (HEVCDecoderConfigurationRecord). Passing it
@@ -1039,10 +1118,23 @@ function scheduleFrameDraw() {
         frameDrawTimer = setTimeout(() => { frameDrawTimer = null; drawPending(); },
             Math.max(0, BACKGROUND_DRAW_INTERVAL_MS - (performance.now() - lastCanvasDrawAt)));
     } else {
-        frameDrawRaf = requestAnimationFrame(() => { frameDrawRaf = null; drawPending(); });
+        frameDrawRaf = requestAnimationFrame(() => {
+            frameDrawRaf=null;
+            if(frameDrawTimer!==null)clearTimeout(frameDrawTimer);
+            frameDrawTimer=null;drawPending();
+        });
+        frameDrawTimer=setTimeout(()=>{
+            frameDrawTimer=null;
+            if(document.hidden)return;
+            if(frameDrawRaf!==null)cancelAnimationFrame(frameDrawRaf);
+            frameDrawRaf=null;
+            if(pendingFrame)videoDiagnostics.record('paint-timer-fallback');
+            drawPending();
+        },150);
     }
 }
 function queueVideoFrame(frame) {
+    videoDiagnostics.decodedAt = performance.now(); videoDiagnostics.decoded++;
     if (pendingFrame) { try { pendingFrame.close(); } catch (_) {} }
     pendingFrame = frame;
     lastDecodedFrameAt = performance.now();
@@ -1069,6 +1161,12 @@ function setBatchVideoSelected(selected) {
     }
     scheduleFrameDraw();
 }
+function resumeVideoDraw(){
+    if(document.hidden||(batchManaged&&!batchSelected))return;
+    cancelFrameDraw();
+    if(pendingFrame)drawPending(true);else redrawWithCurrentRotation();
+    scheduleFrameDraw();
+}
 // The most recent decoded VideoFrame, kept alive so we can redraw it
 // at a new rotation without waiting for the next decode. Closed when
 // it's replaced or when the page is unloaded.
@@ -1078,6 +1176,9 @@ let lastFrame = null;
 // flips — that signals the content is now natively oriented in the
 // buffer, so we drop our in-canvas rotation to avoid double-rotating.
 let lastFrameLandscape = null;
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){videoConnection.promote();resumeVideoDraw();}});
+window.addEventListener('focus',resumeVideoDraw);
+canvas.addEventListener('contextrestored',resumeVideoDraw);
 
 // ----- Resolution-collapse compensation. Under rapid motion the device
 // encoder drops to a smaller capture resolution (observed 720x1280 for a
@@ -1104,7 +1205,9 @@ function detectContentCrop(f) {
     const fw = f.displayWidth, fh = f.displayHeight;
     if (!fw || !fh) return;
     const DW = Math.max(8, Math.round(DET_H * fw / fh));
-    _detCanvas.width = DW; _detCanvas.height = DET_H;
+    // Reuse the readback surface; assigning even an unchanged size resets it.
+    if (_detCanvas.width !== DW) _detCanvas.width = DW;
+    if (_detCanvas.height !== DET_H) _detCanvas.height = DET_H;
     try {
         _detCtx.drawImage(f, 0, 0, DW, DET_H);
         const d = _detCtx.getImageData(0, 0, DW, DET_H).data;
@@ -1134,6 +1237,7 @@ function detectContentCrop(f) {
 }
 
 function drawFrame(f) {
+    if(ctx.isContextLost?.())throw Error('canvas context lost');
     const sideways = Math.abs(visualRotation % 180) === 90;
     const fw = f.displayWidth, fh = f.displayHeight;
     const targetW = sideways ? fh : fw;
@@ -1203,7 +1307,9 @@ function drawPending(force = false) {
     if (window.COMPENSATE) detectContentCrop(f); else { _cropSrcW = 0; _cropSrcH = 0; }
     try {
         drawFrame(f);
+        videoDiagnostics.paintedAt = performance.now(); videoDiagnostics.painted++;
     } catch (e) {
+        videoDiagnostics.record('paint-error');
         log('draw err: ' + (e.message || e));
     }
     if (lastFrame && lastFrame !== f) {
@@ -1602,6 +1708,7 @@ async function readCompatibleFrames(reader, onFrame, decodeImage = createImageBi
             const {value, done} = await reader.read();
             if (failure) throw failure;
             if (done) throw Error('视频连接已断开');
+            videoDiagnostics.receivedAt = performance.now(); videoDiagnostics.packets++;
             const merged = new Uint8Array(buffer.length + value.length);
             merged.set(buffer); merged.set(value, buffer.length); buffer = merged;
             while (buffer.length >= 4) {
@@ -1622,9 +1729,11 @@ async function readCompatibleFrames(reader, onFrame, decodeImage = createImageBi
 }
 
 async function runCompatibleVideo() {
+    videoDiagnostics.mode='jpeg';videoDiagnostics.decoderState='jpeg';
     log('使用兼容视频解码');
-    while (true) {
-        while (batchManaged && !batchVisible) await new Promise(resolve => setTimeout(resolve, 50));
+    while (!videoStopped) {
+        while (!videoStopped && batchManaged && !batchVisible) await new Promise(resolve => setTimeout(resolve, 50));
+        if (videoStopped) return;
         compatibleVideoAbort = new AbortController();
         try {
             const response = await fetch('/jpeg.bin', {cache: 'no-store', signal: compatibleVideoAbort.signal});
@@ -1638,6 +1747,7 @@ async function runCompatibleVideo() {
                 });
             } finally { await reader.cancel().catch(() => {}); }
         } catch (error) {
+            videoDiagnostics.record('jpeg-reader-disconnected');
             videoConnection.disconnected();
             if (error.name !== 'AbortError') log('兼容视频：' + error.message + '，正在重连');
         }
@@ -1647,9 +1757,34 @@ async function runCompatibleVideo() {
     }
 }
 
+function waitForDecoderDrain(decoder,signal,limit=6,timeout=250){
+    if(decoder.decodeQueueSize<limit)return Promise.resolve(true);
+    return new Promise(resolve=>{
+        let done=false,timer=null;
+        const finish=result=>{
+            if(done)return;done=true;
+            if(timer!==null)clearTimeout(timer);
+            decoder.removeEventListener?.('dequeue',changed);
+            signal?.removeEventListener('abort',aborted);
+            resolve(result);
+        };
+        const changed=()=>{
+            if(decoder.state!=='configured')finish(false);
+            else if(decoder.decodeQueueSize<limit)finish(true);
+        };
+        const aborted=()=>finish(false);
+        decoder.addEventListener?.('dequeue',changed);
+        signal?.addEventListener('abort',aborted,{once:true});
+        timer=setTimeout(()=>finish(decoder.state==='configured'&&decoder.decodeQueueSize<limit),timeout);
+        if(signal?.aborted)aborted();else changed();
+    });
+}
 async function run() {
+    videoDiagnostics.mode='hevc';
+    nativeVideoAbort = new AbortController();
     log('userAgent: ' + navigator.userAgent.slice(0, 80));
     const { codec, description } = await fetchCodecWithRetry();
+    if (videoStopped) return;
     log('codec: ' + codec + ' (hvcC ' + description.length + 'B)');
     // Shared hvcC decoder config: the `description` (HEVCDecoderConfigurationRecord)
     // selects VideoToolbox's native hvcC path; chunks carry 4-byte-length-prefixed
@@ -1667,9 +1802,31 @@ async function run() {
 
     let decodeErrCount = 0;
     let needsResync = false;     // skip deltas until we see the next key after an error
-    let autoRestartUsed = false; // self-heal once if the bootstrap path errors
-    const buildDecoder = () => new VideoDecoder({
+    let waitingSince = null, keyRequests = 0, nextKeyRequestAt = 0;
+    let ended = false, recoveryTimer = null;
+    const now = () => performance.now();
+    const requestKey = () => {
+        if (ended || keyRequests >= 3 || now() < nextKeyRequestAt) return;
+        keyRequests++;
+        nextKeyRequestAt = now() + 2000 * 2 ** (keyRequests - 1);
+        videoDiagnostics.record('browser-pli');
+        fetch('/pli', {method: 'POST', cache: 'no-store', signal: AbortSignal.timeout(4000)})
+            .catch(() => videoDiagnostics.record('browser-pli-failed'));
+    };
+    const resync = reason => {
+        if (needsResync || ended) return;
+        needsResync = true;
+        waitingSince = now(); videoDiagnostics.keyWaitAt = waitingSince;
+        keyRequests = 0; nextKeyRequestAt = 0;
+        videoDiagnostics.record(reason);
+        requestKey();
+    };
+    let decoderEpoch = 0;
+    const buildDecoder = () => {
+        const epoch = ++decoderEpoch;
+        return new VideoDecoder({
         output: (frame) => {
+            if (ended || needsResync || epoch !== decoderEpoch) { frame.close(); return; }
             // Apple's encoder signals slightly different displayWidth/Height
             // across frames (we've measured 1264x2752 oscillating with
             // 1264x2736 mid-stream as the iOS home indicator toggles). If
@@ -1704,34 +1861,15 @@ async function run() {
         // the decoder transitions to 'closed' -- we re-create it and wait for
         // the next keyframe before feeding it again.
         error: (e) => {
+            if (ended || epoch !== decoderEpoch) return;
             decodeErrCount++;
             log('decode err #' + decodeErrCount + ': ' + e.message);
-            needsResync = true;
-            // Bootstrap-failure self-heal: if we error out before we've
-            // shown even a handful of frames, Apple's encoder may have
-            // emitted a POC chain WebCodecs can't follow. Asking the
-            // server for a fresh stream often produces a sequential POC
-            // chain that decodes cleanly. Do it at most once -- if it
-            // errors again the problem isn't transient and the user can
-            // click Force Restart manually.
-            if (!autoRestartUsed && frameCount < 5) {
-                autoRestartUsed = true;
-                log('auto /restart (bootstrap decode err)');
-                fetch('/restart', {method: 'POST', cache: 'no-store'})
-                    .then(r => log('auto restart: HTTP ' + r.status))
-                    .catch(err => log('auto restart err: ' + err.message));
-            } else {
-                // Post-bootstrap decode error: kick the device for a
-                // fresh IDR via the lightweight /pli path (no full
-                // session restart). The next IDR triggers the
-                // `needsResync` rebuild below in the data loop.
-                fetch('/pli', {method: 'POST', cache: 'no-store'})
-                    .catch(err => log('/pli err: ' + err.message));
-            }
+            resync('async-decode-error');
         },
-    });
+        });
+    };
     let decoder = buildDecoder();
-    decoder.configure(decoderConfig);
+    try{decoder.configure(decoderConfig);}catch(error){try{decoder.close();}catch{}throw error;}
     log('state after configure: ' + decoder.state);
 
     // /stream.bin can return 503 if the force-restart on the server failed
@@ -1740,12 +1878,13 @@ async function run() {
     let resp = null;
     const streamDelays = [200, 500, 1000, 2000, 3000, 5000];
     for (let a = 0; a <= streamDelays.length; a++) {
+        if (videoStopped) { decoder.close(); return; }
         if (a > 0) {
             log('stream retry #' + a + ' in ' + streamDelays[a - 1] + 'ms');
             await new Promise(r => setTimeout(r, streamDelays[a - 1]));
         }
         try {
-            const r = await fetch('/stream.bin', { cache: 'no-store' });
+            const r = await fetch('/stream.bin', { cache: 'no-store', signal: nativeVideoAbort.signal });
             if (r.ok) { resp = r; break; }
             const body = await r.text();
             log('stream HTTP ' + r.status + ': ' + body.slice(0, 80));
@@ -1753,9 +1892,19 @@ async function run() {
             log('stream fetch err: ' + (e.message || e));
         }
     }
-    if (!resp) { log('FAIL: /stream.bin unreachable'); return; }
+    if (!resp) { decoder.close(); log('FAIL: /stream.bin unreachable'); return; }
     videoConnection.connected();
     const reader = resp.body.getReader();
+    recoveryTimer = setInterval(() => {
+        videoDiagnostics.queue = decoder.decodeQueueSize;
+        videoDiagnostics.decoderState=decoder.state;
+        if (!needsResync) return;
+        if (now() - waitingSince >= 15000) {
+            videoDiagnostics.record('key-wait-timeout');
+            nativeVideoAbort?.abort();
+            reader.cancel().catch(() => {});
+        } else requestKey();
+    }, 500);
     let buf = new Uint8Array(0);
     let timestamp = 0;
     let gotKey = false;
@@ -1763,14 +1912,18 @@ async function run() {
     try {
     while (true) {
         const { value, done } = await reader.read();
-        if (done) { log('stream ended'); break; }
+        if (done) { videoDiagnostics.record('reader-eof'); log('stream ended'); break; }
+        videoDiagnostics.receivedAt = now();
         const merged = new Uint8Array(buf.length + value.length);
         merged.set(buf); merged.set(value, buf.length);
         buf = merged;
         while (buf.length >= 4) {
-            const len = (buf[0]<<24)|(buf[1]<<16)|(buf[2]<<8)|buf[3];
+            const len = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0);
+            if (len < 2 || len > 8 * 1024 * 1024) throw Error('Invalid video packet length');
             if (buf.length < 4 + len) break;
             const type = buf[4];
+            if (type > 2) throw Error('Invalid video packet type');
+            videoDiagnostics.packets++;
             const data = buf.slice(5, 4 + len);  // .slice copies the backing buffer
             buf = buf.subarray(4 + len);
             // type:
@@ -1785,6 +1938,7 @@ async function run() {
                 decoder = buildDecoder();
                 decoder.configure(decoderConfig);
                 needsResync = false;
+                videoDiagnostics.keyWaitAt = waitingSince = null;
                 gotKey = true;
                 log('force-restart @ key after upstream drop');
             } else if (type === 0) {
@@ -1794,37 +1948,43 @@ async function run() {
                     decoder = buildDecoder();
                     decoder.configure(decoderConfig);
                     needsResync = false;
+                    videoDiagnostics.keyWaitAt = waitingSince = null;
                     log('resynced @ key after ' + decodeErrCount + ' decode err(s)');
                 }
             }
             if (!gotKey) continue;
             if (needsResync) continue;
             if (decoder.state !== 'configured') {
-                log('decoder ' + decoder.state + ' @' + sentCount + ' - rebuilding');
-                try { decoder.close(); } catch (e) {}
-                decoder = buildDecoder();
-                decoder.configure(decoderConfig);
-                needsResync = true;
-                continue;
+                if (type === 0 || type === 2) {
+                    try { decoder.close(); } catch (_) {}
+                    decoder = buildDecoder(); decoder.configure(decoderConfig);
+                } else {
+                    resync('decoder-not-configured');
+                    continue;
+                }
             }
             // Prefer current video over playing a backlog. HEVC deltas depend
             // on earlier frames: reset and wait for a fresh key, never drop an
             // arbitrary delta and then continue using its dependent frames.
             // Network reads can contain a healthy burst. Give decoder tasks a
             // display interval to drain before treating the burst as overload.
-            if (decoder.decodeQueueSize >= 6) {
-                await new Promise(resolve => setTimeout(resolve, 16));
-            }
+            // Apply backpressure without losing reference frames. A 16ms
+            // scheduling delay is normal; require 250ms without draining.
+            if(decoder.decodeQueueSize>=6)await waitForDecoderDrain(decoder,nativeVideoAbort?.signal);
+            if(nativeVideoAbort?.signal.aborted)throw Object.assign(Error('video reader cancelled'),{name:'AbortError'});
+            if (needsResync) continue;
             if (decoder.decodeQueueSize >= 6) {
                 try { decoder.close(); } catch (e) {}
-                decoder = buildDecoder();
-                decoder.configure(decoderConfig);
-                needsResync = true;
                 if (pendingFrame) { pendingFrame.close(); pendingFrame = null; }
-                fetch('/pli', {method: 'POST', cache: 'no-store'})
-                    .catch(err => log('/pli err: ' + err.message));
-                log('解码积压，等待新关键帧');
-                continue;
+                if (type === 0 || type === 2) {
+                    // A recovery key is already available: use it now.
+                    decoder = buildDecoder(); decoder.configure(decoderConfig);
+                    videoDiagnostics.record('decode-queue-reset-at-key');
+                } else {
+                    resync('decode-queue-timeout');
+                    log('解码积压，等待新关键帧');
+                    continue;
+                }
             }
             try {
                 decoder.decode(new EncodedVideoChunk({
@@ -1833,26 +1993,56 @@ async function run() {
                     data: data,
                 }));
                 timestamp += 16666;
+                videoDiagnostics.submittedAt = now();
+                videoDiagnostics.submitted++;
                 sentCount++;
             } catch (e) {
                 log('sync decode err @' + sentCount + ': ' + e.message);
-                needsResync = true;
+                resync('sync-decode-error');
             }
         }
     }
     } finally {
-        try { await reader.cancel(); } catch (_) {}
+        ended = true;
+        clearInterval(recoveryTimer);
+        videoDiagnostics.queue = 0; videoDiagnostics.keyWaitAt = null;
         try { decoder.close(); } catch (_) {}
+        // A fetch reader's cancellation can itself remain pending while a
+        // page is frozen. Abort transport and do not block the retry loop on it.
+        nativeVideoAbort?.abort();
+        try { reader.cancel().catch(()=>{}); } catch (_) {}
     }
 }
 async function runVideoForever() {
-    while (true) {
+    while (!videoStopped) {
         try { await run(); }
         catch (error) { log('视频连接：' + (error.message || error) + '，正在重连'); }
         videoConnection.disconnected();
+        videoDiagnostics.record('reader-retry');
+        if (videoStopped) return;
         await videoConnection.waitRetry();
     }
 }
+function ensureVideoSession(){
+    if(videoStopped||videoSessionTask)return;
+    videoSessionTask=runVideoForever().catch(error=>log('fatal: '+error.message)).finally(()=>{
+        videoSessionTask=null;
+        if(!videoStopped)setTimeout(ensureVideoSession,1000);
+    });
+}
+window.addEventListener('pagehide', () => {
+    videoStopped = true;
+    nativeVideoAbort?.abort(); compatibleVideoAbort?.abort();
+    videoConnection.promote(); cancelFrameDraw();
+    if (pendingFrame) { pendingFrame.close(); pendingFrame = null; }
+    if (lastFrame) { lastFrame.close(); lastFrame = null; }
+});
+window.addEventListener('pageshow',event=>{
+    if(!event.persisted)return;
+    videoStopped=false;
+    videoDiagnostics.record('page-restored');
+    videoConnection.promote();startVideoReports();ensureVideoSession();resumeVideoDraw();
+});
 inputMonitor = new InputHealthMonitor({
     request: async () => {
         const response = await fetch('/input-health', {method: 'POST',
@@ -1873,7 +2063,7 @@ inputMonitor = new InputHealthMonitor({
     },
 });
 if (!batchManaged) inputMonitor.setActive(true);
-runVideoForever().catch(e => log('fatal: ' + e.message));
+ensureVideoSession();
 
 if (batchManaged) {
     let snapshotBusy = false, lastSnapshotAt = -Infinity;

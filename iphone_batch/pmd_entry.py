@@ -13,6 +13,8 @@ def main():
     from pairing_patch import install as install_pairing, prevent_automatic_pairing
     install_pairing()
     prevent_automatic_pairing()
+    from tunnel_target import install as install_targeted_tunnel
+    install_targeted_tunnel()
     import sys
     if 'reset-workspace-session' in sys.argv:
         from media_recovery import install_cli

@@ -4,6 +4,18 @@ class GlobalMonitor {
   Object.assign(this,{pick,menu,refresh,sort});this.visible=true;this.tiles=new Map();this.sequence=0;
   this.grid=document.getElementById('monitor-grid');
   this.section=document.getElementById('global-monitor');this.fullscreenButton=document.getElementById('monitor-fullscreen');
+  this.layoutButton=document.getElementById('monitor-layout');
+  this.sizeSlider=document.getElementById('monitor-size');this.sizeLabel=document.getElementById('monitor-size-value');
+  this.sizes={};for(const mode of ['single','double'])try{const n=Number(localStorage.getItem('monitor-size-'+mode));if(n>=80&&n<=480)this.sizes[mode]=n;}catch{}
+  let single=false;try{single=localStorage.getItem('monitor-layout')==='single';}catch{}
+  this.setLayout(single,false);
+  this.layoutButton.addEventListener('click',()=>this.setLayout(!this.single));
+  this.sizeSlider.addEventListener('input',()=>{
+   const mode=this.single?'single':'double';this.sizes[mode]=Number(this.sizeSlider.value);
+   try{localStorage.setItem('monitor-size-'+mode,String(this.sizes[mode]));}catch{}
+   this.updateSize();
+  });
+  this.resizeObserver=new ResizeObserver(()=>this.updateSize());this.resizeObserver.observe(this.grid);
   this.fullscreenButton.addEventListener('click',()=>this.toggleFullscreen());
   document.addEventListener('fullscreenchange',()=>this.syncFullscreen());
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&this.section.classList.contains('monitor-window-fullscreen'))void this.exitFullscreen();});
@@ -12,7 +24,26 @@ class GlobalMonitor {
   window.addEventListener('message',event=>this.receive(event));
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)this.tick();});
   this.timer=setInterval(()=>this.tick(),250);
-  window.addEventListener('pagehide',()=>{clearInterval(this.timer);for(const tile of this.tiles.values())this.revoke(tile);});
+  window.addEventListener('pagehide',()=>{clearInterval(this.timer);this.resizeObserver.disconnect();for(const tile of this.tiles.values())this.revoke(tile);});
+ }
+ setLayout(single,persist=true){
+  this.single=single;this.section.dataset.layout=single?'single':'double';this.grid.scrollLeft=0;
+  this.layoutButton.textContent=single?'双排显示':'单排显示';this.layoutButton.setAttribute('aria-pressed',String(single));
+  if(persist)try{localStorage.setItem('monitor-layout',single?'single':'double');}catch{}
+  this.updateSize();
+ }
+ updateSize(){
+  const mode=this.single?'single':'double',gap=parseFloat(getComputedStyle(this.grid).columnGap)||12;
+  const preferred=this.sizes[mode]??(this.single?Math.max(80,Math.min(480,(this.grid.clientWidth-gap*4)/5)):160);
+  const count=Math.max(1,Math.floor((this.grid.clientWidth+gap)/(preferred+gap)));
+  const width=this.single?preferred:Math.max(1,(this.grid.clientWidth-gap*(count-1))/count);
+  this.grid.style.setProperty('--monitor-tile-width',width+'px');
+  // Preserve the sorted reading order across each visible pair of rows.
+  [...this.grid.children].forEach((tile,index)=>{
+   tile.style.gridRow=this.single?'':String(Math.floor(index/count)%2+1);
+   tile.style.gridColumn=this.single?'':String(Math.floor(index/(count*2))*count+index%count+1);
+  });
+  this.sizeSlider.value=String(Math.round(preferred));this.sizeLabel.textContent=Math.round(width)+' px';
  }
  openWorkbench(){document.querySelector('main').scrollIntoView({behavior:'smooth',block:'start'});}
  scrollToTop(){document.getElementById('global-monitor').scrollIntoView({behavior:'smooth',block:'start'});}
@@ -35,6 +66,7 @@ class GlobalMonitor {
  }
  revoke(tile){if(tile.url){URL.revokeObjectURL(tile.url);tile.url=null;}}
  render(ordered,cards,sortValue) {
+  ordered=[...ordered].sort((a,b)=>Number(a.device.enabled===false)-Number(b.device.enabled===false));
   this.cards=cards;
   const connected=new Set(ordered.map(row=>row.device.udid));
   for(const [id,tile] of this.tiles)if(!connected.has(id)){this.revoke(tile);tile.node.remove();this.tiles.delete(id);}
@@ -51,10 +83,8 @@ class GlobalMonitor {
     const screen=document.createElement('span');screen.className='monitor-screen';
     const image=document.createElement('img');image.alt='';image.hidden=true;image.draggable=false;
     const placeholder=document.createElement('span');placeholder.className='monitor-placeholder';screen.append(image,placeholder);
-    const state=document.createElement('span');state.className='monitor-state';
-    const followup=document.createElement('span');followup.className='monitor-followup';
-    node.append(heading,screen,state,followup);
-    tile={node,number,badge,image,placeholder,state,followup,nextAt:now+position*3000/Math.max(1,ordered.length),url:null,received:0,pending:null};
+    node.append(heading,screen);
+    tile={node,number,badge,image,placeholder,nextAt:now+position*3000/Math.max(1,ordered.length),url:null,received:0,pending:null};
     node.addEventListener('click',()=>this.pick(device.udid));
     node.addEventListener('contextmenu',event=>this.menu(event,tile.device,tile.index));
     this.tiles.set(device.udid,tile);
@@ -66,19 +96,20 @@ class GlobalMonitor {
    tile.number.textContent='设备 '+label.number;
    const count=device.notifications?.card_count??device.notifications?.items?.length??0;
    tile.badge.textContent=count?String(count):'';tile.badge.hidden=!count;
-   tile.followup.textContent=followupCount?'待跟进 '+followupCount:label.followup?'待跟进':'\u00a0';
-   tile.node.title=device.name+' · '+device.udid.slice(-8)+' · 点击进入操作；右键管理设备';
+   tile.node.title=device.name+' · '+device.udid.slice(-8)+(followupCount?' · 待跟进 '+followupCount:label.followup?' · 待跟进':'')+' · 点击进入操作；右键管理设备';
    tile.node.setAttribute('aria-label','设备 '+label.number+'，'+(device.ready?'点击进入操作':device.error||'正在准备投屏'));
    this.updateState(tile,now);this.grid.append(tile.node);
   });
+  this.updateSize();
  }
  updateState(tile,now){
   const ready=tile.device.ready,stale=tile.received&&now-tile.received>10000;
   const waiting=ready&&!tile.received&&tile.firstRequestAt&&now-tile.firstRequestAt>15000;
   tile.node.classList.toggle('monitor-stale',!!stale||tile.streamState==='retrying'||!ready);
   tile.placeholder.hidden=!!tile.url;
-  tile.placeholder.textContent=ready?(waiting?'尚未收到画面，请点击检查':'等待画面…'):tile.device.error||'正在准备投屏…';
-  tile.state.textContent=!ready?tile.device.error||'正在准备投屏':stale?'更新中断 · 保留上次画面':tile.streamState==='retrying'?'画面重连中':tile.received?'每 3 秒更新':waiting?'首帧等待超时':'等待首帧';
+  tile.placeholder.textContent='暂无画面';
+  const status=!ready?tile.device.error||'正在准备投屏':stale?'更新中断，保留上次画面':tile.streamState==='retrying'?'画面重连中':waiting?'首帧等待超时':tile.received?'画面已显示':'等待首帧';
+  tile.node.setAttribute('aria-label',tile.number.textContent+'，'+status+'；点击进入操作，右键管理设备');
  }
  tick(){
   if(!this.visible||document.hidden||!this.cards)return;
@@ -118,7 +149,7 @@ const globalMonitor=typeof GlobalMonitor==='function'?new GlobalMonitor({
 }):null;
 if(globalMonitor){
  const back=document.createElement('button');back.id='monitor-back';back.type='button';back.className='secondary monitor-back';back.textContent='↑ 全局监看';
- back.addEventListener('click',()=>showGlobalMonitor());document.querySelector('.devices').prepend(back);
+ back.addEventListener('click',()=>showGlobalMonitor());document.querySelector('.phone-panel .section-title').prepend(back);
 }
 function showGlobalMonitor(){
  closeDeviceMenu();globalMonitor?.scrollToTop();
@@ -240,7 +271,7 @@ const revealDeveloperModeButton=document.getElementById('reveal-developer-mode')
 const developerModeStatus=document.getElementById('developer-mode-status');
 function syncDeveloperModeButton(){
  if(!revealDeveloperModeButton)return;
- revealDeveloperModeButton.disabled=!active||busy||workspaceBusy||revealingDeveloperMode||devicePreview;
+    revealDeveloperModeButton.disabled=!active||latest.find(d=>d.udid===active)?.enabled===false||latest.find(d=>d.udid===active)?.readonly===true||busy||workspaceBusy||revealingDeveloperMode||devicePreview;
  revealDeveloperModeButton.textContent=revealingDeveloperMode?'正在显示入口…':'显示开发者模式入口';
  if(developerModeFeedbackDevice!==active){
   developerModeFeedbackDevice=active;
@@ -281,15 +312,21 @@ sortControl.addEventListener('change',()=>{
 });
 let deviceMenuTarget=null;
 const trustRequests=new Set();
+const accessRequests=new Set();
+const accessNotices=new Map();
 const reconnectRequests=new Set(),reconnectNotices=new Map();
 const deviceMenu=document.getElementById('device-context-menu');
 function closeDeviceMenu(){deviceMenu.hidden=true;deviceMenuTarget=null;}
 function showDeviceMenu(event,device,index){
  event.preventDefault();deviceMenuTarget={device,index};deviceMenu.hidden=false;
  const trustButton=document.getElementById('device-context-trust');
- trustButton.disabled=devicePreview||device.ready||device.trust_pending||device.reconnecting||trustRequests.has(device.udid);
+ trustButton.disabled=device.enabled===false||device.readonly===true||devicePreview||device.ready||device.trust_pending||device.reconnecting||trustRequests.has(device.udid);
+ const connectionButton=document.getElementById('device-context-connection'),readonlyButton=document.getElementById('device-context-readonly');
+ connectionButton.textContent=device.enabled===false?'接入此台':'断开此台：停止画面和操作';
+ readonlyButton.textContent=device.readonly?'允许操作':'仅监看：锁定鼠标和键盘';
+ connectionButton.disabled=readonlyButton.disabled=devicePreview||workspaceBusy||busy||accessRequests.has(device.udid)||device.trust_pending||device.reconnecting;
  const reconnectButton=document.getElementById('device-context-reconnect');
- reconnectButton.disabled=devicePreview||device.trust_pending||device.reconnecting||reconnectRequests.has(device.udid)||workspaceBusy||busy;
+ reconnectButton.disabled=device.enabled===false||devicePreview||device.trust_pending||device.reconnecting||reconnectRequests.has(device.udid)||workspaceBusy||busy;
  reconnectButton.textContent=device.reconnecting?'正在重新连接…':'重新连接此设备';
  trustButton.textContent=(device.trust_pending||trustRequests.has(device.udid))?'正在等待信任确认…':'重新建立信任';
  const followup=deviceLabel(device,index).followup;
@@ -300,11 +337,31 @@ function showDeviceMenu(event,device,index){
  deviceMenu.style.top=Math.max(4,Math.min(event.clientY,window.innerHeight-bounds.height-4))+'px';
  document.getElementById('device-context-edit').focus();
 }
+async function changeDeviceAccess(device,changes){
+ if(devicePreview||workspaceBusy||busy||accessRequests.has(device.udid))return;
+ accessRequests.add(device.udid);
+ const label=deviceLabel(device,latest.indexOf(device)).number;
+ const action='enabled' in changes?(changes.enabled?'接入':'断开'):(changes.readonly?'切换为仅监看':'允许操作');
+ notice('设备 '+label+' 正在'+action+'…');
+ try{
+  const result=await deviceRequest('/api/devices/access',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:device.udid,...changes})});
+  if(changes.enabled===true){accessNotices.set(device.udid,{label});notice('设备 '+label+' 正在排队接入，等待画面连接…');}
+  else{accessNotices.delete(device.udid);notice('设备 '+label+' 已完成'+action);}
+  await refresh();
+ }catch(error){notice('设备 '+label+' '+action+'未完成：'+error.message);}
+ finally{accessRequests.delete(device.udid);render(latest,active,controlOwner);}
+}
+document.getElementById('device-context-connection').addEventListener('click',()=>{
+ const target=deviceMenuTarget;closeDeviceMenu();if(target)return changeDeviceAccess(target.device,{enabled:target.device.enabled===false});
+});
+document.getElementById('device-context-readonly').addEventListener('click',()=>{
+ const target=deviceMenuTarget;closeDeviceMenu();if(target)return changeDeviceAccess(target.device,{readonly:!target.device.readonly});
+});
 document.getElementById('device-context-edit').addEventListener('click',()=>{
  const target=deviceMenuTarget;closeDeviceMenu();if(target)editDevice(target.device,target.index);
 });
 document.getElementById('device-context-trust').addEventListener('click',async()=>{
- const target=deviceMenuTarget;closeDeviceMenu();if(!target||devicePreview)return;
+ const target=deviceMenuTarget;closeDeviceMenu();if(!target||target.device.enabled===false||devicePreview)return;
  const device=target.device,label=deviceLabel(device,target.index).number;
  if(trustRequests.has(device.udid))return;
  trustRequests.add(device.udid);
@@ -317,7 +374,7 @@ document.getElementById('device-context-trust').addEventListener('click',async()
  finally{trustRequests.delete(device.udid);refresh();}
 });
 document.getElementById('device-context-reconnect').addEventListener('click',async()=>{
- const target=deviceMenuTarget;closeDeviceMenu();if(!target||devicePreview)return;
+ const target=deviceMenuTarget;closeDeviceMenu();if(!target||target.device.enabled===false||devicePreview)return;
  const device=target.device,label=deviceLabel(device,target.index).number;
  if(reconnectRequests.has(device.udid)||device.reconnecting||workspaceBusy||busy)return;
  reconnectRequests.add(device.udid);notice('设备 '+label+'：正在重新建立画面与操控连接…');
@@ -486,6 +543,12 @@ function releasePreview(card){
 function render(rows,selected,controller=controlOwner){
  latest=rows;active=selected;controlOwner=controller;
  if(globalMonitor)globalMonitor.selected=selected;
+ for(const [udid,job] of accessNotices){
+  const row=rows.find(device=>device.udid===udid);
+  if(!row||row.enabled===false){notice('设备 '+job.label+' 接入已停止');accessNotices.delete(udid);}
+  else if(row.ready){notice('设备 '+job.label+' 已完成接入，连接已就绪');accessNotices.delete(udid);}
+  else notice('设备 '+job.label+' 正在接入：'+(row.error||'等待画面连接…'));
+ }
  for(const [udid,job] of reconnectNotices){
   const row=rows.find(device=>device.udid===udid);
   if(!row){notice('设备 '+job.label+' 已断开，请接入后刷新设备列表');reconnectNotices.delete(udid);}
@@ -540,8 +603,8 @@ function render(rows,selected,controller=controlOwner){
    phone.append(badge);
   }
   const setupError=String(d.error||'');
-  const setupState=setupError.includes('开发者模式未开启')?'开发者模式关闭':setupError.includes('信任')?'需解锁并信任':setupError.includes('镜像准备失败')?'投屏准备失败':'正在准备投屏';
-  detail.textContent=devicePreview?'':!d.ready?setupState:notification?.manual_control?'当前控制':!autoScanEnabled?'遍历已关闭':notification?.protected?'草稿保护':
+  const setupState=d.enabled===false?'已手动断开':setupError.includes('开发者模式未开启')?'开发者模式关闭':setupError.includes('信任')?'需解锁并信任':setupError.includes('镜像准备失败')?'投屏准备失败':'正在准备投屏';
+  detail.textContent=devicePreview?'':!d.ready?setupState:d.readonly?'仅监看':notification?.manual_control?'当前控制':!autoScanEnabled?'遍历已关闭':notification?.protected?'草稿保护':
    notification?.state==='scanning'?'检查中':notification?.state==='paused'?'检查暂停':
    notification?.last_checked?(count?'有新通知':'暂无通知'):'待检查';
   entry.title='设备 '+number+' · '+remark.textContent+' · '+d.name+' · '+d.udid.slice(-8)+' · '+detail.textContent+' · '+count+' 张短信通知卡片'+
@@ -575,12 +638,16 @@ function render(rows,selected,controller=controlOwner){
    const label=document.createElement('div');label.className='label';
    const name=document.createElement('span');name.textContent=d.name+' · '+d.udid.slice(-6);
    const button=document.createElement('button');button.className='pick';button.textContent='选择控制';button.onclick=()=>select(d.udid);
-   label.append(name,button);node.append(label);
+   const connectionButton=document.createElement('button');connectionButton.className='pick';
+   connectionButton.onclick=()=>{const device=latest.find(row=>row.udid===d.udid);if(device)return changeDeviceAccess(device,{enabled:device.enabled===false});};
+   label.append(name,button,connectionButton);node.append(label);
    const waiting=document.createElement('div');waiting.className='waiting';waiting.textContent='正在启动投屏…';node.append(waiting);
-   card={node,button,waiting,frame:null,origin:'http://127.0.0.1:'+d.port};cards.set(d.udid,card);
+   card={node,button,connectionButton,waiting,frame:null,origin:'http://127.0.0.1:'+d.port};cards.set(d.udid,card);
   }
   if(!d.ready)card.waiting.textContent=d.error||'正在启动投屏…';
-  card.controlReady=d.control_ready===true;
+  card.controlReady=d.control_ready===true&&!d.readonly&&d.enabled!==false;
+  card.connectionButton.textContent=d.enabled===false?'接入此台':'断开此台';
+  card.connectionButton.disabled=busy||workspaceBusy||accessRequests.has(d.udid)||d.reconnecting||d.trust_pending;
   if(d.ready&&!card.frame){
    card.inputReady=false;
    const frame=document.createElement('iframe');frame.title=d.name+' 实时画面';frame.src=card.origin+'/?batch=1&manager='+encodeURIComponent(location.origin);frame.allow='clipboard-read; clipboard-write';
@@ -589,11 +656,11 @@ function render(rows,selected,controller=controlOwner){
    const connectionNotice=document.createElement('div');connectionNotice.className='input-connection-status';connectionNotice.setAttribute('role','status');connectionNotice.textContent='控制连接检查中…';card.connectionNotice=connectionNotice;card.node.append(connectionNotice);
   }
   if(!card.frame&&card.waiting.parentElement!==card.node)card.node.append(card.waiting);
-  const on=selected===d.udid;card.node.classList.toggle('selected',on);card.button.textContent=on&&controlOwner===d.udid?'正在控制':'选择控制';card.button.disabled=!d.ready||busy;
+  const on=selected===d.udid;card.node.classList.toggle('selected',on);card.button.textContent=d.readonly?'仅监看':on&&controlOwner===d.udid?'正在控制':'选择控制';card.button.disabled=!d.ready||d.readonly||busy;
   const target=document.getElementById('selected');if(card.node.parentElement!==target)target.append(card.node);
   card.node.hidden=!on;
   const foreground=on;
-  const controllable=foreground&&controlOwner===d.udid&&!controlPaused&&!busy;
+  const controllable=foreground&&controlOwner===d.udid&&!d.readonly&&d.enabled!==false&&!controlPaused&&!busy;
   if(card.lastActive!==controllable||card.lastVisible!==foreground||card.lastWorking!==workspaceBusy||card.lastControlReady!==card.controlReady){sendFocus(card,controllable,foreground);card.lastActive=controllable;card.lastVisible=foreground;card.lastWorking=workspaceBusy;card.lastControlReady=card.controlReady;}
  }
  const empty=document.getElementById('empty');if(empty)empty.style.display=selected?'none':'';

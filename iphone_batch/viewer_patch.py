@@ -16,6 +16,13 @@ MAX_TEXT_BYTES = 1024 * 1024
 MAX_CLIPBOARD_IMAGE_BYTES = 16 * 1024 * 1024
 
 
+def policy_allows_input(instance):
+    identifier=getattr(instance,'_batch_udid',os.environ.get('PYMOBILEDEVICE3_UDID'))
+    if not identifier:return True
+    from device_policy import input_allowed
+    return input_allowed(identifier,Path(__file__).resolve().parent/'.device-data'/'workspace'/'device-policy.json')
+
+
 def viewer_script(folder):
     return b'\n'.join((folder / name).read_bytes() for name in ('pointer_input.js', 'input_health.js', 'viewer.js'))
 
@@ -116,7 +123,7 @@ def install():
     def token_for(instance):
         return getattr(instance, '_batch_token', token)
     def active(instance):
-        return not token_for(instance) or getattr(instance, '_batch_active', False)
+        return (not token_for(instance) or getattr(instance, '_batch_active', False)) and policy_allows_input(instance)
     originals = {name: getattr(screen_stream.ScreenStreamServer, name)
                  for name in ('_handle_touch', '_handle_key', '_handle_button')}
     def input_lock(instance):
@@ -125,6 +132,8 @@ def install():
         return instance._batch_input_lock
     from video_idle import install as install_idle_video
     install_idle_video(screen_stream.ScreenStreamServer, input_lock)
+    from video_health import install as install_video_health
+    install_video_health(screen_stream.ScreenStreamServer)
     for name, original_action in originals.items():
         def wrap_action(action, kind):
             async def guarded(instance, body):
@@ -158,9 +167,26 @@ def install():
         device_token = token_for(self)
         path = parts[1].partition('?')[0]
         async def delegate(replay):
-            serving = original(self, replay, writer)
+            forwarding = None
+            if path == '/stream.bin':
+                from video_health import ForwardWriter
+                forwarding = ForwardWriter(self, writer)
+            serving = original(self, replay, forwarding or writer)
             if path in ('/stream.bin', '/audio.bin'):
-                return await stream_until_disconnect(serving, reader)
+                try:
+                    return await stream_until_disconnect(serving, reader)
+                finally:
+                    if forwarding:
+                        forwarding.stats['ended'] = True
+                        from video_health import event
+                        event(self, 'forward-ended')
+            if path == '/restart':
+                from video_health import manual_restart
+                context = manual_restart.set(True)
+                try:
+                    return await serving
+                finally:
+                    manual_restart.reset(context)
             return await serving
         async def prepare_media():
             try:
@@ -199,6 +225,28 @@ def install():
             return await reply(writer, 403, {'error': 'same-origin localhost access required'})
         if not access.verify(parts[0], self._http_port, parts[1], headers.get(HEADER.lower())):
             return await reply(writer, 403, {'error': '请从授权客户端打开短信工作台'})
+        if (parts[0]=='POST' and path in ('/manual-touch','/manual-key','/manual-home',
+                '/manual-paste','/manual-composer-focus','/input-health','/input-readiness')
+                and not policy_allows_input(self)):
+            return await reply(writer,403,{'error':'device input disabled by policy'})
+        if path == '/video-health' and parts[0] == 'GET':
+            from video_health import snapshot
+            return await reply(writer, 200, snapshot(self))
+        if path == '/video-health' and parts[0] == 'POST':
+            try:
+                length=int(headers.get('content-length','0'))
+                if not 0<length<=4096:raise ValueError('invalid report size')
+                from video_health import record_browser
+                record_browser(self,json.loads(await asyncio.wait_for(reader.readexactly(length),3)))
+                now=time.monotonic()
+                return await reply(writer,200,{'ok':True,
+                    'source_packets':getattr(self,'_rtp_packets_received',0),
+                    'source_au_age_ms':round(1000*(now-self._last_good_au_t)) if getattr(self,'_last_good_au_t',0) else None})
+            except (ValueError,TypeError):return await reply(writer,400,{'error':'invalid video report'})
+        if path == '/pli' and parts[0] == 'POST':
+            # Signed video recovery must work for background monitor viewers;
+            # it neither grants input control nor wakes a stopped source.
+            return await delegate(ReplayReader(prefix, reader))
         if parts[0] == 'GET' and path in ('/codec', '/stream.bin', '/audio.bin'):
             if not await prepare_media():
                 return
@@ -222,6 +270,8 @@ def install():
                 result = await check_input(self, input_lock(self), lambda: active(self))
                 return await reply(writer, 200, result)
             if path == '/input-readiness':
+                if not policy_allows_input(self):
+                    return await reply(writer,403,{'error':'device input disabled by policy'})
                 if parts[0] != 'POST':
                     return await reply(writer, 405, {'error': 'POST required'})
                 if not device_token or not hmac.compare_digest(headers.get('x-control-token', ''), device_token):
@@ -358,6 +408,8 @@ def install():
                 body = json.loads(await asyncio.wait_for(reader.readexactly(length), 3))
                 if not isinstance(body, dict) or not isinstance(body.get('active'), bool):
                     return await reply(writer, 400, {'error': 'invalid mode'})
+                if body['active'] and not policy_allows_input(self):
+                    return await reply(writer,403,{'error':'device input disabled by policy'})
                 async with input_lock(self):
                     self._batch_active = False
                     while not self._hid_queue.empty():

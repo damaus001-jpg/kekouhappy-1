@@ -1,12 +1,13 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const source=fs.readFileSync(require('node:path').join(__dirname,'web/viewer.js'),'utf8');
 const callbacks=new Map(),timers=[],rafs=[],canceled=[];let clock=1000,id=0;
-const context=vm.createContext({performance:{now:()=>clock},setTimeout:(f,ms)=>{callbacks.set(++id,f);timers.push({id,ms});return id;},clearTimeout:n=>{canceled.push(n);callbacks.delete(n);},requestAnimationFrame:f=>{callbacks.set(++id,f);rafs.push(id);return id;},cancelAnimationFrame:n=>{canceled.push(n);callbacks.delete(n);}});
+const context=vm.createContext({document:{hidden:false},performance:{now:()=>clock},setTimeout:(f,ms)=>{callbacks.set(++id,f);timers.push({id,ms});return id;},clearTimeout:n=>{canceled.push(n);callbacks.delete(n);},requestAnimationFrame:f=>{callbacks.set(++id,f);rafs.push(id);return id;},cancelAnimationFrame:n=>{canceled.push(n);callbacks.delete(n);}});
 vm.runInContext(`let batchManaged=true,batchSelected=false,lastCanvasDrawAt=0,frameCount=0;
 const BACKGROUND_DRAW_INTERVAL_MS=3000,OFFLINE_GRACE_SECS=3;
 let _lastFc=0,_stableSec=0,_nextPliSec=0,_nextRestartSec=0;
 const offlineOverlay={classList:{add(){}}};const painted=[],closed=[];
 const videoConnection={frame(){},promote(){}};
+const videoDiagnostics={decoded:0};
 function fitCanvasToViewport(){} function redrawWithCurrentRotation(){}
 function drawPending(){rafScheduled=false;if(pendingFrame){painted.push(pendingFrame.id);pendingFrame=null;lastCanvasDrawAt=performance.now();}}
 ${source.slice(source.indexOf('let pendingFrame = null;'),source.indexOf('// The most recent decoded VideoFrame'))}

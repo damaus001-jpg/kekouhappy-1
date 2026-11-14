@@ -237,7 +237,9 @@ body{background-image:radial-gradient(ellipse at 8% 0%,#d7b62d0b,transparent 48%
 .monitor-actions{display:flex;gap:14px;align-items:center;flex-wrap:wrap}.monitor-actions label{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted)}
 .monitor-actions select{max-width:150px;background:#242d23;color:var(--ink);border:1px solid #46513c;border-radius:7px;padding:8px;font-size:12px}
 .monitor-notice{min-height:20px;margin:0 0 16px;color:var(--muted);font-size:12px;line-height:1.6}
-.monitor-grid{display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:12px;align-items:start}
+.monitor-grid{display:grid;grid-template-rows:repeat(2,auto);grid-auto-flow:column;grid-auto-columns:var(--monitor-tile-width,160px);gap:12px;align-items:start;overflow-x:auto;overscroll-behavior-x:contain;padding-bottom:12px;scroll-snap-type:x proximity;min-width:0}
+.global-monitor[data-layout="single"] .monitor-grid{grid-template-rows:auto;grid-auto-columns:var(--monitor-tile-width,320px)}
+.global-monitor[data-layout="single"] .monitor-tile{scroll-snap-align:start}
 .monitor-tile{display:flex;flex-direction:column;gap:0;min-width:0;padding:0;overflow:hidden;text-align:left;border:1px solid #384430;border-radius:11px;background:#20291f;color:var(--ink);font-weight:400;transition:border-color .15s,box-shadow .15s}
 .monitor-tile:hover:not(:disabled){filter:none;border-color:#d5bd68;box-shadow:0 0 0 1px #d5bd6855}.monitor-tile:focus-visible{outline:3px solid #d5bd68;outline-offset:3px}
 .monitor-tile-heading{display:flex;align-items:center;justify-content:space-between;gap:4px;padding:9px 8px;min-height:36px;font-size:12px}.monitor-tile-heading strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -245,8 +247,7 @@ body{background-image:radial-gradient(ellipse at 8% 0%,#d7b62d0b,transparent 48%
 .monitor-screen{display:flex;align-items:center;justify-content:center;position:relative;width:100%;aspect-ratio:9/19.5;background:#101610;overflow:hidden}
 .monitor-screen img{width:100%;height:100%;object-fit:contain;display:block}.monitor-screen img[hidden],.monitor-placeholder[hidden]{display:none}
 .monitor-placeholder{padding:10px;text-align:center;color:#96a58d;font-size:11px;line-height:1.7;overflow-wrap:anywhere}
-.monitor-state{display:block;padding:8px 8px 0;font-size:10px;line-height:1.5;color:#a5b399;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:100%}
-.monitor-followup{padding:4px 8px 8px;color:#dac57a;font-size:10px;line-height:1.5}.monitor-stale .monitor-screen img{opacity:.42}.monitor-stale .monitor-state{color:#e0bb78}
+.monitor-stale .monitor-screen img{opacity:.42}
 .monitor-empty{padding:90px 20px;text-align:center;color:var(--muted);line-height:1.8}.monitor-empty[hidden]{display:none}
 .monitor-back{margin:0 0 16px;width:100%;font-size:12px;padding:9px 6px}
 .monitor-selected{border-color:#d5bd68;box-shadow:0 0 0 1px #d5bd6866}.monitor-selected .monitor-tile-heading{color:#f5dc83}
@@ -254,4 +255,12 @@ body{background-image:radial-gradient(ellipse at 8% 0%,#d7b62d0b,transparent 48%
 .global-monitor.monitor-window-fullscreen{position:fixed;inset:0;z-index:900}.monitor-fullscreen-open{overflow:hidden}
 .global-monitor:fullscreen .monitor-header,.monitor-window-fullscreen .monitor-header{position:sticky;top:-22px;z-index:3;background:#151b17;padding-block:12px}
 @media(max-width:1100px){.global-monitor{padding:16px}.monitor-grid{gap:7px}.monitor-tile-heading{font-size:10px;padding:7px 5px}.monitor-state,.monitor-followup{font-size:9px;padding-left:5px;padding-right:5px}}
-@media(max-width:760px){.monitor-grid{grid-template-columns:repeat(5,minmax(0,1fr))}.monitor-header{align-items:flex-start;flex-direction:column;gap:12px}.monitor-header h1 .muted{display:block;margin:6px 0 0}}
+@media(max-width:760px){.monitor-header{align-items:flex-start;flex-direction:column;gap:12px}.monitor-header h1 .muted{display:block;margin:6px 0 0}}
+.monitor-size-control input{width:130px;accent-color:#d5bd68}.monitor-size-control output{min-width:48px;font-variant-numeric:tabular-nums}
+.monitor-actions .scan-toggle{margin:0;padding:0}.monitor-header .app-version{display:inline;margin-left:10px}
+#device-list-state[hidden]{display:none!important}
+@media(min-width:821px){main{grid-template-columns:clamp(270px,30vw,440px) minmax(0,1fr)}body.screen-expanded main{grid-template-columns:clamp(320px,42vw,620px) minmax(0,1fr)}}
+@media(max-width:820px){main,body.screen-expanded main{grid-template-columns:minmax(0,1fr)}}
+/* Let the workbench use wide displays instead of centering a capped panel. */
+main,body.screen-expanded main{max-width:none;width:100%;margin:0;padding:8px;gap:8px}
+.monitor-header>div:first-child{min-width:0;flex:1}.monitor-header .monitor-notice{margin:7px 0 0;max-width:70ch;overflow-wrap:anywhere}

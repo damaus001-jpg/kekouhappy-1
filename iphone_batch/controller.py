@@ -166,10 +166,12 @@ def device_environment(udid):
     # A target cannot inherit another device, remote usbmux, or tunnel routing from its parent.
     env = {key: value for key, value in os.environ.items()
            if not key.startswith('PYMOBILEDEVICE3_') and key != 'USBMUXD_SOCKET_ADDRESS'}
+    from device_policy import load_transport
+    transport = load_transport(Path(__file__).resolve().parent/'.device-data'/'workspace'/'device-policy.json')
     env.update(PYTHONIOENCODING='utf-8', PYTHONUTF8='1', NO_COLOR='1',
                PYMOBILEDEVICE3_UDID=udid,
                PYMOBILEDEVICE3_USBMUX='127.0.0.1:27015',
-               PYMOBILEDEVICE3_DEFAULT_FALLBACK='tunneld')
+               PYMOBILEDEVICE3_DEFAULT_FALLBACK=transport)
     return env
 
 

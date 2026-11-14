@@ -13,7 +13,7 @@ function packet(data) {
 }
 
 async function compatibleVideo() {
-    const context = vm.createContext({Blob});
+    const context = vm.createContext({Blob, performance, videoDiagnostics: {packets: 0}});
     vm.runInContext(source.slice(source.indexOf('async function readCompatibleFrames('), source.indexOf('async function runCompatibleVideo(')), context);
     const firstDecode = deferred(), painted = [], decoded = [];
     let streamControl, reads = 0;
@@ -65,12 +65,14 @@ async function nativeVideo(slow) {
     const decoders = [], requests = [], decoded = [];
     class Decoder {
         static async isConfigSupported() { return {supported: true}; }
-        constructor() { this.state = 'unconfigured'; this.decodeQueueSize = 0; decoders.push(this); }
+        constructor() { this.state = 'unconfigured'; this.decodeQueueSize = 0; this.listeners=new Set();decoders.push(this); }
+        addEventListener(name,fn){if(name==='dequeue')this.listeners.add(fn);}
+        removeEventListener(name,fn){if(name==='dequeue')this.listeners.delete(fn);}
         configure() { this.state = 'configured'; }
         close() { this.state = 'closed'; }
         decode(chunk) {
             decoded.push(chunk.data[0]); this.decodeQueueSize++;
-            if (!slow) queueMicrotask(() => this.decodeQueueSize--);
+            if (!slow) queueMicrotask(() => {this.decodeQueueSize--;for(const listener of this.listeners)listener();});
         }
     }
     let read = false;
@@ -81,9 +83,12 @@ async function nativeVideo(slow) {
             read: async () => read ? {done: true} : (read = true, {value: all, done: false})
         })}}; },
         log() {}, frameCount: 10, pendingFrame: null, navigator: {userAgent: 'test'}, setTimeout,
+        performance, setInterval, clearInterval, clearTimeout, AbortSignal, AbortController,
+        videoStopped: false,
+        window: {addEventListener() {}}, videoDiagnostics: {record(){}, packets: 0},
         videoConnection: {connected(){}}
     });
-    vm.runInContext(source.slice(source.indexOf('async function run()'), source.indexOf('inputMonitor = new InputHealthMonitor(')), context);
+    vm.runInContext(source.slice(source.indexOf('function waitForDecoderDrain('), source.indexOf('inputMonitor = new InputHealthMonitor(')), context);
     await context.run();
     if (slow) {
         assert.deepEqual(decoded, [0, 1, 2, 3, 4, 5, 9, 10], 'overloaded decoder skips dependent deltas until the next key');

@@ -122,6 +122,16 @@ def main():
     parser.add_argument('--device-map',default=str(ROOT/'.device-data'/'workspace'/'device-map.json'))
     args=parser.parse_args()
     access=AccessVerifier()
+    from device_policy import load_enabled, load_transport, load_readonly, save_access, connection_allowed, require_connection
+    policy_path=ROOT/'.device-data'/'workspace'/'device-policy.json'
+    enabled=load_enabled(policy_path)
+    readonly=load_readonly(policy_path)
+    load_transport(policy_path)
+    def control_allowed(device):
+        return connection_allowed(device, enabled) and device['udid'] not in readonly
+    def require_control(device):
+        require_connection(device, enabled)
+        if device['udid'] in readonly:raise ValueError('该设备仅监看，请先允许操作')
     requested=args.udid or [row['udid'] for row in controller.discover()]
     udids=controller.resolve_devices(requested) if requested else []
     if not 1024 <= args.port <= 65535 or not 1024 <= args.base_port <= 65535-len(udids)+1:
@@ -134,6 +144,11 @@ def main():
     from device_registry import DeviceRegistry
     registry=DeviceRegistry(devices,args.base_port,args.port,state_path=args.device_map)
     manager=FocusManager(devices,token)
+    original_transport=manager.transport
+    def guarded_transport(device, active):
+        if active:require_control(device)
+        return original_transport(device, active)
+    manager.transport=guarded_transport
     children={}
     from viewer_retry import ViewerRetryPolicy
     retry_policy=ViewerRetryPolicy()
@@ -152,7 +167,7 @@ def main():
     from device_reconnect import DeviceReconnects, reset_phone_session
     notification_monitor=NotificationMonitor(devices,workspace_service.phone_lock,
         manager.notification_lease,workspace_service.notifications,
-        lambda d: not reconnects.pending(d['udid']) and viewer_ready(d),stopping,
+        lambda d: control_allowed(d) and not reconnects.pending(d['udid']) and viewer_ready(d),stopping,
         lock_for=workspace_service.device_lock,manual_device=lambda: manager.active,
         on_new_cards=play_notification_sound)
     scan_policy_path=ROOT/'.device-data'/'workspace'/'scan-policy.json'
@@ -176,7 +191,10 @@ def main():
                 cancelled=workspace_service.notification_runner.set_enabled(False)
             return {'enabled':notification_monitor.enabled,'cancelled':cancelled}
 
-    def launch_viewer(device):
+    def start_viewer_now(device):
+        if not connection_allowed(device, enabled):
+            device['error']='已停用，未建立连接'
+            return
         port=device['port']
         generations[device['udid']]=generations.get(device['udid'],0)+1
         with input_readiness_lock:
@@ -190,27 +208,72 @@ def main():
                 env=env,stdout=output,stderr=subprocess.STDOUT,
                 creationflags=0x08000000 if os.name=='nt' else 0)
 
+    def launch_viewer(device):
+        if not connection_allowed(device,enabled):
+            device['error']='已手动断开，画面与操作均已关闭'
+            return
+        if startup_queue.request(device):device['error']='排队等待接入，逐台准备画面…'
+
     def stop_viewer(device):
-        import psutil
         child=children.get(device['udid'])
         if child is None or child.poll() is not None:return
-        try:
-            process=psutil.Process(child.pid)
-            command=process.cmdline()
-            if str(ROOT/'controller.py') not in command or device['udid'] not in command:
-                raise RuntimeError('设备进程身份变化，已取消停止')
-            descendants=[p for p in process.children(recursive=True) if p.name().lower().startswith('python')]
-            allowed={str(ROOT/'controller.py'),str(ROOT/'pmd_entry.py')}
-            if any(not allowed.intersection(p.cmdline()) for p in descendants):
-                raise RuntimeError('设备子进程身份变化，已取消停止')
-            for descendant in reversed(descendants):
-                try:descendant.terminate()
-                except psutil.NoSuchProcess:pass
-            process.terminate()
-            _,alive=psutil.wait_procs([process,*descendants],timeout=3)
-            if alive:raise RuntimeError('旧设备进程尚未退出，请稍后重试')
-        except psutil.NoSuchProcess:pass
+        from owned_viewer_process import stop_tree
+        stop_tree(child.pid,ROOT/'controller.py',device['udid'])
         if children.get(device['udid']) is child:children.pop(device['udid'],None)
+
+    def change_device_access(device, changes):
+        nonlocal enabled, readonly
+        with registry.lock:
+            if device not in devices:raise ValueError('该手机已断开，请刷新设备列表')
+            if reconnects.pending(device['udid']) or device['udid'] in trust_pending:
+                raise ValueError('该手机正在连接或确认信任，请稍后操作')
+            if not workspace_service.phone_lock.acquire(blocking=False):
+                raise ValueError('手机任务正在执行，完成后再切换，草稿保持不变')
+            lock=workspace_service.device_lock(device['udid'])
+            acquired=False
+            try:
+                acquired=lock.acquire(blocking=False)
+                if not acquired:raise ValueError('该手机正在处理任务，请稍后再切换')
+                next_enabled=set(enabled if enabled is not None else registry.known)
+                next_readonly=set(readonly)
+                target=device['udid']
+                if 'enabled' in changes:
+                    if changes['enabled']:next_enabled.add(target)
+                    else:next_enabled.discard(target)
+                if 'readonly' in changes:
+                    if changes['readonly']:next_readonly.add(target)
+                    else:next_readonly.discard(target)
+                save_access(policy_path, next_enabled, next_readonly)
+                enabled,readonly=frozenset(next_enabled),frozenset(next_readonly)
+                generations[target]=generations.get(target,0)+1
+                with input_readiness_lock:input_readiness.pop(target,None)
+                if not control_allowed(device):
+                    with manager.lock:
+                        if manager.active==target:
+                            try:manager.transport(device,False)
+                            except Exception:stop_viewer(device)
+                            manager.active=None
+                if not connection_allowed(device, enabled):
+                    startup_queue.cancel(target)
+                    stop_viewer(device)
+                    retry_policy.reset(target)
+                    device['error']='已手动断开，画面与操作均已关闭'
+                    message='已断开此台，停止画面、解码和操作；不会自动重连'
+                else:
+                    child=children.get(target)
+                    if child is None or child.poll() is not None:
+                        retry_policy.reset(target)
+                        device['error']='正在接入此台…'
+                        launch_viewer(device)
+                        message='已请求接入此台，正在准备画面'
+                    else:
+                        message='仅监看，鼠标、键盘、粘贴和手机操作已锁定' if target in readonly else '已允许操作'
+                        if manager.selected==target and control_allowed(device):manager.select(target,ready=True)
+                return {'ok':True,'enabled':connection_allowed(device,enabled),
+                        'readonly':target in readonly,'message':message}
+            finally:
+                if acquired:lock.release()
+                workspace_service.phone_lock.release()
 
     def refresh_connected_devices():
         discovered=controller.discover()
@@ -220,9 +283,11 @@ def main():
                 if manager.active not in {d['udid'] for d in devices}:manager.active=None
                 if manager.selected not in {d['udid'] for d in devices}:manager.selected=None
             notification_monitor.update_devices(devices)
-            for device in removed:stop_viewer(device)
+            for device in removed:
+                startup_queue.cancel(device['udid'])
+                stop_viewer(device)
             for device in devices:
-                if device['udid'] in trust_pending or reconnects.pending(device['udid']):continue
+                if device['udid'] in trust_pending or reconnects.pending(device['udid']) or startup_queue.pending(device['udid']):continue
                 child=children.get(device['udid'])
                 if child is not None and child.poll() is None:continue
                 with input_readiness_lock:
@@ -236,6 +301,8 @@ def main():
         while not stopping.wait(3):
           with registry.lock:
             for device in list(devices):
+                if not connection_allowed(device, enabled):continue
+                if startup_queue.pending(device['udid']):continue
                 if device['udid'] in trust_pending or reconnects.pending(device['udid']):continue
                 child=children.get(device['udid'])
                 if child is not None and child.poll() is None:
@@ -269,6 +336,7 @@ def main():
                 except OSError:device['error']='投屏启动失败，正在重试'
 
     def viewer_ready(device):
+        if not connection_allowed(device, enabled):return False
         child=children.get(device['udid'])
         if child is None or child.poll() is not None:return False
         try:
@@ -282,6 +350,7 @@ def main():
 
     def viewer_video_ready(device):
         """Reconnect is complete only after the phone has supplied a decodable video config."""
+        if not connection_allowed(device, enabled):return False
         child=children.get(device['udid'])
         if child is None or child.poll() is not None:return False
         try:
@@ -294,13 +363,17 @@ def main():
         except (OSError,ValueError,TypeError):
             return False
 
-    def record_input_readiness(udid, future):
+    def record_input_readiness(udid, future, generation=None):
+        if generation is not None and generation!=generations.get(udid,0):return
+        if not control_allowed({'udid':udid}):return
         now=time.monotonic()
         try:
             result=future.result()
         except Exception:
             result={'ok':False,'state':'unavailable'}
         with input_readiness_lock:
+            if generation is not None and generation!=generations.get(udid,0):return
+            if not control_allowed({'udid':udid}):return
             previous=input_readiness.get(udid,{})
             if result.get('state')=='busy':
                 last_success=previous.get('last_success',0)
@@ -314,6 +387,7 @@ def main():
                 'probe':result.get('probe')}
 
     def probe_input_readiness(device):
+        require_control(device)
         request=urllib.request.Request(
             f"http://127.0.0.1:{device['port']}/input-readiness", data=b'{}',
             headers={'Content-Type':'application/json','X-Control-Token':token}, method='POST')
@@ -335,19 +409,20 @@ def main():
         # Probe in small batches so a 15-phone hub is not hit with 15 new HID
         # handshakes at once. Idle-state reports contain no pressed keys/touches.
         while not stopping.is_set():
-            current=[device for device in devices if device['udid'] not in trust_pending and not reconnects.pending(device['udid'])]
+            current=[device for device in devices if control_allowed(device) and device['udid'] not in trust_pending and not reconnects.pending(device['udid']) and children.get(device['udid']) is not None and children[device['udid']].poll() is None]
             for offset in range(0,len(current),4):
                 if stopping.is_set():return
                 batch=current[offset:offset+4]
                 futures=[]
                 for device in batch:
                     future=input_readiness_pool.submit(probe_input_readiness,device)
-                    future.add_done_callback(lambda result, device=device: record_input_readiness(device['udid'],result))
+                    future.add_done_callback(lambda result, device=device, generation=generations.get(device['udid'],0): record_input_readiness(device['udid'],result,generation))
                     futures.append(future)
                 wait(futures,timeout=7)
             stopping.wait(3)
 
     def rebuild_device(device):
+        require_connection(device, enabled)
         lock=workspace_service.device_lock(device['udid'])
         acquired=False
         try:
@@ -360,6 +435,7 @@ def main():
                     acquired=lock.acquire(blocking=False)
                     if not acquired:raise ValueError('该手机正在处理任务，请稍后重试')
                     with manager.lock:
+                        startup_queue.cancel(device['udid'])
                         stop_viewer(device)
                         if manager.active==device['udid']:manager.active=None
                     with input_readiness_lock:input_readiness.pop(device['udid'],None)
@@ -403,7 +479,8 @@ def main():
         device.pop('error',None)
         return True
 
-    reconnects=DeviceReconnects(rebuild_device,viewer_video_ready,finish_reconnect,stopping)
+    reconnects=DeviceReconnects(rebuild_device,viewer_video_ready,finish_reconnect,stopping,
+        queued=lambda device:startup_queue.pending(device['udid']))
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*unused):
@@ -464,7 +541,11 @@ def main():
                 except KeyError:notifications={'state':'waiting','items':[],'card_count':0}
                 if ready:
                     device.pop('error',None)
+                if not connection_allowed(device, enabled):
+                    device['error']='已手动断开，画面与操作均已关闭'
                 rows.append({**device,'ready':ready and not reconnects.pending(device['udid']),'active':manager.active==device['udid'],
+                             'enabled':connection_allowed(device, enabled),
+                             'readonly':device['udid'] in readonly,
                              **reconnects.snapshot(device['udid']),
                              **input_readiness_snapshot(device['udid']), 'trust_pending':device['udid'] in trust_pending,
                              'notifications':notifications})
@@ -473,6 +554,20 @@ def main():
         def do_POST(self):
             if not self.allowed():
                 return self.respond(403,{'error':'请从授权客户端打开短信工作台'})
+            if self.path=='/api/devices/access':
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=1024:raise ValueError('无效请求')
+                    self.connection.settimeout(15)
+                    body=json.loads(self.rfile.read(length))
+                    if not isinstance(body,dict) or set(body)-{'device','enabled','readonly'}:raise ValueError('无效请求')
+                    changes={key:body[key] for key in ('enabled','readonly') if key in body}
+                    if not changes or any(type(value) is not bool for value in changes.values()):raise ValueError('开关状态无效')
+                    device=next((d for d in devices if d['udid']==body.get('device')),None)
+                    if device is None:raise ValueError('请选择已连接 USB 的手机')
+                    return self.respond(200,change_device_access(device,changes))
+                except (ValueError,TypeError) as error:return self.respond(400,{'error':str(error)})
+                except Exception:return self.respond(503,{'error':'设备开关未完成，请检查状态；没有发送短信'})
             if self.path=='/api/notification-scan':
                 try:
                     length=int(self.headers.get('Content-Length','0'))
@@ -494,6 +589,7 @@ def main():
                     if not isinstance(body,dict):raise ValueError('无效请求')
                     device=next((d for d in devices if d['udid']==body.get('device')),None)
                     if device is None:raise ValueError('请选择已连接的手机')
+                    require_connection(device, enabled)
                     if device['udid'] in trust_pending:raise ValueError('该手机正在等待信任确认')
                     identifier=reconnects.begin(device)
                     return self.respond(202,{'ok':True,'job':identifier,'message':'正在重新连接此设备，请稍候'})
@@ -510,6 +606,7 @@ def main():
                     if not isinstance(body,dict):raise ValueError('无效请求')
                     device=next((d for d in devices if d['udid']==body.get('device')),None)
                     if device is None:raise ValueError('请选择已连接的手机')
+                    require_control(device)
                     if reconnects.pending(device['udid']):raise ValueError('该手机正在重新连接，请稍候')
                     if viewer_ready(device):raise ValueError('手机投屏已就绪，无需重新建立信任')
                     lock=workspace_service.device_lock(device['udid'])
@@ -570,6 +667,7 @@ def main():
                     with workspace_service.phone_lock:
                         if not isinstance(udid,str) or udid not in {d['udid'] for d in devices} or manager.selected!=udid:
                             raise ValueError('请先选中要操作的手机')
+                        require_control({'udid':udid})
                         with workspace_service.device_lock(udid):
                             result=reveal_developer_mode(udid)
                     return self.respond(200,result)
@@ -623,6 +721,7 @@ def main():
                     device=next((d for d in devices if d['udid']==body.get('device')),None)
                     with workspace_service.phone_lock:
                         if device is None or manager.active!=device['udid']: raise ValueError('请先选中要操作的手机')
+                        require_control(device)
                         if reconnects.pending(device['udid']):raise ValueError('该手机正在重新连接，请稍候')
                         with workspace_service.device_lock(device['udid']):
                             result=workspace_service.dispatch(device['udid'],body,f"http://127.0.0.1:{device['port']}")
@@ -651,7 +750,7 @@ def main():
                     if target is None:raise ValueError('Unknown device')
                     if reconnects.pending(target['udid']):raise ValueError('该手机正在重新连接，请稍候')
                     if target['udid'] in trust_pending:raise ValueError('该手机正在等待信任确认')
-                    manager.select(body['udid'],ready=viewer_ready(target))
+                    manager.select(body['udid'],ready=control_allowed(target) and viewer_ready(target))
                     readiness=input_readiness_snapshot(body['udid'])
                 return self.respond(200,{'active':manager.active,'selected':manager.selected,**readiness})
             except (ValueError, KeyError, TypeError):
@@ -659,6 +758,27 @@ def main():
             except Exception:
                 return self.respond(503,{'error':'设备切换未完成，请稍后重试','active':manager.active})
 
+    from viewer_start_queue import ViewerStartQueue
+    import psutil
+    def queued_start(device,ticket):
+        with registry.lock:
+            if device not in devices or not startup_queue.valid(device['udid'],ticket) or not connection_allowed(device,enabled):return False
+            start_viewer_now(device)
+            return True
+    def startup_failed(device,error,ticket):
+        with registry.lock:
+            if not startup_queue.valid(device['udid'],ticket) or not connection_allowed(device,enabled):return
+            stop_viewer(device)
+            device['error']=str(error)
+    def startup_ready(device):
+        if not viewer_ready(device):
+            child=children.get(device['udid'])
+            if child is not None and child.poll() is not None:raise RuntimeError('该台接入进程已退出，稍后有界重试')
+            return False
+        return viewer_video_ready(device)
+    startup_queue=ViewerStartQueue(queued_start,startup_ready,
+        lambda device:connection_allowed(device,enabled),startup_failed,stopping,
+        busy=lambda:psutil.cpu_percent(interval=.2)>75)
     server=ThreadingHTTPServer(('127.0.0.1',args.port),Handler)
     server.daemon_threads=True
     try:
@@ -671,6 +791,7 @@ def main():
         server.serve_forever(poll_interval=0.25)
     finally:
         stopping.set()
+        startup_queue.close()
         health_pool.shutdown(wait=False,cancel_futures=True)
         input_readiness_pool.shutdown(wait=False,cancel_futures=True)
         server.server_close()
