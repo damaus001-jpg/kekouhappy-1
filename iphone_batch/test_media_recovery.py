@@ -56,7 +56,9 @@ class MediaRecoveryRunnerTests(unittest.TestCase):
             self.assertTrue(reset_phone_session({'udid':'phone-one'})['ok'])
         self.assertIn('reset-workspace-session',launch.call_args.args[0])
         self.assertEqual(launch.call_args.kwargs['env']['PYMOBILEDEVICE3_UDID'],'phone-one')
-        process.communicate.assert_called_once_with(timeout=28)
+        self.assertEqual(process.communicate.call_count,1)
+        self.assertGreater(process.communicate.call_args.kwargs['timeout'],0)
+        self.assertLessEqual(process.communicate.call_args.kwargs['timeout'],1)
 
     def test_incomplete_cleanup_never_claims_success(self):
         for value in [{'ok':True},{'remote_session_reset':True,'input_events_sent':True}]:

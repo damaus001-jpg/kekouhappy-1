@@ -8,7 +8,7 @@ async function until(client,expression,timeout=15000){
 }
 async function main(){
  const live=process.argv.includes('--live'),metadataOnly=process.argv.includes('--metadata-only');let selected=null,server=null,port=8070;
- const modes=new Map();
+ const modes=new Map(),reconnectJobs=new Map();
  if(!live){
   server=http.createServer(async(req,res)=>{
    const url=new URL(req.url,'http://127.0.0.1');
@@ -20,7 +20,17 @@ async function main(){
     if(e.data.type==='monitor-snapshot'){ctx.fillStyle='hsl('+((++tick*39)%360)+' 35% 25%)';ctx.fillRect(0,0,240,520);ctx.fillStyle='#fff';ctx.font='24px sans-serif';ctx.fillText('Phone '+tick,24,65);c.toBlob(image=>parent.postMessage({type:'monitor-snapshot-result',id:e.data.id,image,state:'streaming'},e.origin),'image/jpeg');}});
     </script>`);return;
    }
-   if(url.pathname==='/api/state')return json({active:selected,selected,scan_enabled:false,devices:Array.from({length:20},(_,i)=>{const mode=modes.get('mock-'+i)||{enabled:true,readonly:false};return {udid:'mock-'+i,name:'iPhone '+(i+1),number:String(i+1).padStart(2,'0'),port,...mode,ready:mode.enabled,control_ready:mode.enabled&&!mode.readonly,error:mode.enabled?null:'已手动断开，画面与操作均已关闭'};})});
+   if(url.pathname==='/api/state')return json({active:selected,selected,scan_enabled:false,devices:Array.from({length:20},(_,i)=>{
+    const mode=modes.get('mock-'+i)||{enabled:true,readonly:false},job=reconnectJobs.get('mock-'+i)||{};
+    return {udid:'mock-'+i,name:'iPhone '+(i+1),number:String(i+1).padStart(2,'0'),port,...mode,...job,
+     ready:mode.enabled&&!job.reconnecting,control_ready:mode.enabled&&!mode.readonly&&!job.reconnecting,error:mode.enabled?null:'已手动断开，画面与操作均已关闭'};
+   })});
+   if(url.pathname==='/api/devices/reconnect'){
+    let body='';for await(const part of req)body+=part;const {device}=JSON.parse(body),job='reconnect-'+device;
+    reconnectJobs.set(device,{reconnecting:true,reconnect_id:job,reconnect_state:'reconnecting',reconnect_stage:'trusting',reconnect_elapsed:0});
+    setTimeout(()=>reconnectJobs.set(device,{reconnecting:false,reconnect_id:job,reconnect_state:'ready',reconnect_stage:'ready',reconnect_elapsed:1.2}),1200);
+    return json({ok:true,job});
+   }
    if(url.pathname==='/api/devices/access'){
     let body='';for await(const part of req)body+=part;const value=JSON.parse(body),mode={enabled:true,readonly:false,...modes.get(value.device)};
     for(const key of ['enabled','readonly'])if(typeof value[key]==='boolean')mode[key]=value[key];
@@ -139,6 +149,17 @@ async function main(){
    // Foreign windows and old request identifiers must not replace an image.
    assert(await client.evaluate(`(()=>{const tile=globalMonitor.tiles.get('mock-2'),old=tile.image.src;globalMonitor.receive({source:window,origin:location.origin,data:{type:'monitor-snapshot-result',id:tile.pending,image:new Blob(['bad'],{type:'image/jpeg'})}});return tile.image.src===old;})()`));
    await client.evaluate("document.getElementById('monitor-back').click()");await until(client,'scrollY<5');
+  }
+  if(!live){
+   await client.evaluate(`window.reconnectFrames=new Map([...cards].map(([id,card])=>[id,card.frame]));document.querySelector('.monitor-tile[data-udid="mock-5"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:80,clientY:80}))`);
+   assert(await client.evaluate("document.getElementById('device-context-reconnect').title.includes('修复此台信任')"));
+   await client.evaluate("document.getElementById('device-context-reconnect').click()");
+   await until(client,"document.getElementById('monitor-notice').textContent.includes('检查并修复信任')");
+   assert(await client.evaluate("globalMonitor.tiles.get('mock-5').placeholder.textContent.includes('检查并修复信任')&&[...cards].every(([id,card])=>id==='mock-5'||card.frame===reconnectFrames.get(id))"));
+   await until(client,"document.getElementById('monitor-notice').textContent.includes('系统会话与连接已重建')");
+   await until(client,"document.querySelectorAll('#selected iframe').length===20");
+   await until(client,"!globalMonitor.tiles.get('mock-5').image.hidden");
+   assert(await client.evaluate("[...cards].every(([id,card])=>id==='mock-5'||card.frame===reconnectFrames.get(id))"));
   }
   const result=await client.evaluate(`({tiles:document.querySelectorAll('.monitor-tile').length,images:document.querySelectorAll('.monitor-screen img:not([hidden])').length,ready:document.getElementById('monitor-count').textContent})`);
   if(!metadataOnly){

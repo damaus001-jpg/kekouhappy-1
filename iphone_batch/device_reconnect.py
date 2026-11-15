@@ -5,37 +5,71 @@ import uuid
 import json
 import os
 import subprocess
+import sys
+from pathlib import Path
 
-def reset_phone_session(device):
+def _run_device_command(device, command, timeout, timeout_message, stopping=None):
     import controller
     import psutil
-    command=controller.command_for(device['udid'],['developer','core-device','display','reset-workspace-session'])
+    if stopping is not None and stopping.is_set():
+        raise ValueError('工作台正在关闭，设备恢复已停止')
     process=subprocess.Popen(command,env=controller.device_environment(device['udid']),
         stdout=subprocess.PIPE,stderr=subprocess.PIPE,encoding='utf-8',errors='replace',
         creationflags=0x08000000 if os.name=='nt' else 0)
-    try:
-        stdout,stderr=process.communicate(timeout=28)
-    except subprocess.TimeoutExpired:
-        # Windows venv launchers have a real Python child. Stop the diagnostic
-        # process tree as well, so a timeout cannot leave a late media teardown.
+    deadline=time.monotonic()+timeout
+    while True:
+        if stopping is not None and stopping.is_set():
+            reason='工作台正在关闭，设备恢复已停止'
+            break
+        remaining=deadline-time.monotonic()
+        if remaining<=0:
+            reason=timeout_message
+            break
         try:
-            parent=psutil.Process(process.pid)
-            descendants=parent.children(recursive=True)
-            for child in reversed(descendants):
-                if child.name().lower().startswith('python'):
-                    try:child.kill()
-                    except psutil.NoSuchProcess:pass
-        except psutil.NoSuchProcess:pass
-        if process.poll() is None:process.kill()
-        process.communicate(timeout=3)
-        raise ValueError('手机端会话清理超时，请检查 USB 和手机状态后重试') from None
+            stdout,stderr=process.communicate(timeout=min(1,remaining))
+            return process.returncode,stdout,stderr
+        except subprocess.TimeoutExpired:
+            continue
+    # Windows venv launchers have a real Python child. Never leave a late
+    # pairing request or media teardown running after cancellation/timeout.
+    try:
+        parent=psutil.Process(process.pid)
+        descendants=parent.children(recursive=True)
+        for child in reversed(descendants):
+            if child.name().lower().startswith('python'):
+                try:child.kill()
+                except psutil.NoSuchProcess:pass
+    except psutil.NoSuchProcess:pass
+    if process.poll() is None:process.kill()
+    process.communicate(timeout=3)
+    raise ValueError(reason)
+
+
+def repair_phone_trust(device, stopping=None):
+    """Only explicit page actions use this; normal viewer retries never pair."""
+    command=[sys.executable,str(Path(__file__).with_name('device_trust.py')),'--device',device['udid']]
+    code,stdout,_=_run_device_command(device,command,90,
+        '信任修复超时，请保持手机解锁；若有信任提示，请在手机确认后重试',stopping)
+    try:result=json.loads(stdout.strip().splitlines()[-1])
+    except (ValueError,IndexError):raise ValueError('信任修复未返回有效结果，请检查手机连接') from None
+    if not isinstance(result,dict):raise ValueError('信任修复未返回有效结果，请检查手机连接')
+    if code or result.get('ok') is not True:
+        raise ValueError(result.get('error') or '信任修复未完成，请检查手机上的提示后重试')
+    return result
+
+
+def reset_phone_session(device, stopping=None):
+    import controller
+    command=controller.command_for(device['udid'],['developer','core-device','display','reset-workspace-session'])
+    code,stdout,stderr=_run_device_command(device,command,28,
+        '手机端会话清理超时，请检查 USB 和手机状态后重试',stopping)
     try:result=json.loads(stdout.strip().splitlines()[-1])
     except (ValueError,IndexError):result={}
-    if process.returncode or result.get('remote_session_reset') is not True or result.get('input_events_sent') is not False:
+    if code or not isinstance(result,dict) or result.get('remote_session_reset') is not True or result.get('input_events_sent') is not False:
         detail=(stderr or stdout).strip().splitlines()
         detail='；'.join(line.strip() for line in detail[-2:] if line.strip())[-320:]
         reason=f'，设备返回：{detail}' if detail else ''
-        raise ValueError(f'手机端媒体/触控会话清理未确认完成（退出码 {process.returncode}）{reason}')
+        raise ValueError(f'手机端媒体/触控会话清理未确认完成（退出码 {code}）{reason}')
     return result
 
 class DeviceReconnects:
@@ -72,8 +106,10 @@ class DeviceReconnects:
     def _run(self, device, identifier):
         started=time.monotonic()
         try:
-            deadline=started+self.timeout
             self.rebuild(device)
+            # Trust confirmation and session cleanup each have their own
+            # bounds. Give video readiness its full budget after preparation.
+            deadline=time.monotonic()+self.timeout
             waited_for_startup=False
             while not self.stopping.is_set():
                 if self.queued(device):

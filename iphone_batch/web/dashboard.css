@@ -258,9 +258,16 @@ body{background-image:radial-gradient(ellipse at 8% 0%,#d7b62d0b,transparent 48%
 @media(max-width:760px){.monitor-header{align-items:flex-start;flex-direction:column;gap:12px}.monitor-header h1 .muted{display:block;margin:6px 0 0}}
 .monitor-size-control input{width:130px;accent-color:#d5bd68}.monitor-size-control output{min-width:48px;font-variant-numeric:tabular-nums}
 .monitor-actions .scan-toggle{margin:0;padding:0}.monitor-header .app-version{display:inline;margin-left:10px}
+.runtime-status{display:inline-flex;align-items:center;gap:8px;margin-left:10px;white-space:nowrap}.monitor-header .runtime-status .app-version{margin:0}
+.cpu-usage{display:inline-block;padding:1px 7px;border:1px solid #45513e;border-radius:5px;color:#b9d5ac;font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums;white-space:nowrap}
+.cpu-usage[data-level="unknown"]{color:var(--muted)}.cpu-usage[data-level="high"]{color:#f1cc6e;border-color:#8d753d}.cpu-usage[data-level="critical"]{color:#ff9285;border-color:#a65548}
 #device-list-state[hidden]{display:none!important}
-@media(min-width:821px){main{grid-template-columns:clamp(270px,30vw,440px) minmax(0,1fr)}body.screen-expanded main{grid-template-columns:clamp(320px,42vw,620px) minmax(0,1fr)}}
+@media(min-width:821px){main{grid-template-columns:var(--phone-column-width,clamp(270px,30vw,440px)) minmax(0,1fr)}body.screen-expanded main{grid-template-columns:var(--phone-column-width,clamp(320px,42vw,620px)) minmax(0,1fr)}}
 @media(max-width:820px){main,body.screen-expanded main{grid-template-columns:minmax(0,1fr)}}
 /* Let the workbench use wide displays instead of centering a capped panel. */
 main,body.screen-expanded main{max-width:none;width:100%;margin:0;padding:8px;gap:8px}
-.monitor-header>div:first-child{min-width:0;flex:1}.monitor-header .monitor-notice{margin:7px 0 0;max-width:70ch;overflow-wrap:anywhere}
+.phone-panel{min-width:0}
+.phone-panel>.section-title{height:auto;gap:6px}
+.phone-panel>.section-title h2{flex:1 0 100%}
+.phone-panel .monitor-back{margin:0;flex-basis:100%}
+.monitor-header>div:first-child{min-width:160px;flex:1}.monitor-header .monitor-notice{margin:7px 0 0;max-width:70ch;overflow-wrap:anywhere}

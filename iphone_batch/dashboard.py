@@ -39,6 +39,30 @@ def play_notification_sound(device):
         winsound.PlaySound('SystemNotification',winsound.SND_ALIAS | winsound.SND_ASYNC)
 
 
+class CpuUsage:
+    """Cache whole-computer load; HTTP threads never take blocking CPU samples."""
+    def __init__(self):
+        self.sample = (None, 0)
+
+    def run(self, stopping):
+        import psutil
+        primed = False
+        while not stopping.is_set():
+            try:
+                percent = psutil.cpu_percent(interval=None)
+                # The first read only establishes this thread's baseline.
+                self.sample = (round(percent, 1), time.monotonic()) if primed else (None, 0)
+                primed = True
+            except Exception:
+                self.sample = (None, 0)
+                primed = False
+            stopping.wait(1)
+
+    def snapshot(self):
+        percent, sampled_at = self.sample
+        return percent if time.monotonic() - sampled_at <= 5 else None
+
+
 class FocusManager:
     def __init__(self, devices, token, transport=None):
         self.devices = devices
@@ -164,7 +188,7 @@ def main():
     trust_pending=set()
     trust_lock=threading.Lock()
     from notification_monitor import NotificationMonitor
-    from device_reconnect import DeviceReconnects, reset_phone_session
+    from device_reconnect import DeviceReconnects, reset_phone_session, repair_phone_trust
     notification_monitor=NotificationMonitor(devices,workspace_service.phone_lock,
         manager.notification_lease,workspace_service.notifications,
         lambda d: control_allowed(d) and not reconnects.pending(d['udid']) and viewer_ready(d),stopping,
@@ -440,13 +464,17 @@ def main():
                         if manager.active==device['udid']:manager.active=None
                     with input_readiness_lock:input_readiness.pop(device['udid'],None)
                 finally:workspace_service.phone_lock.release()
-            # Keep only this phone's operation lock while its on-device
-            # sessions are reset. Other phones remain usable during cleanup.
+            # Only this explicit reconnect repairs trust. Keep the target's
+            # lock while other phones remain usable during confirmation.
+            reconnects.stage(device['udid'],'trusting')
+            device['error']='正在检查并修复信任连接；若手机弹出提示，请确认信任'
+            repair_phone_trust(device,stopping=stopping)
+            if stopping.is_set():raise ValueError('工作台正在关闭，设备恢复已停止')
             reconnects.stage(device['udid'],'resetting')
             device['error']='正在清理手机端远程会话…'
             reset_error=None
             try:
-                reset_phone_session(device)
+                reset_phone_session(device,stopping=stopping)
             except Exception as error:
                 # The cleanup command can fail on a stale USB tunnel even when
                 # a fresh viewer session can still be established. Preserve
@@ -454,11 +482,15 @@ def main():
                 reset_error=str(error)[:320]
             with registry.lock:
                 if device not in devices:raise ValueError('手机已断开，请重新接入后刷新')
+                if stopping.is_set():raise ValueError('工作台正在关闭，设备恢复已停止')
                 reconnects.stage(device['udid'],'starting')
                 device['error']=('会话清理未确认，正在直接重建投屏：'+reset_error
                     if reset_error else '正在重建画面与操控连接…')
                 retry_policy.reset(device['udid'])
                 launch_viewer(device)
+        except Exception as error:
+            device['error']=str(error) if isinstance(error,(ValueError,RuntimeError)) else '重新连接未完成，请检查手机状态后重试'
+            raise
         finally:
             if acquired:lock.release()
 
@@ -481,6 +513,8 @@ def main():
 
     reconnects=DeviceReconnects(rebuild_device,viewer_video_ready,finish_reconnect,stopping,
         queued=lambda device:startup_queue.pending(device['udid']))
+
+    cpu_usage = CpuUsage()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*unused):
@@ -549,7 +583,7 @@ def main():
                              **reconnects.snapshot(device['udid']),
                              **input_readiness_snapshot(device['udid']), 'trust_pending':device['udid'] in trust_pending,
                              'notifications':notifications})
-            return self.respond(200,{'devices':rows,'active':manager.active,'selected':manager.selected,'scan_enabled':notification_monitor.enabled,'translation_enabled':False})
+            return self.respond(200,{'devices':rows,'active':manager.active,'selected':manager.selected,'scan_enabled':notification_monitor.enabled,'translation_enabled':False,'cpu_percent':cpu_usage.snapshot()})
 
         def do_POST(self):
             if not self.allowed():
@@ -615,16 +649,11 @@ def main():
                     with trust_lock:
                         if device['udid'] in trust_pending:raise ValueError('该手机正在等待信任确认')
                         trust_pending.add(device['udid'])
-                    device['error']='正在等待信任确认，请解锁手机、点击信任并输入密码'
+                    device['error']='正在检查并修复信任连接；若手机弹出提示，请确认信任'
                     with manager.lock:
                         if manager.active==device['udid']:manager.active=None
                     stop_viewer(device)
-                    process=subprocess.run([sys.executable,str(ROOT/'device_trust.py'),'--device',device['udid']],
-                        env=controller.device_environment(device['udid']),capture_output=True,encoding='utf-8',
-                        timeout=90,creationflags=0x08000000 if os.name=='nt' else 0)
-                    try:result=json.loads(process.stdout.strip().splitlines()[-1])
-                    except (ValueError,IndexError):raise ValueError('配对未返回有效结果，请检查手机连接')
-                    if process.returncode or not result.get('ok'):raise ValueError(result.get('error','建立信任失败'))
+                    result=repair_phone_trust(device,stopping=stopping)
                     with registry.lock:
                         if device['udid'] not in {d['udid'] for d in devices}:raise ValueError('信任已建立，但手机已断开，请重新连接')
                         retry_policy.reset(device['udid'])
@@ -781,7 +810,9 @@ def main():
         busy=lambda:psutil.cpu_percent(interval=.2)>75)
     server=ThreadingHTTPServer(('127.0.0.1',args.port),Handler)
     server.daemon_threads=True
+    cpu_thread=threading.Thread(target=cpu_usage.run,args=(stopping,),name='system-cpu',daemon=True)
     try:
+        cpu_thread.start()
         for device in devices:
             launch_viewer(device)
         threading.Thread(target=watch_viewers,daemon=True).start()
@@ -791,6 +822,7 @@ def main():
         server.serve_forever(poll_interval=0.25)
     finally:
         stopping.set()
+        if cpu_thread.is_alive():cpu_thread.join(timeout=2)
         startup_queue.close()
         health_pool.shutdown(wait=False,cancel_futures=True)
         input_readiness_pool.shutdown(wait=False,cancel_futures=True)

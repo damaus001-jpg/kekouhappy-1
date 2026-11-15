@@ -1,5 +1,35 @@
 ﻿import unittest
-from dashboard import FocusManager
+from unittest.mock import Mock, patch
+from dashboard import CpuUsage, FocusManager
+
+
+class CpuUsageTests(unittest.TestCase):
+    def readings(self, values):
+        cpu = CpuUsage()
+        observed = []
+        stopping = Mock()
+        stopping.is_set.side_effect = [False] * len(values) + [True]
+        stopping.wait.side_effect = lambda seconds: observed.append(cpu.snapshot())
+        with patch('psutil.cpu_percent', side_effect=values) as read, patch('dashboard.time.monotonic', return_value=10):
+            cpu.run(stopping)
+        self.assertTrue(all(call.kwargs == {'interval': None} for call in read.call_args_list))
+        return observed
+
+    def test_first_sample_is_unknown_and_zero_is_a_valid_reading(self):
+        self.assertEqual(self.readings([25, 0, 87.4]), [None, 0, 87.4])
+
+    def test_sampling_failure_clears_load_and_rewarms_before_recovery(self):
+        self.assertEqual(self.readings([25, 91, OSError('unavailable'), 45, 62]),
+                         [None, 91, None, None, 62])
+
+    def test_stale_sample_is_not_reported_as_current_load(self):
+        cpu = CpuUsage()
+        self.assertIsNone(cpu.snapshot())
+        cpu.sample = (80, 10)
+        with patch('dashboard.time.monotonic', return_value=14):
+            self.assertEqual(cpu.snapshot(), 80)
+        with patch('dashboard.time.monotonic', return_value=16):
+            self.assertIsNone(cpu.snapshot())
 
 class FocusTests(unittest.TestCase):
     def setUp(self):

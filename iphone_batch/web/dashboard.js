@@ -107,8 +107,8 @@ class GlobalMonitor {
   const waiting=ready&&!tile.received&&tile.firstRequestAt&&now-tile.firstRequestAt>15000;
   tile.node.classList.toggle('monitor-stale',!!stale||tile.streamState==='retrying'||!ready);
   tile.placeholder.hidden=!!tile.url;
-  tile.placeholder.textContent='暂无画面';
-  const status=!ready?tile.device.error||'正在准备投屏':stale?'更新中断，保留上次画面':tile.streamState==='retrying'?'画面重连中':waiting?'首帧等待超时':tile.received?'画面已显示':'等待首帧';
+  const status=tile.device.enabled===false?'已断开，右键选择“接入此台”':tile.device.trust_pending?'正在检查并修复信任，如手机弹窗请确认':tile.device.reconnecting?(tile.device.reconnect_stage==='trusting'?'正在检查并修复信任，如手机弹窗请确认':'正在重新连接，请稍候'):!ready?tile.device.error||tile.device.reconnect_error||'正在准备手机画面，请稍候':stale?'更新中断，保留上次画面':tile.streamState==='retrying'?'画面重连中':waiting?'暂未收到手机画面，可右键重新连接此设备':tile.received?'画面已显示':'正在等待手机画面';
+  tile.placeholder.textContent=status;
   tile.node.setAttribute('aria-label',tile.number.textContent+'，'+status+'；点击进入操作，右键管理设备');
  }
  tick(){
@@ -140,6 +140,26 @@ class GlobalMonitor {
 
 
 const cards=new Map();let active=null;let busy=false;let latest=[];let controlPaused=false;
+const workbench=document.querySelector('main'),phoneViewport=document.getElementById('selected');
+let phoneLayoutFrame=null;
+function schedulePhoneLayout(){
+ if(phoneLayoutFrame===null)phoneLayoutFrame=requestAnimationFrame(updatePhoneLayout);
+}
+function updatePhoneLayout(){
+ phoneLayoutFrame=null;
+ if(window.innerWidth<=820||!phoneViewport.clientHeight)return;
+ const aspect=cards.get(active)?.videoAspect||9/19.5;
+ const expanded=document.body.classList.contains('screen-expanded');
+ const limit=Math.min(expanded?620:440,Math.max(expanded?320:270,window.innerWidth*(expanded ? .42 : .30)));
+ // The embedded stage reserves 12px padding and 4px frame clearance;
+ // #selected adds a 2px border. Use source dimensions, never scaled width.
+ const fitted=Math.max(0,phoneViewport.clientHeight-16)*aspect+18;
+ const width=Math.ceil(Math.max(220,Math.min(limit,fitted)))+'px';
+ if(workbench.style.getPropertyValue('--phone-column-width')!==width)workbench.style.setProperty('--phone-column-width',width);
+}
+const phoneLayoutObserver=new ResizeObserver(schedulePhoneLayout);
+phoneLayoutObserver.observe(workbench);phoneLayoutObserver.observe(phoneViewport);
+window.addEventListener('pagehide',()=>{phoneLayoutObserver.disconnect();if(phoneLayoutFrame!==null)cancelAnimationFrame(phoneLayoutFrame);});
 let selectionRevision=0;
 let controlOwner=null;
 const devicePreview=location.hash==='#preview-devices';
@@ -227,6 +247,15 @@ phoneHomeButton?.addEventListener('click',()=>{
  card.frame.contentWindow.postMessage({type:'device-home'},card.origin);
 });
 window.addEventListener('message',event=>{
+ if(event.data?.type==='video-dimensions'){
+  const {width,height}=event.data;
+  if(!Number.isInteger(width)||!Number.isInteger(height)||width<=0||height<=0||width>16384||height>16384)return;
+  for(const [udid,card] of cards){
+   if(!card.frame||event.source!==card.frame.contentWindow||event.origin!==card.origin)continue;
+   card.videoAspect=width/height;if(udid===active)schedulePhoneLayout();return;
+  }
+  return;
+ }
  if(event.data?.type==='manual-input-result'){
   const card=cards.get(active);
   if(!card?.frame||event.source!==card.frame.contentWindow||event.origin!==card.origin)return;
@@ -328,6 +357,7 @@ function showDeviceMenu(event,device,index){
  const reconnectButton=document.getElementById('device-context-reconnect');
  reconnectButton.disabled=device.enabled===false||devicePreview||device.trust_pending||device.reconnecting||reconnectRequests.has(device.udid)||workspaceBusy||busy;
  reconnectButton.textContent=device.reconnecting?'正在重新连接…':'重新连接此设备';
+ reconnectButton.title='按需修复此台信任连接，再恢复画面与操控；手机若出现信任提示，请完成确认。';
  trustButton.textContent=(device.trust_pending||trustRequests.has(device.udid))?'正在等待信任确认…':'重新建立信任';
  const followup=deviceLabel(device,index).followup;
  document.getElementById('device-context-followup').setAttribute('aria-checked',String(followup));
@@ -365,7 +395,7 @@ document.getElementById('device-context-trust').addEventListener('click',async()
  const device=target.device,label=deviceLabel(device,target.index).number;
  if(trustRequests.has(device.udid))return;
  trustRequests.add(device.udid);
- notice('设备 '+label+'：请保持手机解锁，在手机上点击“信任”并输入密码，最多等待约一分钟。');
+ notice('设备 '+label+'：正在检查并修复信任，请保持手机解锁；若手机弹出提示，请确认信任。');
  try{
   const response=await fetch('/api/devices/trust',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:device.udid}),signal:AbortSignal.timeout(100000)});
   const result=await response.json();if(!response.ok)throw Error(result.error||'建立信任未完成');
@@ -377,7 +407,7 @@ document.getElementById('device-context-reconnect').addEventListener('click',asy
  const target=deviceMenuTarget;closeDeviceMenu();if(!target||target.device.enabled===false||devicePreview)return;
  const device=target.device,label=deviceLabel(device,target.index).number;
  if(reconnectRequests.has(device.udid)||device.reconnecting||workspaceBusy||busy)return;
- reconnectRequests.add(device.udid);notice('设备 '+label+'：正在重新建立画面与操控连接…');
+ reconnectRequests.add(device.udid);notice('设备 '+label+'：正在检查信任并恢复画面与操控连接…');
  try{
   const response=await fetch('/api/devices/reconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:device.udid}),signal:AbortSignal.timeout(10000)});
   const result=await response.json();if(!response.ok)throw Error(result.error||'重新连接未完成');
@@ -542,6 +572,7 @@ function releasePreview(card){
 }
 function render(rows,selected,controller=controlOwner){
  latest=rows;active=selected;controlOwner=controller;
+ schedulePhoneLayout();
  if(globalMonitor)globalMonitor.selected=selected;
  for(const [udid,job] of accessNotices){
   const row=rows.find(device=>device.udid===udid);
@@ -556,7 +587,7 @@ function render(rows,selected,controller=controlOwner){
    notice('设备 '+job.label+'：'+(row.reconnect_state==='ready'?'系统会话与连接已重建（'+(row.reconnect_elapsed||0)+'秒），请检查左键操控':row.reconnect_error||'重新连接失败，请重试'));
    reconnectNotices.delete(udid);
   }else if(row.reconnect_id===job.job&&row.reconnecting){
-   const stages={stopping:'停止旧连接',resetting:'清理手机端远程会话',starting:'建立新连接',checking:'检查操控通道'};
+   const stages={stopping:'停止旧连接',trusting:'检查并修复信任（若手机弹窗，请确认）',resetting:'清理手机端远程会话',starting:'建立新连接',checking:'检查操控通道'};
    notice('设备 '+job.label+'：正在'+(stages[row.reconnect_stage]||'重新连接')+'，已用时 '+(row.reconnect_elapsed||0)+' 秒…');
   }
  }
@@ -679,10 +710,23 @@ async function select(udid){
  catch(e){active=null;controlOwner=null;notice(e.message);}
  finally{busy=false;render(latest,active);refresh();}
 }
-async function refresh(){if(devicePreview){syncAutoScan(false);render(previewDevices,previewSelection);return;}const revision=selectionRevision,scanVersion=scanRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);if(scanVersion===scanRevision)syncAutoScan(j.scan_enabled);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){notice('管理页面连接中断');}}
+const cpuUsage=document.getElementById('cpu-usage');let cpuUsageExpiry=null;
+function showCpuUsage(value){
+ clearTimeout(cpuUsageExpiry);cpuUsageExpiry=null;
+ if(!cpuUsage)return;
+ const valid=typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=100;
+ const percent=valid?Math.round(value):null;
+ cpuUsage.textContent=valid?'CPU '+percent+'%':'CPU --%';
+ cpuUsage.dataset.level=!valid?'unknown':percent>=90?'critical':percent>=80?'high':'normal';
+ cpuUsage.title=valid?'整台电脑的 CPU 使用率；占用较高时，可断开暂不使用的手机。':'暂时无法获取整台电脑的 CPU 使用率';
+ if(valid)cpuUsageExpiry=setTimeout(()=>showCpuUsage(null),5000);
+}
+window.addEventListener('pagehide',()=>clearTimeout(cpuUsageExpiry));
+async function refresh(){if(devicePreview){showCpuUsage(null);syncAutoScan(false);render(previewDevices,previewSelection);return;}const revision=selectionRevision,scanVersion=scanRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);showCpuUsage(j.cpu_percent);if(scanVersion===scanRevision)syncAutoScan(j.scan_enabled);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){showCpuUsage(null);notice('管理页面连接中断');}}
 refresh();if(!devicePreview)setInterval(refresh,2000);
 document.getElementById('screen-expand').addEventListener('click',e=>{
  const expanded=document.body.classList.toggle('screen-expanded');
  e.currentTarget.textContent=expanded?'恢复布局':'放大画面';
  e.currentTarget.setAttribute('aria-pressed',String(expanded));
+ schedulePhoneLayout();
 });

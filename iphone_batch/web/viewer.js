@@ -154,8 +154,15 @@ const ctx = canvas.getContext('2d');
 // where possible); image-rendering:high-quality keeps that fallback
 // path from going visibly blocky.
 const BEZEL_RATIO = 0.035;   // bezel width / screen short side
+let reportedVideoSize='';
 function fitCanvasToViewport() {
     if (!canvas.width || !canvas.height) return;
+    const videoSize=canvas.width+'x'+canvas.height;
+    if(batchManaged&&reportedVideoSize!==videoSize){
+        reportedVideoSize=videoSize;
+        parent.postMessage({type:'video-dimensions',width:canvas.width,height:canvas.height},
+            new URLSearchParams(location.search).get('manager')||'http://127.0.0.1:8070');
+    }
     const dpr = window.devicePixelRatio || 1;
     const naturalW = canvas.width / dpr;
     const naturalH = canvas.height / dpr;

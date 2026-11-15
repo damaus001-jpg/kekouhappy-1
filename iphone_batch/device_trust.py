@@ -1,4 +1,4 @@
-"""Explicit, single-device trust repair. Ordinary reconnection never calls this."""
+"""Trust repair for explicit page actions; background viewer retries never pair."""
 import argparse
 import asyncio
 import json
