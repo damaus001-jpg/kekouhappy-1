@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, 'web/workspace.js'), 'utf8');
-const code = source.slice(source.indexOf("document.getElementById('paste-to-phone')?."), source.indexOf("draftEl.addEventListener('keydown'"));
+const code = source.slice(source.indexOf('function pasteReplyToPhone()'), source.indexOf("draftEl.addEventListener('keydown'"));
 function setup() {
     let click, receive;
     const messages = [], notices = [];
@@ -40,3 +40,19 @@ assert.equal(switched.ctx.sendBlocked, false);
 assert.equal(switched.ctx.phonePastePending, null);
 assert(!switched.notices.at(-1).includes('点击手机发送按钮'));
 console.log('Manual paste button passed: exact text, duplicate guard, source/origin checks, device switch, draft preservation; no send request');
+
+const enter=setup();let onKey;
+enter.ctx.draftEl.addEventListener=(type,callback)=>{if(type==='keydown')onKey=callback;};
+enter.ctx.submitReplyInput=()=>{throw Error('Enter must never invoke the send path');};
+vm.runInContext(source.slice(source.indexOf("draftEl.addEventListener('keydown'"),source.indexOf('function submitReplyInput()')),enter.ctx);
+let prevented=0;
+onKey({key:'Enter',isComposing:true,preventDefault(){prevented++;}});
+onKey({key:'Enter',shiftKey:true,preventDefault(){prevented++;}});
+assert.equal(enter.messages.length,0);assert.equal(prevented,0);
+onKey({key:'Enter',preventDefault(){prevented++;}});
+onKey({key:'Enter',repeat:true,preventDefault(){prevented++;}});
+assert.equal(enter.messages.length,1);
+assert.equal(enter.messages[0].data.type,'paste-composer');
+assert.equal(enter.messages[0].data.text,enter.ctx.draftEl.value);
+assert.equal(enter.ctx.draftEl.value,'  中文\nHello 🙂  ');
+console.log('Composer Enter passed: shared paste path without a saved conversation, no send, repeat guard, Shift+Enter newline and IME confirmation');

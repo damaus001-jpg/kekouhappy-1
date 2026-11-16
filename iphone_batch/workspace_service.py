@@ -372,6 +372,8 @@ class WorkspaceService:
             merged, aligned = append_verified_window(history, window)
         else:
             merged, aligned = window, True
+        if not aligned and not reason:
+            reason = '当前气泡与已有历史无法唯一衔接'
         uncertain = bool(reason or current.get('unclassified') or not current.get('context_fingerprint'))
         if uncertain:
             aligned = False
@@ -477,6 +479,8 @@ class WorkspaceService:
     def notifications(self, device, base):
         with self.device_lock(device):
             result = self.native(device,'notifications',base)
+            if result.get('complete') is not True:
+                raise ValueError('通知中心扫描未核验完整，已保留上次通知结果')
             pending = []
             for row in result.get('items',[]):
                 if row.get('device')!=device or row.get('app')!='Messages':

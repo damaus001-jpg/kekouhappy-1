@@ -31,7 +31,7 @@ function build(preview=true) {
   return new Promise(()=>{});
  },
  localStorage: {getItem(k) {return stored.get(k)||null;},setItem(k,v) {stored.set(k,v);}},
- console};
+ ResizeObserver:class {observe(){} disconnect(){}},requestAnimationFrame(){return 1;},cancelAnimationFrame(){},console};
  vm.createContext(context);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'web/workspace.js'),'utf8'),context);
  vm.runInContext(source,context);
@@ -110,6 +110,47 @@ assert(app.entries()[0].children[1].textContent.endsWith(' 06'));
 assert(app.entries()[1].children[1].textContent.endsWith(' 10'));
 assert(app.entries()[2].children[1].textContent.endsWith(' A01'));
 console.log('Device UI passed: available viewers first in both sorts, stable labels, per-contact counts, persistence and save failure');
+
+{
+ const shot=build(false);
+ vm.runInContext("loadWorkspace=()=>{};render([{udid:'shot-phone',number:'18',name:'iPhone',port:8080,ready:true}],'shot-phone','shot-phone');",shot.context);
+ const button=shot.nodes.get('phone-screenshot'),dialog=shot.nodes.get('phone-screenshot-dialog');
+ const image=shot.nodes.get('phone-screenshot-image');
+ button.listeners.click();
+ assert.equal(dialog.open,true);
+ assert.match(shot.nodes.get('phone-screenshot-title').textContent,/18/);
+ const card=vm.runInContext("cards.get('shot-phone')",shot.context);
+ const request=card.frame.contentWindow.messages.at(-1).message;
+ assert.equal(request.type,'device-screenshot');
+ const response={source:card.frame.contentWindow,origin:card.origin,data:{type:'device-screenshot-result',id:request.id,image:'iVBORw0KGgo=',captured_at:1700000000}};
+ shot.emit({...response,source:{}});assert.equal(image.hidden,true);
+ shot.emit({...response,origin:'https://example.com'});assert.equal(image.hidden,true);
+ shot.emit(response);assert.equal(image.hidden,false);
+ assert.equal(image.src,'data:image/png;base64,iVBORw0KGgo=');
+ vm.runInContext("render([],null,null);",shot.context);
+ assert.equal(dialog.open,false);assert.equal(image.src,'');
+ assert.equal(button.disabled,true);
+ console.log('Phone screenshot UI passed: selected device, trusted result, static preview and disconnect cleanup');
+}
+
+{
+ const sorted=build(false);
+ assert.equal(sorted.nodes.get('device-sort').value,'number');
+ vm.runInContext(`
+ loadWorkspace=()=>{};
+ const numberedPhones=[
+  {udid:'ten',number:'10',ready:true},
+  {udid:'one',number:'1',ready:false},
+  {udid:'two',number:'2',ready:true},
+  {udid:'three',number:'3',ready:false}
+ ].map((phone,index)=>({...phone,name:'iPhone',port:8080+index}));
+ render(numberedPhones,null,null);
+ `,sorted.context);
+ assert.deepEqual(sorted.entries().map(entry=>entry.dataset.udid),['two','ten','one','three']);
+ vm.runInContext("numberedPhones[1].ready=true;render(numberedPhones,null,null);",sorted.context);
+ assert.deepEqual(sorted.entries().map(entry=>entry.dataset.udid),['one','two','ten','three']);
+ console.log('Number ordering passed: numeric labels, ready devices first, readiness changes reorder the list');
+}
 
 {
  const live=build(false);

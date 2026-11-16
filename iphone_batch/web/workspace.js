@@ -14,7 +14,7 @@ function protectNotificationDraft(){
   body:JSON.stringify({device:workspaceDevice,protected:protectedDraft})}).catch(()=>notificationProtection.delete(workspaceDevice));
 }
 const messagesEl=document.getElementById('messages'), draftEl=document.getElementById('reply-zh');
-function draftKey(){const device=workspaceDevice||(typeof devicePreview!=='undefined'&&devicePreview?'preview:'+active:'');return 'sms-draft:'+device+':'+(currentConversation?.contact||'');}
+function draftKey(){const device=workspaceDevice||(typeof devicePreview!=='undefined'&&devicePreview?'preview:'+active:'');return 'sms-draft:'+device+':'+(currentConversation?.contact||window.ForegroundSync?.number||'');}
 function resizeDraft(){draftEl.style.height='auto';draftEl.style.height=Math.min(draftEl.scrollHeight||44,128)+'px';}
 const emojiPicker=document.getElementById('emoji-picker'),emojiToggle=document.getElementById('toggle-emoji');
 let emojiFloating=false;
@@ -79,7 +79,7 @@ function renderConversation(){
  for(const [index,message] of rows.entries()){
   const node=document.createElement('div');node.className='message '+(message.side==='outgoing'?'outgoing':'incoming');
   node.dataset.messageId=index;
-  const meta=document.createElement('div');meta.className='message-meta';meta.textContent=(message.side==='outgoing'?'我方':message.side==='incoming'?'对方':'待核对')+' · '+(message.time||'时间未知');
+  const meta=document.createElement('div');meta.className='message-meta';meta.textContent=(message.side==='outgoing'?'我方':message.side==='incoming'?'对方':'待核对')+' · '+(message.date_label||message.date||'')+' '+(message.time||'时间未知');
   const bubble=document.createElement('div');bubble.className='bubble';
   const original=document.createElement('div');original.className='original';original.textContent=message.text||(message.kind==='attachment'?'[附件消息]':message.decode_error?'[正文解析未完成]':'[无文字内容]');
   bubble.append(original);node.append(meta,bubble);messagesEl.append(node);
@@ -101,8 +101,9 @@ async function loadWorkspace(device,force=false,preferred=null){
 }
 document.getElementById('refresh-messages').addEventListener('click',()=>loadWorkspace(workspaceDevice,true));
 draftEl.addEventListener('input',()=>{
+ window.ForegroundSync?.activity('draft');
  generatedDraft=null;syncWorkspaceControls();
- if(currentConversation){try{localStorage.setItem(draftKey(),draftEl.value);}catch{notice('浏览器未保存草稿。');}}
+ try{localStorage.setItem(draftKey(),draftEl.value);}catch{notice('浏览器未保存草稿。');}
 });
 
 function syncWorkspaceControls(){
@@ -139,6 +140,7 @@ async function workspaceRequest(action, extra={}, device=workspaceDevice){
 }
 async function operation(text, action){
  if(workspaceBusy)return;
+ window.ForegroundSync?.activity('manual');
  const sendButton=document.getElementById('send-reply');
  workspaceBusy=true;syncWorkspaceControls();notice(text);
  try{await action();}catch(e){
@@ -203,8 +205,9 @@ function replyControlAvailable(){
  return true;
 }
 document.getElementById('send-reply').addEventListener('click',submitReplyInput);
-document.getElementById('paste-to-phone')?.addEventListener('click',()=>{
+function pasteReplyToPhone(){
  if(workspaceBusy||phonePastePending||!draftEl.value.trim()||!replyControlAvailable())return;
+ window.ForegroundSync?.activity('paste');
  const card=cards.get(workspaceDevice);
  if(!card?.frame){notice('手机投屏尚未就绪，请稍后重试');return;}
  const id=crypto.randomUUID(),device=workspaceDevice,revision=workspaceRevision;
@@ -213,14 +216,15 @@ document.getElementById('paste-to-phone')?.addEventListener('click',()=>{
  phonePastePending={id,device,revision,frame:card.frame,origin:card.origin,timer};
  syncWorkspaceControls();notice('正在将正文粘贴到当前手机短信输入框…');
  card.frame.contentWindow.postMessage({type:'paste-composer',id,text},card.origin);
-});
+}
+document.getElementById('paste-to-phone')?.addEventListener('click',pasteReplyToPhone);
 function finishPhonePaste(id,ok,error){
  const pending=phonePastePending;
  if(!pending||pending.id!==id)return;
  clearTimeout(pending.timer);phonePastePending=null;
  if(pending.device===workspaceDevice&&pending.revision===workspaceRevision){
   if(ok)sendBlocked=true;
-  notice(ok?'已请求粘贴正文，请核对手机会话和内容后，点击手机发送按钮。阅读区正文已保留。':error||'粘贴未完成，请检查手机输入框');
+  notice(ok?'粘贴快捷键已发出，请核对手机会话和输入框内容；确认后再点击手机发送按钮。阅读区正文已保留。':error||'粘贴未完成，请检查手机输入框');
  }
  syncWorkspaceControls();
 }
@@ -234,7 +238,7 @@ draftEl.addEventListener('keydown',event=>{
  if(event.key!=='Enter'||event.shiftKey||event.isComposing||event.keyCode===229)return;
  event.preventDefault();
  if(event.repeat)return;
- submitReplyInput();
+ pasteReplyToPhone();
 });
 function submitReplyInput(){
  if(workspaceBusy||phonePastePending||!draftEl.value.trim()||!currentConversation)return;

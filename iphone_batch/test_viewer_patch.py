@@ -51,6 +51,34 @@ class ViewerHTTPFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ClipboardHTTPTests(ViewerHTTPFixture):
+    async def test_device_screenshot_is_signed_and_independent_of_video(self):
+        image = b'\x89PNG\r\n\x1a\nphone screenshot'
+        with patch('viewer_patch.capture_device_screenshot', new_callable=AsyncMock, return_value=image) as capture:
+            code, _ = await self.request(path='/device-screenshot', authorized=False)
+            self.assertEqual(code, 403)
+            code, _ = await self.request(path='/device-screenshot', origin='https://example.com')
+            self.assertEqual(code, 403)
+            capture.assert_not_awaited()
+            code, data = await self.request(path='/device-screenshot')
+            self.assertEqual(code, 200)
+            self.assertEqual(viewer_patch.base64.b64decode(json.loads(data)['image']), image)
+            self.assertIsInstance(json.loads(data)['captured_at'], float)
+            capture.assert_awaited_once_with(self.instance)
+            code, _ = await self.request('POST', {}, path='/device-screenshot')
+            self.assertEqual(code, 405)
+
+    async def test_device_screenshot_busy_and_failure_do_not_leave_a_lock(self):
+        self.instance._batch_screenshot_busy = True
+        with patch('viewer_patch.capture_device_screenshot', new_callable=AsyncMock, side_effect=RuntimeError('device unavailable')) as capture:
+            code, _ = await self.request(path='/device-screenshot')
+            self.assertEqual(code, 409)
+            capture.assert_not_awaited()
+            self.instance._batch_screenshot_busy = False
+            code, data = await self.request(path='/device-screenshot')
+            self.assertEqual(code, 503)
+            self.assertFalse(self.instance._batch_screenshot_busy)
+            self.assertNotIn(b'device unavailable', data)
+
     async def test_browser_video_report_is_signed_bounded_and_not_input_authorization(self):
         report={'client':'browser1','mode':'hevc','state':'streaming','selected':True,
                 'receive_age_ms':12,'decode_age_ms':5000,'queue':0}

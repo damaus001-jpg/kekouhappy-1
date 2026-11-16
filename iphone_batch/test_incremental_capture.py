@@ -110,34 +110,36 @@ class IncrementalTests(unittest.TestCase):
         result=self.read()
         self.assertEqual(self.service.conversation('one',result['conversation_id'])['messages'][0]['translation_zh'],'重新翻译')
 
-    def test_first_read_and_unverified_partial_history_force_database(self):
+    def test_first_read_and_partial_history_show_visible_bubbles_without_backup(self):
         for partial in [False,True]:
             with self.subTest(partial=partial):
                 if partial:
                     self.service.ledger.commit('one',self.contact,[message('Partial')],[],True)
                 with patch.object(self.service,'_backup',return_value=self.fresh()) as backup:
                     result=self.read()
-                backup.assert_called_once();self.assertEqual(result['mode'],'database')
-                self.assertTrue(result['history_complete'])
+                backup.assert_not_called();self.assertEqual(result['mode'],'visible-only')
+                self.assertFalse(result['history_complete'])
 
-    def test_traversal_failure_automatically_reads_database(self):
+    def test_traversal_failure_preserves_history_without_automatic_backup(self):
         self.seed();self.current=ValueError('event_timeout at photo')
         with patch.object(self.service,'_backup',return_value=self.fresh()) as backup:
-            result=self.read()
-        backup.assert_called_once();self.assertEqual(result['mode'],'database')
-        self.assertEqual(result['message_count'],3)
+            with self.assertRaisesRegex(ValueError,'当前气泡读取未完成'):
+                self.read()
+        backup.assert_not_called()
+        self.assertEqual(len(self.service.ledger.load('one',self.contact)['messages']),2)
         self.assertTrue(self.service.ledger.load('one',self.contact)['baseline_complete'])
 
-    def test_gap_or_unclassified_bubble_uses_database(self):
+    def test_gap_or_unclassified_bubble_is_kept_as_unconfirmed_without_backup(self):
         self.seed();self.current['messages']=[message('X'),message('Y')]
         with patch.object(self.service,'_backup',return_value=self.fresh()) as backup:
             result=self.read()
-        backup.assert_called_once();self.assertEqual(result['mode'],'database')
+        backup.assert_not_called();self.assertEqual(result['mode'],'visible-only')
+        self.assertTrue(self.service.ledger.load('one',self.contact)['pending_windows'])
         self.seed();self.current['messages']=list(map(message,['A','B','C']))
         self.current['unclassified']=[{'caption':'unknown'}]
         with patch.object(self.service,'_backup',return_value=self.fresh()) as backup:
             self.read()
-        backup.assert_called_once()
+        backup.assert_not_called()
 
     def test_older_viewport_reads_latest_before_requesting_database(self):
         self.seed();self.current['messages']=[message('Old viewport')]
@@ -152,19 +154,20 @@ class IncrementalTests(unittest.TestCase):
         self.assertEqual(self.actions,['identify','capture','latest'])
         self.assertEqual(result['added'],1)
 
-    def test_failed_database_keeps_history_and_pending_observation(self):
+    def test_uncertain_window_keeps_history_and_pending_observation(self):
         before=self.seed();self.current['messages']=[message('X'),message('Y')]
-        with patch.object(self.service,'_backup',side_effect=ValueError('locked')):
-            with self.assertRaisesRegex(ValueError,'未报为读取完成'):self.read()
+        with patch.object(self.service,'_backup',side_effect=AssertionError('automatic backup prohibited')):
+            self.assertEqual(self.read()['mode'],'visible-only')
         saved=self.service.ledger.load('one',self.contact)
         self.assertEqual(saved['messages'],before['messages'])
         self.assertEqual([m['text'] for m in saved['pending_windows'][-1]['messages']],['X','Y'])
-        self.assertFalse(saved['baseline_complete'])
+        self.assertFalse(saved['overlap_confirmed'])
         # The pending gap cannot be bypassed by a later, apparently matching window.
         self.current['messages']=list(map(message,['A','B','C']))
         with patch.object(self.service,'_backup',return_value=self.fresh()) as backup:
             self.read()
-        backup.assert_called_once()
+        backup.assert_not_called()
+        self.assertTrue(self.service.ledger.load('one',self.contact)['pending_windows'])
 
     def test_switched_recipient_is_not_merged_or_backed_up(self):
         self.seed();self.current['phone_number']='+10987654321'

@@ -1,7 +1,8 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-from message_notifications import parse_notification, open_notification, discover
+from message_notifications import parse_notification, open_notification, discover, is_center, verified_center_page, probe_surface
+from native_ui_scan import ScanResult
 import tempfile
 from workspace_service import WorkspaceService
 from notification_touch import locate,locate_open
@@ -9,6 +10,11 @@ from notification_touch import locate,locate_open
 
 def item(caption, identifier='element-one'):
     return SimpleNamespace(caption=caption, platform_identifier=identifier)
+
+
+def center_items(*extra):
+    return [item('Notification Center, Header', 'center-header'),
+            item('Flashlight, Off, Button', 'flashlight'), item('Camera, Button', 'camera'), *extra]
 
 
 class ParseTests(unittest.TestCase):
@@ -55,9 +61,14 @@ class ParseTests(unittest.TestCase):
 
 
 class OpenTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        probe = patch('message_notifications.probe_surface', AsyncMock(return_value=center_items()))
+        probe.start()
+        self.addCleanup(probe.stop)
+
     async def test_single_notification_can_require_a_second_open_tap(self):
         notification=item('MESSAGES, now, +19562154700, Hello, Button')
-        center=[item('Notification Center, Header'),notification]
+        center=center_items(notification)
         expected=parse_notification(notification.caption,notification.platform_identifier,'one')
         conversation=[item('+19562154700, Show Conversation Details, Button')]
         with patch('message_notifications.elements',AsyncMock(side_effect=[center,center,center,center,conversation])), \
@@ -73,7 +84,7 @@ class OpenTests(unittest.IsolatedAsyncioTestCase):
         header=item('Notification Center, Header')
         conversation=[item('+19562154700, Show Conversation Details, Button')]
         expected=parse_notification(group.caption,group.platform_identifier,'one')
-        with patch('message_notifications.elements',AsyncMock(side_effect=[[header,group],[header,single],conversation])), patch('message_notifications.activate',AsyncMock()) as activate:
+        with patch('message_notifications.elements',AsyncMock(side_effect=[center_items(group),center_items(single),conversation])), patch('message_notifications.activate',AsyncMock()) as activate:
             result=await open_notification(None,None,'one',expected,lambda records:{'phone_number':'+19562154700'})
         self.assertEqual(activate.await_count,2)
         self.assertEqual(result['phone_number'],'+19562154700')
@@ -82,25 +93,107 @@ class OpenTests(unittest.IsolatedAsyncioTestCase):
         old=item('MESSAGES, now, +19562154700, Hello, Button')
         expected=parse_notification(old.caption,old.platform_identifier,'one')
         changed=item('MESSAGES, now, +19562154700, Different, Button')
-        with patch('message_notifications.elements',AsyncMock(return_value=[item('Notification Center, Header'),changed])), patch('message_notifications.activate',AsyncMock()) as activate:
+        with patch('message_notifications.elements',AsyncMock(return_value=center_items(changed))), patch('message_notifications.activate',AsyncMock()) as activate:
             with self.assertRaises(ValueError):await open_notification(None,None,'one',expected,lambda r:{})
         activate.assert_not_awaited()
 
     async def test_wrong_recipient_after_click_is_rejected(self):
         notification=item('MESSAGES, now, +19562154700, Hello, Button')
         expected=parse_notification(notification.caption,notification.platform_identifier,'one')
-        with patch('message_notifications.elements',AsyncMock(side_effect=[[item('Notification Center, Header'),notification],
+        with patch('message_notifications.elements',AsyncMock(side_effect=[center_items(notification),
              [item('+19999999999, Show Conversation Details, Button')]])), patch('message_notifications.activate',AsyncMock()):
             with self.assertRaises(ValueError):
                 await open_notification(None,None,'one',expected,lambda r:{'phone_number':'+19999999999'})
 
     async def test_draft_stops_notification_center_gesture(self):
-        with patch('message_notifications.elements',AsyncMock(return_value=[item('Message, Draft'),item('Send, Button')])), patch('message_notifications.swipe',AsyncMock()) as swipe:
+        with patch('message_notifications.probe_surface',AsyncMock(return_value=[item('Message, Draft'),item('Send, Button')])), patch('message_notifications.swipe',AsyncMock()) as swipe:
             with self.assertRaises(ValueError):await discover(None,None,'one')
         swipe.assert_not_awaited()
 
 
+class SurfaceTests(unittest.IsolatedAsyncioTestCase):
+    def test_title_alone_or_either_corner_button_is_not_success(self):
+        for entries in ([item('Notification Center, Header')], [item('Show Notifications, Button')],
+                        [item('Flashlight, Off, Button', 'f')], [item('Camera, Button', 'c')],
+                        [item('Flashlight, Off, Button', 'same'), item('Camera, Button', 'same')]):
+            self.assertFalse(is_center(entries))
+        self.assertTrue(is_center(center_items()))
+        self.assertTrue(is_center([item('手电筒, 关闭, 按钮', 'f'), item('相机, 按钮', 'c')]))
+
+    async def test_failed_swipe_never_full_scans_the_messages_list(self):
+        page = [item('Messages, Header')]
+        with patch('message_notifications.probe_surface', AsyncMock(side_effect=[page, page])), \
+                patch('message_notifications.swipe', AsyncMock()) as swipe, \
+                patch('message_notifications.elements', AsyncMock()) as full, \
+                patch('message_notifications.parse_notification') as parse:
+            with self.assertRaisesRegex(ValueError, '下拉后未确认通知中心'):
+                await discover(None, None, 'one')
+        full.assert_not_awaited()
+        parse.assert_not_called()
+        swipe.assert_awaited_once_with(None, .002, .82)
+
+    async def test_header_without_both_buttons_never_enters_full_scan(self):
+        page = [item('Messages, Header')]
+        unconfirmed = [item('Notification Center, Header')]
+        with patch('message_notifications.probe_surface', AsyncMock(side_effect=[page, unconfirmed, unconfirmed])), \
+                patch('message_notifications.swipe', AsyncMock()), \
+                patch('message_notifications.elements', AsyncMock()) as full:
+            with self.assertRaises(ValueError):
+                await discover(None, None, 'one')
+        full.assert_not_awaited()
+
+    async def test_confirmed_pair_allows_collection_and_safe_close(self):
+        notification = item('MESSAGES, now, +19562154700, Hello, Button')
+        with patch('message_notifications.probe_surface', AsyncMock(side_effect=[
+                [item('Messages, Header')], center_items(), center_items()])), \
+                patch('message_notifications.elements', AsyncMock(return_value=center_items(notification))) as full, \
+                patch('message_notifications.swipe', AsyncMock()) as swipe:
+            result = await discover(None, None, 'one')
+        self.assertEqual(len(result['items']), 1)
+        self.assertTrue(result['complete'])
+        full.assert_awaited_once_with(None, center_only=True)
+        self.assertEqual(swipe.await_count, 2)
+
+    async def test_surface_change_during_scan_stops_before_retry(self):
+        changed = ScanResult([item('Messages, Header')])
+        changed.reason, changed.complete = 'target_found', False
+        with patch('message_notifications.scan', AsyncMock(return_value=changed)) as scan:
+            with self.assertRaisesRegex(ValueError, '页面已离开通知中心'):
+                await verified_center_page(None)
+        self.assertEqual(scan.await_count, 1)
+
+    async def test_probe_timeout_prevents_gesture_and_full_scan(self):
+        partial = ScanResult([item('Unknown, Header')])
+        partial.reason = 'event_timeout'
+        with patch('message_notifications.scan', AsyncMock(return_value=partial)), \
+                patch('message_notifications.elements', AsyncMock()) as full, \
+                patch('message_notifications.swipe', AsyncMock()) as swipe:
+            with self.assertRaisesRegex(ValueError, '未执行完整遍历'):
+                await discover(None, None, 'one')
+        full.assert_not_awaited()
+        swipe.assert_not_awaited()
+
+    async def test_cleanup_does_not_swipe_a_different_page(self):
+        with patch('message_notifications.probe_surface', AsyncMock(side_effect=[
+                [item('Messages, Header')], center_items(), [item('Messages, Header')]])), \
+                patch('message_notifications.elements', AsyncMock(return_value=center_items())), \
+                patch('message_notifications.swipe', AsyncMock()) as swipe:
+            await discover(None, None, 'one')
+        swipe.assert_awaited_once_with(None, .002, .82)
+
+
 class StoreTests(unittest.TestCase):
+    def test_incomplete_check_preserves_saved_notification(self):
+        with tempfile.TemporaryDirectory() as root:
+            row = parse_notification('MESSAGES, now, +19562154700, Hello, Button', 'x', 'one')
+            service = WorkspaceService(root, native=lambda *args, **kwargs: {'items': [], 'complete': False})
+            path = service.notification_path(row['id'])
+            service.write(path, row)
+            before = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, '已保留上次通知结果'):
+                service.notifications('one', 'unused')
+            self.assertEqual(path.read_bytes(), before)
+
     def test_notification_open_archives_live_context_and_marks_handled_after_success(self):
         with tempfile.TemporaryDirectory() as root:
             row=parse_notification('MESSAGES, now, +19562154700, Hello, Button','x','one')

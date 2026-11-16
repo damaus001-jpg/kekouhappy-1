@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, wait
 import controller
 from workspace_access import AccessVerifier, HEADER, signed_opener
+from cpu_metrics import create_cpu_reader
 
 ROOT = Path(__file__).resolve().parent
 
@@ -41,22 +42,30 @@ def play_notification_sound(device):
 
 class CpuUsage:
     """Cache whole-computer load; HTTP threads never take blocking CPU samples."""
-    def __init__(self):
+    def __init__(self, reader=None):
         self.sample = (None, 0)
+        self.reader = reader
 
     def run(self, stopping):
-        import psutil
         primed = False
-        while not stopping.is_set():
-            try:
-                percent = psutil.cpu_percent(interval=None)
-                # The first read only establishes this thread's baseline.
-                self.sample = (round(percent, 1), time.monotonic()) if primed else (None, 0)
-                primed = True
-            except Exception:
-                self.sample = (None, 0)
-                primed = False
-            stopping.wait(1)
+        reader = self.reader
+        try:
+            while not stopping.is_set():
+                try:
+                    if reader is None:
+                        reader = create_cpu_reader()
+                    percent = reader()
+                    # The first read only establishes this thread's baseline.
+                    self.sample = (round(percent, 1), time.monotonic()) if primed else (None, 0)
+                    primed = True
+                except Exception:
+                    self.sample = (None, 0)
+                    primed = False
+                stopping.wait(3)
+        finally:
+            close = getattr(reader, 'close', None)
+            if close:
+                close()
 
     def snapshot(self):
         percent, sampled_at = self.sample
@@ -515,6 +524,11 @@ def main():
         queued=lambda device:startup_queue.pending(device['udid']))
 
     cpu_usage = CpuUsage()
+    from foreground_reader import ForegroundReader
+    foreground_reader = ForegroundReader(workspace_service, lambda udid:
+        manager.active == udid and manager.selected == udid
+        and any(d['udid'] == udid and control_allowed(d) for d in devices)
+        and not reconnects.pending(udid))
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*unused):
@@ -543,6 +557,7 @@ def main():
             if self.path=='/':
                 return self.respond(200,(ROOT/'web/workspace.html').read_bytes(),'text/html; charset=utf-8')
             assets = {'/dashboard.css': 'text/css; charset=utf-8', '/dashboard.js': 'text/javascript; charset=utf-8',
+                      '/foreground.js': 'text/javascript; charset=utf-8',
                       '/workspace.js': 'text/javascript; charset=utf-8', '/gpt_export.js': 'text/javascript; charset=utf-8', '/contact_profile.js': 'text/javascript; charset=utf-8', '/electric-doodles.svg':'image/svg+xml', '/brand-logo.jpg': 'image/jpeg'}
             if self.path in assets:
                 path = ROOT/'web'/self.path.lstrip('/')
@@ -550,6 +565,8 @@ def main():
                     return self.respond(200, path.read_bytes(), assets[self.path])
                 return self.respond(404, {'error': 'asset not found'})
             parsed = urlsplit(self.path)
+            if parsed.path == '/api/cpu':
+                return self.respond(200, {'cpu_percent': cpu_usage.snapshot()})
             if parsed.path == '/api/contact-profile':
                 query = parse_qs(parsed.query)
                 device = query.get('device', [''])[0]
@@ -588,6 +605,33 @@ def main():
         def do_POST(self):
             if not self.allowed():
                 return self.respond(403,{'error':'请从授权客户端打开短信工作台'})
+            if self.path == '/api/foreground':
+                try:
+                    length = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < length <= 4096:
+                        raise ValueError('自动读取请求无效')
+                    self.connection.settimeout(15)
+                    body = json.loads(self.rfile.read(length))
+                    if not isinstance(body, dict):
+                        raise ValueError('自动读取请求无效')
+                    if body.get('action') == 'cancel':
+                        return self.respond(200, foreground_reader.cancel(body))
+                    if body.get('action') == 'release':
+                        return self.respond(200, foreground_reader.release(body))
+                    device = next((d for d in devices if d['udid'] == body.get('device')), None)
+                    action = body.get('action')
+                    if action not in ('prepare', 'probe', 'tick') or device is None:
+                        raise ValueError('自动读取设备无效')
+                    require_control(device)
+                    if action == 'prepare':
+                        result = foreground_reader.prepare(body, device['udid'])
+                    elif action == 'probe':
+                        result = foreground_reader.probe(body, device['udid'], f"http://127.0.0.1:{device['port']}")
+                    else:
+                        result = foreground_reader.tick(body, device['udid'], f"http://127.0.0.1:{device['port']}")
+                    return self.respond(200, result)
+                except (ValueError, TypeError, KeyError) as error:
+                    return self.respond(400, {'error': str(error)})
             if self.path=='/api/devices/access':
                 try:
                     length=int(self.headers.get('Content-Length','0'))
@@ -822,6 +866,7 @@ def main():
         server.serve_forever(poll_interval=0.25)
     finally:
         stopping.set()
+        foreground_reader.close()
         if cpu_thread.is_alive():cpu_thread.join(timeout=2)
         startup_queue.close()
         health_pool.shutdown(wait=False,cancel_futures=True)

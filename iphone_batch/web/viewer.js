@@ -335,6 +335,12 @@ async function postJson(path, payload) {
 }
 
 let activePointer = null;
+let foregroundPointerStart=null,foregroundDragReported=false,foregroundPointerMoved=false,foregroundPointerGesture=null,foregroundTapRevision=0;
+function notifyForegroundActivity(kind){
+    if(kind!=='tap-complete')foregroundTapRevision++;
+    if(batchManaged&&batchSelected)parent.postMessage({type:'phone-activity',kind,keysHeld:pressedUsages.size>0},
+        new URLSearchParams(location.search).get('manager')||'http://127.0.0.1:8070');
+}
 let lastCoords = {x: 0, y: 0};
 const pointerInput = new PointerInput(async payload => {
     if (!controlAvailable()) throw Error('当前手机控制连接尚未就绪');
@@ -347,7 +353,7 @@ const wheelInput = new WheelInput(pointerInput, {
     coords: touchCoords,
     enabled: () => controlAvailable() && activePointer === null,
 });
-canvas.addEventListener('wheel', event => wheelInput.handle(event), {passive: false});
+canvas.addEventListener('wheel', event => {if(controlAvailable())notifyForegroundActivity('scroll');wheelInput.handle(event);}, {passive: false});
 // Drag-outside-then-release leaves the device-side contact stuck if we
 // only listen on the canvas: pointer capture is silently dropped on
 // window blur / Cmd-Tab / right-click menus / OS-level interruptions,
@@ -358,16 +364,22 @@ function releaseActive() {
     wheelInput.stop();
     if (activePointer === null) return;
     activePointer = null;
+    foregroundPointerStart=null;
+    notifyForegroundActivity('pointer-end');
     pointerInput.end(lastCoords);
 }
 canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;   // primary button only
+    if (activePointer !== null) return;
     if (!controlAvailable()) {
         reportManualInputFailure('/manual-touch', Error('当前手机控制连接尚未就绪，请检查连接后重新操作'));
         inputMonitor?.invalidate();
         return;
     }
     pasteRevision++; // A new phone target cancels an unfinished paste.
+    notifyForegroundActivity('pointer-start');
+    foregroundTapRevision++;
+    foregroundPointerStart={x:e.clientX,y:e.clientY};foregroundDragReported=false;foregroundPointerMoved=false;foregroundPointerGesture=null;
     wheelInput.stop();
     e.preventDefault();
     // preventDefault on pointerdown also suppresses the implicit
@@ -378,18 +390,36 @@ canvas.addEventListener('pointerdown', (e) => {
     activePointer = e.pointerId;
     lastCoords = touchCoords(e);
     pointerInput.start(lastCoords);
+    foregroundPointerGesture=pointerInput.gesture;
 });
 function onMove(e) {
     if (e.pointerId !== activePointer) return;
+    if(foregroundPointerStart&&Math.hypot(e.clientX-foregroundPointerStart.x,e.clientY-foregroundPointerStart.y)>12)foregroundPointerMoved=true;
+    if(foregroundPointerStart&&!foregroundDragReported&&Math.abs(e.clientY-foregroundPointerStart.y)>18){
+        foregroundDragReported=true;notifyForegroundActivity('scroll');
+    }
     e.preventDefault();
     lastCoords = touchCoords(e);
     pointerInput.move(lastCoords);
 }
 function onUp(e) {
     if (e.pointerId !== activePointer) return;
+    const rect=canvas.getBoundingClientRect();
+    const completedTap=e.type==='pointerup'&&foregroundPointerStart!==null&&!foregroundPointerMoved&&
+        Math.hypot(e.clientX-foregroundPointerStart.x,e.clientY-foregroundPointerStart.y)<=12&&
+        e.clientX>=rect.left&&e.clientX<=rect.right&&e.clientY>=rect.top&&e.clientY<=rect.bottom;
+    const gesture=foregroundPointerGesture;
     e.preventDefault();
     lastCoords = touchCoords(e);
     releaseActive();
+    const tapRevision=foregroundTapRevision, tapEpoch=inputEpoch;
+    if(completedTap&&gesture!==null){
+        pointerInput.idle(gesture).then(async ok=>{
+            if(!ok)return;
+            await new Promise(resolve=>setTimeout(resolve,500));
+            if(controlAvailable()&&batchSelected&&!document.hidden&&tapRevision===foregroundTapRevision&&tapEpoch===inputEpoch)notifyForegroundActivity('tap-complete');
+        }).catch(()=>{});
+    }
 }
 window.addEventListener('pointermove', onMove);
 canvas.addEventListener('pointerup', onUp);
@@ -405,9 +435,9 @@ canvas.addEventListener('lostpointercapture', (e) => {
 // Tab switch / window blur kills capture without firing up. Treat
 // either as an implicit release so a stuck contact doesn't survive
 // the user looking away.
-window.addEventListener('blur', releaseActive);
+window.addEventListener('blur', () => {foregroundTapRevision++;releaseActive();});
 document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'visible') releaseActive();
+    if (document.visibilityState !== 'visible') {foregroundTapRevision++;releaseActive();}
 });
 // Right-click on the phone image = Home button, matching the original control.
 canvas.addEventListener('contextmenu', (e) => {
@@ -585,6 +615,7 @@ function pasteFeedback(message) {
 }
 
 function queueHostPaste(suppliedText = null) {
+    notifyForegroundActivity('paste');
     if (pastePending) return Promise.reject(Error('正在粘贴，请稍候'));
     pastePending = true;
     const epoch = inputEpoch, revision = pasteRevision;
@@ -593,16 +624,10 @@ function queueHostPaste(suppliedText = null) {
         if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
         await pointerInput.idle();
         if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
-        pasteFeedback(suppliedText === null ? '正在读取电脑剪贴板…' : '正在定位手机短信输入框…');
+        pasteFeedback(suppliedText === null ? '正在读取电脑剪贴板…' : '正在准备粘贴到手机当前输入框…');
         const content = suppliedText === null ? await readHostClipboard() : {text: suppliedText, image: null};
         if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
         if (!content.image && !content.text) throw Error('电脑剪贴板没有可粘贴的文字或图片');
-        if (suppliedText !== null) {
-            const focus = await fetch('/manual-composer-focus', {method: 'POST',
-                headers: {'Content-Type': 'application/json'}, body: '{}', signal: AbortSignal.timeout(15000)});
-            if (!focus.ok) throw Error('未能定位手机短信输入框，请打开目标短信会话后重试');
-            if (!current()) throw Error('焦点或控制连接已变化，请重新粘贴');
-        }
         const response = await fetch(content.image ? '/clipboard/image' : '/clipboard', {
             method: 'POST',
             headers: {'Content-Type': content.image ? 'image/png' : 'application/json'},
@@ -625,7 +650,7 @@ function queueHostPaste(suppliedText = null) {
             throw error;
         }
         if (!current()) throw Error('控制目标已变化，粘贴结果请在原手机核对');
-        pasteFeedback('已请求粘贴' + (content.image ? '图片' : '文字') + '，请检查手机输入框后手动发送');
+        pasteFeedback('粘贴快捷键已发出（' + (content.image ? '图片' : '文字') + '），请核对手机输入框；确认后再手动发送');
     });
     lastKeyPost = task.catch(error => pasteFeedback('粘贴未完成：' + (error.message || error)))
         .finally(() => { pastePending = false; });
@@ -646,6 +671,7 @@ function releaseAllKeys() {
         pressedUsages.clear();
         postKeys();
     }
+    notifyForegroundActivity('key-state');
 }
 function updateKbIndicator() {
     kbIndicator.classList.toggle('hidden', !keyboardCaptureOn());
@@ -704,6 +730,7 @@ window.addEventListener('keydown', (e) => {
         if (k === '0') { e.preventDefault(); setZoom(1); return; }
     }
     if (!keyboardCaptureOn()) return;
+    notifyForegroundActivity('key');
     // Ctrl-hotkey path consumes the event; don't also type it.
     if (e.ctrlKey && !e.altKey && !e.metaKey) {
         const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
@@ -731,6 +758,7 @@ window.addEventListener('keydown', (e) => {
     if (!pressedUsages.has(usage)) {
         pressedUsages.add(usage);
         postKeys();
+        notifyForegroundActivity('key-state');
     }
 });
 window.addEventListener('keyup', (e) => {
@@ -740,6 +768,7 @@ window.addEventListener('keyup', (e) => {
     e.preventDefault();
     windowsEditKeys.delete(usage);
     if (pressedUsages.delete(usage)) postKeys();
+    notifyForegroundActivity('key-state');
 });
 window.addEventListener('blur', () => {
     // Window-blur means we won't see keyup; flush the bitmap so no
@@ -2077,7 +2106,7 @@ if (batchManaged) {
     window.addEventListener('message', event => {
         if (event.source !== parent || event.origin !== (new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070')) return;
         if (event.data?.type === 'monitor-snapshot') {
-            if (snapshotBusy || typeof event.data.id !== 'string' || event.data.id.length > 80 || performance.now() - lastSnapshotAt < 2800) return;
+            if (snapshotBusy || typeof event.data.id !== 'string' || event.data.id.length > 80 || performance.now() - lastSnapshotAt < 1400) return;
             if (!pendingFrame && !lastFrame) return;
             // Reuse the warm decoder and present its newest frame; no new stream.
             if (pendingFrame) { cancelFrameDraw(); drawPending(true); }
@@ -2096,6 +2125,18 @@ if (batchManaged) {
         }
         if (event.data?.type === 'input-recover') {
             if (batchActive) inputMonitor.check(true);
+            return;
+        }
+        if (event.data?.type === 'device-screenshot') {
+            const id = event.data.id;
+            if (!batchSelected || typeof id !== 'string' || id.length > 80) return;
+            fetch('/device-screenshot', {cache:'no-store', signal:AbortSignal.timeout(14000)})
+                .then(async response => {
+                    const result = await response.json();
+                    if (!response.ok) throw Error(result.error || '手机截图失败');
+                    parent.postMessage({type:'device-screenshot-result',id,...result},event.origin);
+                })
+                .catch(() => parent.postMessage({type:'device-screenshot-result',id,error:'手机截图失败，请确认截图服务已加载、设备连接正常后重试'},event.origin));
             return;
         }
         if (event.data?.type === 'paste-composer') {
@@ -2117,6 +2158,7 @@ if (batchManaged) {
             return;
         }
         if (event.data?.type !== 'device-focus') return;
+        if(event.data.selected!==true||event.data.active!==true)foregroundTapRevision++;
         if (!event.data.active) releaseActive();
         batchActive = event.data.active === true;
         inputHealthPaused = event.data.working === true;

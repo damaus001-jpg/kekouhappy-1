@@ -38,8 +38,31 @@ class MonitorTests(unittest.TestCase):
         with patch('notification_monitor.time.monotonic',return_value=140):
             self.assertTrue(monitor.tick(now=140))
             self.assertFalse(monitor.tick(now=140))
-            self.assertTrue(monitor.tick(now=142))
+            self.assertFalse(monitor.tick(now=154))
+            self.assertTrue(monitor.tick(now=155))
         self.assertEqual(self.calls,[])
+
+    def test_failed_center_check_preserves_cards_and_backs_off(self):
+        def failed(device, base):
+            raise ValueError('下拉后未确认通知中心')
+        monitor = self.make_monitor(failed)
+        monitor.devices = monitor.devices[:1]
+        with patch('notification_monitor.time.monotonic', return_value=100):
+            monitor.record('phone0', {'items': [{'id': 'keep', 'phone_number': '+123'}]})
+        checked = monitor.snapshot('phone0')['last_checked']
+        for now, delay in ((140, 15), (155, 30), (185, 60), (245, 60)):
+            with patch('notification_monitor.time.monotonic', return_value=now):
+                self.assertTrue(monitor.tick(now=now))
+            self.assertEqual(monitor.states['phone0']['next_due'], now + delay)
+            self.assertFalse(monitor.tick(now=now + delay - 1))
+        state = monitor.snapshot('phone0')
+        self.assertEqual(state['items'][0]['id'], 'keep')
+        self.assertEqual(state['last_checked'], checked)
+        self.assertEqual(state['state'], 'paused')
+        monitor.scan = lambda *args: {'items': []}
+        with patch('notification_monitor.time.monotonic', return_value=305):
+            self.assertTrue(monitor.tick(now=305))
+        self.assertEqual(monitor.snapshot('phone0')['failures'], 0)
 
     def test_manual_switch_stops_dispatch_and_keeps_saved_cards(self):
         monitor=self.make_monitor()

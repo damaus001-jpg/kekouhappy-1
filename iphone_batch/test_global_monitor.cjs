@@ -20,6 +20,7 @@ async function main(){
     if(e.data.type==='monitor-snapshot'){ctx.fillStyle='hsl('+((++tick*39)%360)+' 35% 25%)';ctx.fillRect(0,0,240,520);ctx.fillStyle='#fff';ctx.font='24px sans-serif';ctx.fillText('Phone '+tick,24,65);c.toBlob(image=>parent.postMessage({type:'monitor-snapshot-result',id:e.data.id,image,state:'streaming'},e.origin),'image/jpeg');}});
     </script>`);return;
    }
+   if(url.pathname==='/api/cpu')return json({cpu_percent:35});
    if(url.pathname==='/api/state')return json({active:selected,selected,scan_enabled:false,devices:Array.from({length:20},(_,i)=>{
     const mode=modes.get('mock-'+i)||{enabled:true,readonly:false},job=reconnectJobs.get('mock-'+i)||{};
     return {udid:'mock-'+i,name:'iPhone '+(i+1),number:String(i+1).padStart(2,'0'),port,...mode,...job,

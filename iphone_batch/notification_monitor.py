@@ -33,7 +33,9 @@ class NotificationMonitor:
             self.enabled=enabled
             for state in self.states.values():
                 if state['state']!='scanning':state['state']='waiting' if enabled else 'paused'
-                if enabled:state['next_due']=time.monotonic()
+                if enabled:
+                    state['next_due']=time.monotonic()
+                    state['failures']=0
 
     def update_devices(self, devices):
         with self.lock:
@@ -65,7 +67,7 @@ class NotificationMonitor:
             previous={row.get('id') for row in self.states[device]['items']}
             new_cards=any(row.get('id') not in previous for row in result['items'])
             self.states[device].update(state='checked',last_checked=datetime.now(timezone.utc).isoformat(),
-                items=result['items'],error=None,
+                items=result['items'],error=None,failures=0,
                 pending_contacts=len({r.get('phone_number') or r.get('sender') for r in result['items']}),
                 next_due=time.monotonic()+self.interval)
         if new_cards and self.on_new_cards:
@@ -105,9 +107,10 @@ class NotificationMonitor:
                 result=self.scan(device['udid'],f"http://127.0.0.1:{device['port']}")
             self.record(device['udid'],result)
         except Exception as exc:
-            retry_delay=max(self.interval,2)
             with self.lock:
-                state.update(state='paused',error=str(exc))
+                failures=state.get('failures',0)+1
+                retry_delay=max(self.interval,min(60,15*(2**min(failures-1,2))))
+                state.update(state='paused',error=str(exc),failures=failures)
         finally:
             with self.lock:
                 state['next_due']=time.monotonic()+retry_delay

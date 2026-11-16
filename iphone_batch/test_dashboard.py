@@ -5,7 +5,7 @@ from dashboard import CpuUsage, FocusManager
 
 class CpuUsageTests(unittest.TestCase):
     def readings(self, values):
-        cpu = CpuUsage()
+        cpu = CpuUsage(reader=lambda: __import__('psutil').cpu_percent(interval=None))
         observed = []
         stopping = Mock()
         stopping.is_set.side_effect = [False] * len(values) + [True]
@@ -13,6 +13,7 @@ class CpuUsageTests(unittest.TestCase):
         with patch('psutil.cpu_percent', side_effect=values) as read, patch('dashboard.time.monotonic', return_value=10):
             cpu.run(stopping)
         self.assertTrue(all(call.kwargs == {'interval': None} for call in read.call_args_list))
+        self.assertTrue(all(call.args == (3,) for call in stopping.wait.call_args_list))
         return observed
 
     def test_first_sample_is_unknown_and_zero_is_a_valid_reading(self):
@@ -30,6 +31,13 @@ class CpuUsageTests(unittest.TestCase):
             self.assertEqual(cpu.snapshot(), 80)
         with patch('dashboard.time.monotonic', return_value=16):
             self.assertIsNone(cpu.snapshot())
+
+    def test_sampling_thread_closes_system_counter_when_stopped(self):
+        reader = Mock(return_value=20)
+        stopping = Mock()
+        stopping.is_set.side_effect = [False, False, True]
+        CpuUsage(reader).run(stopping)
+        reader.close.assert_called_once()
 
 class FocusTests(unittest.TestCase):
     def setUp(self):

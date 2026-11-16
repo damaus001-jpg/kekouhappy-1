@@ -15,6 +15,6 @@ const request={source:parent,origin:manager,data:{type:'monitor-snapshot',id:'mo
 listener({...request,source:{}});listener({...request,origin:'https://example.com'});assert.equal(messages.length,0);
 listener(request);assert.equal(messages.length,1);assert.equal(forced,1);assert.equal(messages[0].origin,manager);assert.equal(messages[0].data.id,'monitor-1');
 listener(request);assert.equal(messages.length,1,'requests inside the thumbnail interval are ignored');
-clock+=3000;listener({...request,data:{...request.data,id:'monitor-2'}});assert.equal(messages.length,2);
+clock+=1500;listener({...request,data:{...request.data,id:'monitor-2'}});assert.equal(messages.length,2);
 assert.equal(messages[1].data.id,'monitor-2');
 console.log('Monitor snapshot passed: trusted parent/origin, newest warm frame and bounded request frequency');

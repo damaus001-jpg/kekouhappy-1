@@ -16,6 +16,16 @@ MAX_TEXT_BYTES = 1024 * 1024
 MAX_CLIPBOARD_IMAGE_BYTES = 16 * 1024 * 1024
 
 
+async def capture_device_screenshot(instance):
+    from pymobiledevice3.remote.core_device.screen_capture_service import ScreenCaptureService
+    async with ScreenCaptureService(instance._rsd) as service:
+        result = await service.capture_screenshot(requested_format='png')
+    image = result.get('image')
+    if not isinstance(image, bytes) or not image.startswith(b'\x89PNG\r\n\x1a\n') or len(image) > 16 * 1024 * 1024:
+        raise ValueError('invalid screenshot')
+    return image
+
+
 def policy_allows_input(instance):
     identifier=getattr(instance,'_batch_udid',os.environ.get('PYMOBILEDEVICE3_UDID'))
     if not identifier:return True
@@ -196,7 +206,7 @@ def install():
                 logging.getLogger(__name__).warning('Media wake failed: port=%s error=%s', self._http_port, type(error).__name__)
                 await reply(writer, 503, {'error': '视频或控制服务正在准备，请稍后重试'})
                 return False
-        special = path in ('/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-key', '/manual-paste', '/manual-composer-focus', '/input-health', '/input-readiness')
+        special = path in ('/device-screenshot', '/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-key', '/manual-paste', '/manual-composer-focus', '/input-health', '/input-readiness')
         restricted = device_token and (parts[0] == 'POST' or path.startswith('/clipboard') or path == '/host-clipboard')
         prefix = bytearray(first)
         headers = {}
@@ -255,6 +265,20 @@ def install():
         if not special and not restricted:
             return await delegate(ReplayReader(prefix, reader))
         try:
+            if path == '/device-screenshot':
+                if parts[0] != 'GET':
+                    return await reply(writer, 405, {'error': 'GET required'})
+                if getattr(self, '_batch_screenshot_busy', False):
+                    return await reply(writer, 409, {'error': '正在截图，请稍候'})
+                self._batch_screenshot_busy = True
+                try:
+                    image = await asyncio.wait_for(capture_device_screenshot(self), 12)
+                    return await reply(writer, 200, {'image': base64.b64encode(image).decode('ascii'),
+                                                    'captured_at': time.time()})
+                except Exception:
+                    return await reply(writer, 503, {'error': '手机截图服务不可用，请确认设备连接后重试'})
+                finally:
+                    self._batch_screenshot_busy = False
             if path == '/input-health':
                 if parts[0] != 'POST':
                     return await reply(writer, 405, {'error': 'POST required'})

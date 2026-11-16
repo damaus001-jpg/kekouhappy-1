@@ -66,7 +66,6 @@ class GlobalMonitor {
  }
  revoke(tile){if(tile.url){URL.revokeObjectURL(tile.url);tile.url=null;}}
  render(ordered,cards,sortValue) {
-  ordered=[...ordered].sort((a,b)=>Number(a.device.enabled===false)-Number(b.device.enabled===false));
   this.cards=cards;
   const connected=new Set(ordered.map(row=>row.device.udid));
   for(const [id,tile] of this.tiles)if(!connected.has(id)){this.revoke(tile);tile.node.remove();this.tiles.delete(id);}
@@ -84,7 +83,7 @@ class GlobalMonitor {
     const image=document.createElement('img');image.alt='';image.hidden=true;image.draggable=false;
     const placeholder=document.createElement('span');placeholder.className='monitor-placeholder';screen.append(image,placeholder);
     node.append(heading,screen);
-    tile={node,number,badge,image,placeholder,nextAt:now+position*3000/Math.max(1,ordered.length),url:null,received:0,pending:null};
+    tile={node,number,badge,image,placeholder,nextAt:now+position*1500/Math.max(1,ordered.length),url:null,received:0,pending:null};
     node.addEventListener('click',()=>this.pick(device.udid));
     node.addEventListener('contextmenu',event=>this.menu(event,tile.device,tile.index));
     this.tiles.set(device.udid,tile);
@@ -119,7 +118,7 @@ class GlobalMonitor {
    if(!tile.device.ready||!tile.frame||now<tile.nextAt)continue;
    if(tile.pending&&now-tile.requested<6000)continue;
    const card=this.cards.get(id);if(card?.frame!==tile.frame)continue;
-   tile.pending='monitor-'+(++this.sequence);tile.requested=now;tile.nextAt=now+3000;if(!tile.firstRequestAt)tile.firstRequestAt=now;
+   tile.pending='monitor-'+(++this.sequence);tile.requested=now;tile.nextAt=now+1500;if(!tile.firstRequestAt)tile.firstRequestAt=now;
    card.frame.contentWindow.postMessage({type:'monitor-snapshot',id:tile.pending},card.origin);
   }
  }
@@ -149,8 +148,7 @@ function updatePhoneLayout(){
  phoneLayoutFrame=null;
  if(window.innerWidth<=820||!phoneViewport.clientHeight)return;
  const aspect=cards.get(active)?.videoAspect||9/19.5;
- const expanded=document.body.classList.contains('screen-expanded');
- const limit=Math.min(expanded?620:440,Math.max(expanded?320:270,window.innerWidth*(expanded ? .42 : .30)));
+ const limit=Math.min(440,Math.max(270,window.innerWidth*.30));
  // The embedded stage reserves 12px padding and 4px frame clearance;
  // #selected adds a 2px border. Use source dimensions, never scaled width.
  const fitted=Math.max(0,phoneViewport.clientHeight-16)*aspect+18;
@@ -168,7 +166,7 @@ const globalMonitor=typeof GlobalMonitor==='function'?new GlobalMonitor({
  refresh:()=>refreshDevices(),sort:value=>{sortControl.value=value;sortControl.dispatchEvent(new Event('change'));}
 }):null;
 if(globalMonitor){
- const back=document.createElement('button');back.id='monitor-back';back.type='button';back.className='secondary monitor-back';back.textContent='↑ 全局监看';
+ const back=document.createElement('button');back.id='monitor-back';back.type='button';back.className='secondary monitor-back';back.textContent='↑ 设备列表';
  back.addEventListener('click',()=>showGlobalMonitor());document.querySelector('.phone-panel .section-title').prepend(back);
 }
 function showGlobalMonitor(){
@@ -240,13 +238,53 @@ async function refreshDevices(){
 }
 refreshDevicesButton?.addEventListener('click',refreshDevices);
 const phoneHomeButton=document.getElementById('phone-home');
+const phoneScreenshotButton=document.getElementById('phone-screenshot');
+const screenshotDialog=document.getElementById('phone-screenshot-dialog');
+const screenshotImage=document.getElementById('phone-screenshot-image');
+const screenshotStatus=document.getElementById('phone-screenshot-status');
+let screenshotRequest=null,screenshotTimer=null,screenshotSequence=0;
+function clearPhoneScreenshot(){
+ clearTimeout(screenshotTimer);screenshotTimer=null;screenshotRequest=null;
+ screenshotImage.src='';screenshotImage.hidden=true;
+ if(phoneScreenshotButton)phoneScreenshotButton.disabled=devicePreview||!latest.some(d=>d.udid===active&&d.ready);
+}
+document.getElementById('phone-screenshot-close').addEventListener('click',()=>screenshotDialog.close());
+screenshotDialog.addEventListener('close',clearPhoneScreenshot);
+phoneScreenshotButton?.addEventListener('click',()=>{
+ const device=latest.find(d=>d.udid===active&&d.ready),card=cards.get(active);
+ if(devicePreview||screenshotRequest||!device||!card?.frame)return;
+ window.ForegroundSync?.activity('manual');
+ clearPhoneScreenshot();
+ screenshotRequest={id:'screenshot-'+(++screenshotSequence),udid:active,frame:card.frame,origin:card.origin};
+ screenshotDialog.dataset.device=active;
+ phoneScreenshotButton.disabled=true;
+ document.getElementById('phone-screenshot-title').textContent='设备 '+deviceLabel(device,latest.indexOf(device)).number+' · 手机截图';
+ screenshotStatus.textContent='正在获取手机截图…';screenshotDialog.showModal();
+ const request=screenshotRequest;
+ screenshotTimer=setTimeout(()=>{if(screenshotRequest===request){clearPhoneScreenshot();screenshotStatus.textContent='截图超时，请确认设备连接和截图服务后重试';}},16000);
+ card.frame.contentWindow.postMessage({type:'device-screenshot',id:request.id},card.origin);
+});
 phoneHomeButton?.addEventListener('click',()=>{
  if(!active||controlOwner!==active||busy||workspaceBusy||controlPaused||devicePreview)return;
+ window.ForegroundSync?.activity('manual');
  const card=cards.get(active);
  if(!card?.frame){notice('手机画面尚未连接，请稍后重试');return;}
  card.frame.contentWindow.postMessage({type:'device-home'},card.origin);
 });
 window.addEventListener('message',event=>{
+ if(event.data?.type==='device-screenshot-result'){
+  const request=screenshotRequest;
+  if(!request||event.source!==request.frame.contentWindow||event.origin!==request.origin||event.data.id!==request.id)return;
+  if(active!==request.udid||cards.get(active)?.frame!==request.frame){screenshotDialog.close();clearPhoneScreenshot();return;}
+  clearTimeout(screenshotTimer);screenshotTimer=null;screenshotRequest=null;phoneScreenshotButton.disabled=false;
+  const {image,captured_at,error}=event.data;
+  if(error||typeof image!=='string'||image.length>24*1024*1024||!image.startsWith('iVBORw0KGgo')){
+   screenshotStatus.textContent=error||'截图数据无效，请重试';return;
+  }
+  screenshotImage.src='data:image/png;base64,'+image;screenshotImage.hidden=false;
+  screenshotStatus.textContent='截图时间：'+(typeof captured_at==='number'?new Date(captured_at*1000).toLocaleTimeString():'刚刚')+' · 静态截图，关闭后返回实时画面';
+  return;
+ }
  if(event.data?.type==='video-dimensions'){
   const {width,height}=event.data;
   if(!Number.isInteger(width)||!Number.isInteger(height)||width<=0||height<=0||width>16384||height>16384)return;
@@ -333,8 +371,9 @@ let editingDevice=null;
 let previewLoadedDevice=null;
 const sortControl=document.getElementById('device-sort');
 const followupControl=document.getElementById('device-followup');
-const sortStorageKey='iphone-device-sort:'+(devicePreview?'preview':'device');
-try{sortControl.value=localStorage.getItem(sortStorageKey)==='unread'?'unread':'followup';}catch{}
+const sortStorageKey='iphone-device-sort-v2:'+(devicePreview?'preview':'device');
+sortControl.value='number';
+try{const saved=localStorage.getItem(sortStorageKey);if(['number','unread','followup'].includes(saved))sortControl.value=saved;}catch{}
 sortControl.addEventListener('change',()=>{
  try{localStorage.setItem(sortStorageKey,sortControl.value);}catch{}
  render(latest,active);
@@ -600,6 +639,10 @@ function render(rows,selected,controller=controlOwner){
   if(!connected.has(udid)){card.node.remove();cards.delete(udid);}
  }
  syncDeveloperModeButton();
+ if(phoneScreenshotButton)phoneScreenshotButton.disabled=!!screenshotRequest||devicePreview||!rows.some(d=>d.udid===selected&&d.ready);
+ if(screenshotDialog.open&&(!rows.some(d=>d.udid===selected&&d.ready)||screenshotDialog.dataset.device!==selected)){
+  screenshotDialog.close();clearPhoneScreenshot();
+ }
  controlPaused=autoScanEnabled&&rows.some(row=>row.udid===selected&&row.notifications?.state==='scanning');
  if(phoneHomeButton)phoneHomeButton.disabled=!(controlOwner===selected&&rows.some(row=>row.udid===selected&&row.ready))||busy||workspaceBusy||controlPaused||devicePreview;
  const selectedDevice=rows.find(device=>device.udid===selected);
@@ -613,9 +656,10 @@ function render(rows,selected,controller=controlOwner){
  ordered.sort((a,b)=>{
   const available=Number(b.device.ready===true)-Number(a.device.ready===true);
   if(available)return available;
+  const numberOrder=String(a.label.number).localeCompare(String(b.label.number),undefined,{numeric:true})||a.index-b.index;
   return sortControl.value==='unread'?
    ((b.device.notifications?.card_count??b.device.notifications?.items?.length??0)-(a.device.notifications?.card_count??a.device.notifications?.items?.length??0)||a.index-b.index):
-   (b.followupCount-a.followupCount||a.index-b.index);
+   sortControl.value==='followup'?(b.followupCount-a.followupCount||a.index-b.index):numberOrder;
  });
  for(const {device:d,index,label,followupCount} of ordered){
   const entry=document.createElement('button');entry.type='button';entry.className='device-entry'+(selected===d.udid?' current':'');entry.disabled=busy||workspaceBusy||refreshingDevices;entry.setAttribute('aria-pressed',String(selected===d.udid));
@@ -702,6 +746,7 @@ function render(rows,selected,controller=controlOwner){
 }
 async function select(udid){
  if(busy||workspaceBusy||refreshingDevices||phonePastePending)return;
+ window.ForegroundSync?.activity('select');
  if(globalMonitor?.isFullscreen()){await globalMonitor.exitFullscreen();if(busy||workspaceBusy||refreshingDevices||phonePastePending)return;}
  globalMonitor?.openWorkbench();
  if(devicePreview){previewSelection=udid;render(previewDevices,previewSelection);return;}
@@ -716,17 +761,21 @@ function showCpuUsage(value){
  if(!cpuUsage)return;
  const valid=typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=100;
  const percent=valid?Math.round(value):null;
- cpuUsage.textContent=valid?'CPU '+percent+'%':'CPU --%';
+ document.getElementById('cpu-percent').textContent=valid?percent+'%':'--%';
+ document.getElementById('cpu-bar-fill').style.width=(percent??0)+'%';
+ cpuUsage.setAttribute('aria-label',valid?'CPU 使用率 '+percent+'%':'CPU 使用率暂不可用');
  cpuUsage.dataset.level=!valid?'unknown':percent>=90?'critical':percent>=80?'high':'normal';
  cpuUsage.title=valid?'整台电脑的 CPU 使用率；占用较高时，可断开暂不使用的手机。':'暂时无法获取整台电脑的 CPU 使用率';
  if(valid)cpuUsageExpiry=setTimeout(()=>showCpuUsage(null),5000);
 }
 window.addEventListener('pagehide',()=>clearTimeout(cpuUsageExpiry));
-async function refresh(){if(devicePreview){showCpuUsage(null);syncAutoScan(false);render(previewDevices,previewSelection);return;}const revision=selectionRevision,scanVersion=scanRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);showCpuUsage(j.cpu_percent);if(scanVersion===scanRevision)syncAutoScan(j.scan_enabled);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){showCpuUsage(null);notice('管理页面连接中断');}}
-refresh();if(!devicePreview)setInterval(refresh,2000);
-document.getElementById('screen-expand').addEventListener('click',e=>{
- const expanded=document.body.classList.toggle('screen-expanded');
- e.currentTarget.textContent=expanded?'恢复布局':'放大画面';
- e.currentTarget.setAttribute('aria-pressed',String(expanded));
- schedulePhoneLayout();
-});
+let cpuRefreshing=false;
+async function refreshCpuUsage(){
+ if(devicePreview||cpuRefreshing)return;
+ cpuRefreshing=true;
+ try{const j=await deviceRequest('/api/cpu',{cache:'no-store'},2500);showCpuUsage(j.cpu_percent);}
+ catch{showCpuUsage(null);}
+ finally{cpuRefreshing=false;}
+}
+async function refresh(){if(devicePreview){showCpuUsage(null);syncAutoScan(false);render(previewDevices,previewSelection);return;}const revision=selectionRevision,scanVersion=scanRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);if(scanVersion===scanRevision)syncAutoScan(j.scan_enabled);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){notice('管理页面连接中断');}}
+refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInterval(refreshCpuUsage,3000);}

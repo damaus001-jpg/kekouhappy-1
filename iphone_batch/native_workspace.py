@@ -66,7 +66,9 @@ def context(records):
         records = [{**r, 'caption': number+r['caption'][r['caption'].find(', '):]
                     if ', ' in r['caption'] and phone_key(r['caption'].split(', ', 1)[0]) == number else r['caption']}
                    for r in records]
-    contact, messages, unknown = parse_records(records)
+    contact, _, _ = parse_records(records)
+    from bubble_records import parse_bubbles
+    messages, unknown = parse_bubbles(records, contact)
     if not messages:
         raise ValueError('当前会话未读到可确认的消息，未发送')
     return {'contact': contact, 'phone_number': phone_key(contact), 'messages': messages,
@@ -407,6 +409,15 @@ async def run(args):
         usbmux_address='127.0.0.1:27015', pairing_records_cache_folder=ROOT, autopair=False)
     try:
         async with AccessibilityAudit(lockdown) as service:
+            if args.action in ('auto_probe', 'auto_tail', 'auto_read'):
+                from native_foreground import run_foreground
+                record_path = Path(args.record).resolve()
+                if record_path.parent != (ROOT/'workspace'/'foreground').resolve():
+                    raise ValueError('自动读取任务路径无效')
+                options = json.loads(record_path.read_text(encoding='utf-8'))
+                if options.get('cancel_path') != str(record_path.with_suffix('.cancel')):
+                    raise ValueError('自动读取取消标记无效')
+                return await run_foreground(service, args.action, options)
             if args.action in ('notifications', 'open_notification'):
                 from message_notifications import discover, open_notification
                 phone = NativeConversation(); phone.base = args.base
@@ -517,7 +528,7 @@ async def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', required=True)
-    parser.add_argument('--action', choices=['capture', 'latest', 'identify', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification'], required=True)
+    parser.add_argument('--action', choices=['auto_probe', 'auto_tail', 'auto_read', 'capture', 'latest', 'identify', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification'], required=True)
     parser.add_argument('--base'); parser.add_argument('--record')
     parser.add_argument('--phone')
     args = parser.parse_args()

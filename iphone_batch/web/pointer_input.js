@@ -8,6 +8,7 @@ class PointerInput {
         this.active = false;
         this.moved = false;
         this.waiters = [];
+        this.failedGestures = new Set();
         this.generation = 0;
         this.sentGesture = null;
         this.sentMotionGesture = null;
@@ -64,8 +65,15 @@ class PointerInput {
                 await this.send(payload);
             }
         } catch (error) {
+            // Every discarded edge belongs to a failed gesture, including a
+            // newer tap queued behind the request that failed.
+            for (const queued of this.queue) this.failedGestures.add(queued.gesture);
             this.queue.length = 0;
             this.active = false;
+            if (command?.gesture !== undefined) {
+                this.failedGestures.add(command.gesture);
+                if (this.failedGestures.size > 32) this.failedGestures.delete(this.failedGestures.values().next().value);
+            }
             // A lost reply may still have pressed the phone. Release once.
             if (command) {
                 try { await this.send({type: 'release', x: command.x, y: command.y, settle: false}); } catch (_) {}
@@ -77,9 +85,9 @@ class PointerInput {
             else for (const resolve of this.waiters.splice(0)) resolve();
         }
     }
-    idle() {
-        if (!this.running && !this.queue.length) return Promise.resolve();
-        return new Promise(resolve => this.waiters.push(resolve));
+    idle(gesture = this.gesture) {
+        if (!this.running && !this.queue.length) return Promise.resolve(!this.failedGestures.has(gesture));
+        return new Promise(resolve => this.waiters.push(() => resolve(!this.failedGestures.has(gesture))));
     }
 }
 if (typeof module !== 'undefined') module.exports = PointerInput;

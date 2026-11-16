@@ -16,6 +16,7 @@ function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatu
         Blob, Uint8Array, atob, URLSearchParams, AbortSignal,
         inputEpoch: 0, batchManaged: true, enabled: true,
         pointerInput: {idle: async () => {}},
+        notifyForegroundActivity() {},
         canvas, document, navigator: {}, CTRL_HOTKEYS: {},
         location: {search: '?batch=1&manager=http%3A%2F%2F127.0.0.1%3A8070'},
         parent: {postMessage(message) {feedback.push(message);}},
@@ -62,17 +63,10 @@ function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatu
     await vm.runInContext("queueHostPaste('\u6b63\u6587\\n\ud83d\ude42')", supplied.context);
     await supplied.idle();
     assert(!supplied.requests.some(r => r.url === '/host-clipboard'));
-    assert(supplied.requests.findIndex(r => r.url === '/manual-composer-focus') < supplied.requests.findIndex(r => r.url === '/clipboard'));
+    assert(!supplied.requests.some(r => r.url === '/manual-composer-focus'), 'reading-pane paste must not scan/reposition the phone composer');
+    assert(supplied.requests.findIndex(r => r.url === '/clipboard') < supplied.requests.findIndex(r => r.url === '/manual-paste'));
     assert.equal(JSON.parse(supplied.requests.find(r => r.url === '/clipboard').options.body).text, '\u6b63\u6587\n\ud83d\ude42');
     assert.deepEqual(supplied.chords(), [{}]);
-
-    const focusFailed = setup();
-    const focusFetch = focusFailed.context.fetch;
-    focusFailed.context.fetch = async (url, options) => url === '/manual-composer-focus' ? {ok:false,status:400} : focusFetch(url,options);
-    await assert.rejects(vm.runInContext("queueHostPaste('body')", focusFailed.context));
-    await focusFailed.idle();
-    assert(!focusFailed.requests.some(r => r.url === '/clipboard'));
-    assert.deepEqual(focusFailed.chords(), []);
 
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=';
     const image = setup({text: 'image URL', image: png});
