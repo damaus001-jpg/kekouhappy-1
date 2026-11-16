@@ -2,13 +2,33 @@
 
 目标是原电脑损毁后，使用项目源码，在联网的 Windows 11 x64 电脑上重新安装依赖并运行项目。恢复措施位于项目目录，客户端没有新增备份页面、按钮或浏览器资料同步功能。
 
-当前本地版本为 v0.1.7，保存原 8070 与原生 VNC 两套源码。原生 VNC 的运行目录原先被 Git 忽略，现另存到 [native_vnc_source](native_vnc_source/README.md)。恢复本地 v0.1.7 标签后，准备根目录依赖，再按该目录说明恢复开发版。本次恢复点没有推送 GitHub，远端 ZIP 不包含本次本地存档。
+当前恢复版本为 v0.1.11，源码及恢复入口位于 GitHub。原生 VNC 是平级独立项目，不包含在本仓库恢复范围。
 
-## 1. 下载项目
+## 一键恢复（Windows 11 x64）
+
+在 PowerShell 中执行以下命令。它会从 GitHub 下载最新 `master` 项目快照到文档目录下新的 `qunkong-recovered` 文件夹，安装环境并启动 8070：
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/damaus001-jpg/kekouhappy-1/master/Recover.ps1)))
+```
+
+也可以先从 GitHub 下载 `Recover.ps1` 审阅后，再运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Recover.ps1
+```
+
+目标目录必须为空；已有文件不会被覆盖。可指定目标路径或恢复分支：`-Destination C:\qunkong -Ref master`。恢复脚本下载 GitHub 源码 ZIP，随后调用项目安装器完成 Python 3.13 x64、Node.js 24+、Apple 驱动检查/安装、锁定依赖安装、`pip check`、环境检查和后台启动。系统软件安装可能弹出 UAC 或要求重启；Apple 驱动和手机信任仍需人工确认。首次运行需要联网。不要从未审阅的脚本来源执行命令。
+
+该入口恢复 GitHub 上最新推送的分支内容。历史版本需先下载相应 GitHub 标签源码，并按下面的安装步骤运行。每次强推后可从 GitHub 默认分支恢复对应的新代码。
+
+## 手动恢复步骤
+
+### 1. 下载项目
 
 从 GitHub 下载最新分支 ZIP，完整解压到普通可写目录，例如 `C:\qunkong`。不要在压缩包预览窗口中运行。无需安装 Git；ZIP 不包含提交历史，需要历史记录时再使用 Git 克隆仓库。
 
-## 2. 安装环境
+### 2. 安装环境
 
 在项目根目录打开 PowerShell：
 
@@ -33,7 +53,7 @@ Python 补丁版本可能与原机不同；固定的是 Python 3.13 x64 和锁�
 
 可选参数：`-SkipAppleDriver` 用于暂时只运行无手机界面；`-SkipSystemInstall` 只复用已安装的系统软件，但仍安装项目 Python 依赖。正常新电脑请不加这些参数。
 
-## 3. 启动项目
+### 3. 启动项目
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Start.ps1
@@ -43,7 +63,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Start.ps1
 
 原手机通过 USB 接入，解锁并信任新电脑，按设备要求确认开发者模式。接入后重新启动工作台加载设备。开发者镜像、手机服务准备和连通性检查见 [SINGLE_DEVICE.md](iphone_batch/SINGLE_DEVICE.md)。安装、检查和启动脚本均不会自动发送短信。
 
-## 4. 重新配置本机凭据
+### 4. 重新配置本机凭据
 
 工作台当前保持原文模式；翻译配置由授权客户端负责，不要求给8070重新配置旧翻译密钥。授权客户端需要重新安装和授权；使用ChatGPT助手时需要重新登录。手机与新电脑的信任和配对也需重新建立。这些人工授权不能由GitHub代码代替。
 
