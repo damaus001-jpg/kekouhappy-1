@@ -2,7 +2,7 @@
 
 Start with [SINGLE_DEVICE.md](SINGLE_DEVICE.md). USB-only discovery, exclusive device ownership, device info, developer-image preparation and USB monitoring are available.
 
-**当前本地恢复点：v0.1.12（2026-11-16）**。本目录维护原 8070 工作台；VNC 已迁至平级独立项目 `C:\xiangmu\qunkong-vnc`。灾难恢复入口见 [RECOVERY.md](../RECOVERY.md)，从 GitHub 下载、安装锁定依赖并启动 8070。最新恢复项目改动见 [本次存档](../SESSION_ARCHIVE_2026-11-16_v0.1.12.md)。手机号寻号尚未完全验收。以下早期原型说明保留供追溯，不代表当前全部功能和设备状态。
+当前恢复点为 **v0.1.13**（2026-11-16）。恢复流程见 [RECOVERY.md](../RECOVERY.md)。
 
 **苹果手机批量控制原型**
 
