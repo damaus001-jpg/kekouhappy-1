@@ -336,6 +336,7 @@ def main():
             for device in list(devices):
                 if not connection_allowed(device, enabled):continue
                 if startup_queue.pending(device['udid']):continue
+                if startup_queue.terminal_failure(device['udid']):continue
                 if device['udid'] in trust_pending or reconnects.pending(device['udid']):continue
                 child=children.get(device['udid'])
                 if child is not None and child.poll() is None:
@@ -369,26 +370,16 @@ def main():
                 except OSError:device['error']='投屏启动失败，正在重试'
 
     def viewer_ready(device):
-        if not connection_allowed(device, enabled):return False
-        child=children.get(device['udid'])
-        if child is None or child.poll() is not None:return False
-        try:
-            opener=signed_opener()
-            with opener.open(f"http://127.0.0.1:{device['port']}/",timeout=0.5) as response:
-                ready=response.status==200
-                if ready and children.get(device['udid']) is child:retry_policy.reset(device['udid'])
-                return ready
-        except OSError:
-            return False
+        return viewer_video_ready(device)
 
     def viewer_video_ready(device):
-        """Reconnect is complete only after the phone has supplied a decodable video config."""
+        """A device is connected only after it supplies a decodable video config."""
         if not connection_allowed(device, enabled):return False
         child=children.get(device['udid'])
         if child is None or child.poll() is not None:return False
         try:
             opener=signed_opener()
-            with opener.open(f"http://127.0.0.1:{device['port']}/codec",timeout=8) as response:
+            with opener.open(f"http://127.0.0.1:{device['port']}/codec",timeout=1) as response:
                 info=json.load(response)
             ready=bool(info.get('codec') and info.get('description'))
             if ready and children.get(device['udid']) is child:retry_policy.reset(device['udid'])
@@ -620,13 +611,15 @@ def main():
                         return self.respond(200, foreground_reader.release(body))
                     device = next((d for d in devices if d['udid'] == body.get('device')), None)
                     action = body.get('action')
-                    if action not in ('prepare', 'probe', 'tick') or device is None:
+                    if action not in ('prepare', 'probe', 'tick', 'sent_tail') or device is None:
                         raise ValueError('自动读取设备无效')
                     require_control(device)
                     if action == 'prepare':
                         result = foreground_reader.prepare(body, device['udid'])
                     elif action == 'probe':
                         result = foreground_reader.probe(body, device['udid'], f"http://127.0.0.1:{device['port']}")
+                    elif action == 'sent_tail':
+                        result = foreground_reader.verify_sent(body, device['udid'], f"http://127.0.0.1:{device['port']}")
                     else:
                         result = foreground_reader.tick(body, device['udid'], f"http://127.0.0.1:{device['port']}")
                     return self.respond(200, result)
@@ -842,13 +835,18 @@ def main():
         with registry.lock:
             if not startup_queue.valid(device['udid'],ticket) or not connection_allowed(device,enabled):return
             stop_viewer(device)
-            device['error']=str(error)
+            if (startup_queue.attempt(device['udid']) or 0)>0:
+                device['error']='请重启手机'
+            elif isinstance(error,TimeoutError) and '连接超过60秒' in str(error):
+                device['error']='连接超过60秒，已跳过；30秒后重试一次'
+            else:
+                device['error']='本次连接失败，已跳过；30秒后重试一次'
     def startup_ready(device):
-        if not viewer_ready(device):
+        if not viewer_video_ready(device):
             child=children.get(device['udid'])
-            if child is not None and child.poll() is not None:raise RuntimeError('该台接入进程已退出，稍后有界重试')
+            if child is not None and child.poll() is not None:raise RuntimeError('该台接入进程已退出')
             return False
-        return viewer_video_ready(device)
+        return True
     startup_queue=ViewerStartQueue(queued_start,startup_ready,
         lambda device:connection_allowed(device,enabled),startup_failed,stopping,
         busy=lambda:psutil.cpu_percent(interval=.2)>75)

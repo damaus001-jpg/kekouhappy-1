@@ -50,7 +50,6 @@ document.addEventListener('keydown',event=>{if(event.key==='Escape')closeEmojiPi
 window.addEventListener('resize',positionEmojiPicker);
 document.addEventListener('scroll',positionEmojiPicker,true);
 function notice(text){
- document.getElementById('archive-status').textContent=text;
  const monitorNotice=document.getElementById('monitor-notice');
  const passive=/^(仅显示所选手机的保存记录|选择手机后加载|正在加载已保存|已保存记录)/.test(text)||text===currentConversation?.scope;
  if(monitorNotice&&(!passive||!monitorNotice.dataset.operation)){
@@ -58,13 +57,39 @@ function notice(text){
   if(/^设备\s/.test(text))monitorNotice.dataset.operation='true';
  }
 }
+const monthNumbers=Object.fromEntries('jan feb mar apr may jun jul aug sep oct nov dec'.split(' ').map((m,i)=>[m,i+1]));
+const chineseWeekdays={sun:'周日',mon:'周一',tue:'周二',wed:'周三',thu:'周四',fri:'周五',sat:'周六'};
+function readingDateLabel(message){
+ const raw=(message.date_label||'').replace(/[\u200e\u200f]/g,'').trim();
+ const clock=raw.match(/\s+(?:at\s+)?(\d{1,2}):(\d{2})(?:\s*([ap]m))?$/i);
+ let clockText='';
+ if(clock){
+  let hour=Number(clock[1]);
+  if(clock[3])hour=hour%12+(clock[3].toLowerCase()==='pm'?12:0);
+  clockText=' '+String(hour).padStart(2,'0')+':'+clock[2];
+ }
+ const day=clock?raw.slice(0,clock.index).trim():raw;
+ if(/^(今天|昨天|前天|(?:星期|周)[一二三四五六日天]|(?:\d{4}年)?\d{1,2}月\d{1,2}[日号])/.test(day))return day+clockText;
+ const relative={today:'今天',yesterday:'昨天'}[day.toLowerCase()];
+ if(relative)return relative+clockText;
+ const weekday=chineseWeekdays[day.slice(0,3).toLowerCase()];
+ if(weekday&&/^[a-z]+$/i.test(day))return weekday+clockText;
+ const named=day.match(/^(?:([a-z]+),?\s+)?([a-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?$/i);
+ if(named){
+  const month=monthNumbers[named[2].slice(0,3).toLowerCase()];
+  const week=chineseWeekdays[(named[1]||'').slice(0,3).toLowerCase()];
+  if(month)return (named[4]?named[4]+'年':'')+month+'月'+Number(named[3])+'日'+(week?' '+week:'')+clockText;
+ }
+ const stored=message.date||day;
+ const numeric=stored.match(/^(?:(\d{4})[-/])?(\d{1,2})[-/](\d{1,2})$/);
+ return numeric?(numeric[1]?numeric[1]+'年':'')+Number(numeric[2])+'月'+Number(numeric[3])+'日'+clockText:'';
+}
 function renderConversation(){
  closeEmojiPicker();
  sendBlocked=false;
  document.getElementById('send-reply').textContent='确认发送';
  pastedEnglish=false;
  generatedDraft=null;
- document.getElementById('profile-result').replaceChildren();document.getElementById('profile-panel').open=false;
  currentConversation=savedConversations.find(c=>c.id===currentConversationId)||null;
  if(typeof refreshContactProfile==='function')refreshContactProfile();
  document.getElementById('peer-phone').textContent=currentConversation?.phone_number||'—';
@@ -76,10 +101,22 @@ function renderConversation(){
  syncWorkspaceControls();
  document.getElementById('message-count').textContent=rows.length+' 条记录';
  if(!rows.length){const empty=document.createElement('div');empty.className='message-empty';empty.textContent='尚无当前手机的保存记录。读取当前会话后显示短信原文。';messagesEl.append(empty);notice('仅显示所选手机的保存记录，不是手机当前会话的实时同步。');return;}
+ const peerNumber=String(currentConversation?.phone_number||currentConversation?.contact||'').trim();
+ let previousDate='';
  for(const [index,message] of rows.entries()){
+  // Backup timestamps already carry an offset. Preserve their recorded day
+  // and timezone even when the workstation is in a different timezone.
+  const iso=typeof message.time==='string'&&message.time.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/);
+  const date=readingDateLabel(message)||(iso?iso[1]+'年'+Number(iso[2])+'月'+Number(iso[3])+'日':'');
+  const time=iso?iso[4]+' UTC'+(['Z','+00:00'].includes(iso[5])?'':iso[5]):message.time;
+  if(date!==previousDate){
+   const separator=document.createElement('div');separator.className='message-date';separator.textContent=date||'日期待确认';
+   messagesEl.append(separator);
+  }
+  previousDate=date;
   const node=document.createElement('div');node.className='message '+(message.side==='outgoing'?'outgoing':'incoming');
   node.dataset.messageId=index;
-  const meta=document.createElement('div');meta.className='message-meta';meta.textContent=(message.side==='outgoing'?'我方':message.side==='incoming'?'对方':'待核对')+' · '+(message.date_label||message.date||'')+' '+(message.time||'时间未知');
+  const meta=document.createElement('div');meta.className='message-meta';meta.textContent=(message.side==='outgoing'?'我方':message.side==='incoming'?'对方':'待核对')+' · '+(time||'时间未知')+(message.side==='incoming'&&peerNumber?' · '+peerNumber:'');
   const bubble=document.createElement('div');bubble.className='bubble';
   const original=document.createElement('div');original.className='original';original.textContent=message.text||(message.kind==='attachment'?'[附件消息]':message.decode_error?'[正文解析未完成]':'[无文字内容]');
   bubble.append(original);node.append(meta,bubble);messagesEl.append(node);
@@ -113,7 +150,6 @@ function syncWorkspaceControls(){
  }
  const selected=!!workspaceDevice&&(typeof controlOwner==='undefined'||controlOwner===workspaceDevice), available=!!currentConversation;
  for(const id of ['capture-current','sync-full-history','refresh-messages'])document.getElementById(id).disabled=workspaceBusy||!selected;
- document.getElementById('summarize-contact').disabled=workspaceBusy||!available;
  if(typeof syncContactProfileControls==='function')syncContactProfileControls();
  const sendButton=document.getElementById('send-reply');
  const pasteButton=document.getElementById('paste-to-phone');
@@ -152,7 +188,7 @@ async function operation(text, action){
 }
 async function captureConversation(full=false){
  const device=workspaceDevice, revision=workspaceRevision;
- operation(full?'正在同步手机短信数据库，可能需要较长时间…':'正在读取手机屏幕当前可见的气泡…',async()=>{
+ operation(full?'正在同步手机短信数据库，可能需要较长时间…':'正在回到底部并读取当前会话…',async()=>{
   const result=await workspaceRequest('capture',full?{full:true}:{},device);if(revision!==workspaceRevision)return;
   await loadWorkspace(device,true,result.conversation_id);
   notice('已读取 '+result.contact+'；'+(result.scope||'历史范围待核对')+'。');
@@ -160,28 +196,6 @@ async function captureConversation(full=false){
 }
 document.getElementById('capture-current').addEventListener('click',()=>captureConversation(false));
 document.getElementById('sync-full-history').addEventListener('click',()=>captureConversation(true));
-document.getElementById('summarize-contact').addEventListener('click',()=>{
- const conversation=currentConversation;
- if(!conversation)return;
- operation('正在整理双方文字、复制到剪贴板并打开 ChatGPT…',async()=>{
-  const exported=buildGptProfileExport(conversation);
-  const response=await fetch('/api/gpt-summary',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:exported.text})});
-  const result=await response.json();if(!response.ok||result.error)throw Error(result.error||'打开 ChatGPT 失败');
-  const messages={filled:'已复制并填入 ChatGPT 输入框，请检查后自行发送。',
-   existing_draft:'已复制。ChatGPT 输入框已有草稿，已保留原内容；请自行粘贴。',
-   page_not_ready:'已复制并打开浏览器。请完成 ChatGPT 登录或等待页面加载，再点击去汇总；也可自行粘贴。',
-   unverified:'已复制，输入框填入结果尚未确认，请检查 ChatGPT 页面，避免重复粘贴。',
-   browser_error:'文字已复制，自动填入未完成；请打开 ChatGPT 后粘贴。',
-   browser_unavailable:'文字已复制，未找到可用浏览器；请打开 ChatGPT 后粘贴。'};
-  const message=messages[result.status]||'文字已复制，请在 ChatGPT 查看。';
-  notice(message);
-  if(currentConversation?.id!==conversation.id)return;
-  const container=document.getElementById('profile-result');container.replaceChildren();
-  const description=document.createElement('p');description.textContent=exported.message_count+' 条双方文字消息。'+message+' 汇总后复制 GPT 的 JSON 结果，粘贴到下方并填入资料。';container.append(description);
-  const link=document.createElement('a');link.href='https://chatgpt.com/';link.target='_blank';link.rel='noopener noreferrer';link.textContent='打开 ChatGPT';container.append(link);
-  document.getElementById('profile-panel').open=true;
- });
-});
 function showSentReply(result){
  if(result.conversation){
   const conversation=result.conversation;
@@ -213,7 +227,7 @@ function pasteReplyToPhone(){
  const id=crypto.randomUUID(),device=workspaceDevice,revision=workspaceRevision;
  const text=draftEl.value;
  const timer=setTimeout(()=>finishPhonePaste(id,false,'粘贴结果未确认，请先检查手机输入框，避免重复粘贴'),20000);
- phonePastePending={id,device,revision,frame:card.frame,origin:card.origin,timer};
+ phonePastePending={id,device,revision,text,frame:card.frame,origin:card.origin,timer};
  syncWorkspaceControls();notice('正在将正文粘贴到当前手机短信输入框…');
  card.frame.contentWindow.postMessage({type:'paste-composer',id,text},card.origin);
 }
@@ -223,8 +237,16 @@ function finishPhonePaste(id,ok,error){
  if(!pending||pending.id!==id)return;
  clearTimeout(pending.timer);phonePastePending=null;
  if(pending.device===workspaceDevice&&pending.revision===workspaceRevision){
-  if(ok)sendBlocked=true;
-  notice(ok?'粘贴快捷键已发出，请核对手机会话和输入框内容；确认后再点击手机发送按钮。阅读区正文已保留。':error||'粘贴未完成，请检查手机输入框');
+  let cleared=false;
+  if(ok){
+   sendBlocked=true;
+   window.ForegroundSync?.expectSend(currentConversation?.phone_number||window.ForegroundSync.number,pending.text);
+   if(draftEl.value===pending.text){
+    draftEl.value='';try{localStorage.removeItem(draftKey());}catch{}
+    resizeDraft();cleared=true;
+   }
+  }
+  notice(ok?(cleared?'粘贴快捷键已发出，阅读区正文已清空；请核对手机输入框后发送。':'粘贴快捷键已发出；粘贴期间新编辑的正文已保留，请核对手机输入框。'):error||'粘贴未完成，请检查手机输入框');
  }
  syncWorkspaceControls();
 }

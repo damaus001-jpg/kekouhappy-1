@@ -3,6 +3,7 @@ import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
 import threading
 import time
+from pairing_patch import PhoneTrustRequired
 
 
 class ForegroundAXSession:
@@ -22,6 +23,8 @@ class ForegroundAXSession:
             raise TimeoutError('原生号码识别连接初始化超时')
         if self.error:
             self.close()
+            if isinstance(self.error, PhoneTrustRequired):
+                raise self.error
             raise RuntimeError('原生号码识别连接初始化失败：' + self.error)
 
     def _thread_main(self):
@@ -31,7 +34,7 @@ class ForegroundAXSession:
         try:
             self.loop.run_until_complete(asyncio.wait_for(self._open(), 8))
         except BaseException as error:
-            self.error = type(error).__name__
+            self.error = error if isinstance(error, PhoneTrustRequired) else type(error).__name__
             try:
                 self.loop.run_until_complete(self._close_services())
             finally:
@@ -49,14 +52,11 @@ class ForegroundAXSession:
     async def _open(self):
         from pathlib import Path
         from pymobiledevice3 import common
-        from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.services.accessibilityaudit import AccessibilityAudit
-        from pairing_patch import install
+        from pairing_patch import open_paired_usb
         data = Path(self.root)
         common._HOMEFOLDER = data
-        install()
-        self.lockdown = await create_using_usbmux(serial=self.device, connection_type='USB',
-            usbmux_address='127.0.0.1:27015', pairing_records_cache_folder=data, autopair=False)
+        self.lockdown = await open_paired_usb(self.device, data)
         self.audit = AccessibilityAudit(self.lockdown)
         await self.audit.__aenter__()
 
@@ -75,9 +75,14 @@ class ForegroundAXSession:
                 pass
 
     async def _invoke(self, action, options, cancelled, finished):
-        from native_foreground import probe_title, read_window
+        from native_foreground import probe_title, read_window, read_sent_tail
         if action == 'auto_probe':
-            operation = probe_title(self.audit, recover_first=False)
+            operation = probe_title(self.audit, recover_first=options.get('recover_first', False))
+        elif action == 'auto_read':
+            from ax_conversation import capture_conversation
+            operation = capture_conversation(self.audit, options)
+        elif action == 'auto_sent_tail':
+            operation = read_sent_tail(self.audit, options)
         else:
             operation = read_window(self.audit, options, tail=action == 'auto_tail')
         task = asyncio.create_task(operation)
@@ -102,7 +107,7 @@ class ForegroundAXSession:
                 raise RuntimeError('原生号码识别连接已断开')
             finished = threading.Event()
             future = asyncio.run_coroutine_threadsafe(self._invoke(action, options, cancelled, finished), self.loop)
-            deadline = time.monotonic() + 35
+            deadline = time.monotonic() + 70
             try:
                 while True:
                     if cancelled() or self.closing.is_set():

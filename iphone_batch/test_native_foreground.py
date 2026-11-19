@@ -41,6 +41,19 @@ class Inspector:
 
 
 class NativeForegroundTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sent_tail_confirms_empty_composer_and_returns_to_latest(self):
+        from native_foreground import read_sent_tail
+        service = Inspector(['Back, Button', HEADER, 'Text Message • SMS', 'Today 10:00',
+                             NUMBER+', Earlier, 10:00','Your iMessage, Hello, 10:01',
+                             'add, Button','Message, iMessage','Record audio, Button'])
+        result = await read_sent_tail(service, {'phone_number': NUMBER})
+        self.assertTrue(result['composer_empty'])
+        self.assertTrue(result['bottom_confirmed'])
+        self.assertEqual(result['messages'][-1]['text'],'Hello')
+        self.assertEqual(service.items[service.index][0].caption if isinstance(service.items[service.index],list)
+                         else service.items[service.index].caption, 'add, Button')
+        self.assertFalse(service.monitoring)
+
     async def asyncSetUp(self):
         self.patches = [patch('native_foreground.deserialize_object', side_effect=lambda value: value),
                         patch('native_ui_scan.deserialize_object', side_effect=lambda value: value)]
@@ -86,6 +99,45 @@ class NativeForegroundTests(unittest.IsolatedAsyncioTestCase):
         result = await read_window(service, {'phone_number': NUMBER})
         self.assertTrue(result['input_active'])
         self.assertNotIn('messages', result)
+
+    async def test_overlap_waits_for_reread_of_relative_date(self):
+        from bubble_records import date_separator
+        history = [dict(side='incoming', text=text, kind='text', time='10:00',
+                        **date_separator('Today 10:00')) for text in ('A','B')]
+        service = Inspector(['Back, Button', HEADER, 'Yesterday 10:00',
+                             NUMBER+', A, 10:00', NUMBER+', B, 10:00', 'Message, iMessage'])
+        result = await read_window(service, {'phone_number': NUMBER, 'history': history})
+        self.assertEqual(result['stop_reason'], 'overlap')
+        self.assertEqual([m.get('date_label') for m in result['messages']], ['Yesterday 10:00']*2)
+
+    async def test_link_preview_message_label_does_not_stop_reverse_read(self):
+        card = "Message, That's how I keep in touch with my family."
+        service = Inspector(['Back, Button', HEADER,
+            NUMBER + ', Before the link, 10:00', card, 'Image',
+            'Signal Messenger: Speak Freely', 'signal.org',
+            NUMBER + ', After the link, 10:01', 'add, Button',
+            'Message, Text Message, SMS', 'Record audio, Button'])
+        result = await read_window(service, {'phone_number': NUMBER})
+        self.assertNotIn('input_active', result)
+        self.assertEqual(result['stop_reason'], 'title')
+        self.assertEqual([m['text'] for m in result['messages']],
+                         ['Before the link', 'After the link'])
+        self.assertEqual([r['caption'] for r in result['unclassified']], [card])
+        self.assertEqual(result['source'], 'native-foreground')
+        self.assertFalse(service.monitoring)
+
+    async def test_send_button_still_pauses_after_empty_composer_label(self):
+        service = Inspector(['Back, Button', HEADER, NUMBER + ', A, 10:00',
+                             'Send, Button', 'Message, iMessage'])
+        result = await read_window(service, {'phone_number': NUMBER})
+        self.assertTrue(result['input_active'])
+        self.assertNotIn('messages', result)
+
+    def test_link_preview_summary_remains_unclassified(self):
+        card = {'caption': 'Message, A link preview, 10:00', 'platform_identifier': 'card'}
+        messages, unknown = parse_bubbles([card], NUMBER)
+        self.assertEqual(messages, [])
+        self.assertEqual(unknown, [card])
 
     async def test_formatted_title_matches_incoming_messages_and_send_fingerprint(self):
         from native_workspace import digest

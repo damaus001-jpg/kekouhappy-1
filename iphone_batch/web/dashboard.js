@@ -1,12 +1,13 @@
-/* A thumbnail wall; the existing viewers remain the only video subscribers. */
+﻿/* A thumbnail wall; the existing viewers remain the only video subscribers. */
 class GlobalMonitor {
  constructor({pick, menu, refresh, sort}) {
   Object.assign(this,{pick,menu,refresh,sort});this.visible=true;this.tiles=new Map();this.sequence=0;
   this.grid=document.getElementById('monitor-grid');
-  this.section=document.getElementById('global-monitor');this.fullscreenButton=document.getElementById('monitor-fullscreen');
+  this.section=document.getElementById('global-monitor');
+  this.switcher=document.getElementById('current-display-devices');this.switcherSignature='';this.displayOrder=[];
   this.layoutButton=document.getElementById('monitor-layout');
   this.sizeSlider=document.getElementById('monitor-size');this.sizeLabel=document.getElementById('monitor-size-value');
-  this.sizes={};for(const mode of ['single','double'])try{const n=Number(localStorage.getItem('monitor-size-'+mode));if(n>=80&&n<=480)this.sizes[mode]=n;}catch{}
+  this.sizes={};for(const mode of ['single','double'])try{const n=Number(localStorage.getItem('monitor-size-'+mode));if(n>=50&&n<=480)this.sizes[mode]=n;}catch{}
   let single=false;try{single=localStorage.getItem('monitor-layout')==='single';}catch{}
   this.setLayout(single,false);
   this.layoutButton.addEventListener('click',()=>this.setLayout(!this.single));
@@ -16,9 +17,6 @@ class GlobalMonitor {
    this.updateSize();
   });
   this.resizeObserver=new ResizeObserver(()=>this.updateSize());this.resizeObserver.observe(this.grid);
-  this.fullscreenButton.addEventListener('click',()=>this.toggleFullscreen());
-  document.addEventListener('fullscreenchange',()=>this.syncFullscreen());
-  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&this.section.classList.contains('monitor-window-fullscreen'))void this.exitFullscreen();});
   document.getElementById('monitor-refresh').addEventListener('click',refresh);
   document.getElementById('monitor-sort').addEventListener('change',event=>sort(event.target.value));
   window.addEventListener('message',event=>this.receive(event));
@@ -34,7 +32,7 @@ class GlobalMonitor {
  }
  updateSize(){
   const mode=this.single?'single':'double',gap=parseFloat(getComputedStyle(this.grid).columnGap)||12;
-  const preferred=this.sizes[mode]??(this.single?Math.max(80,Math.min(480,(this.grid.clientWidth-gap*4)/5)):160);
+  const preferred=this.sizes[mode]??(this.single?Math.max(50,Math.min(480,(this.grid.clientWidth-gap*4)/5)):160);
   const count=Math.max(1,Math.floor((this.grid.clientWidth+gap)/(preferred+gap)));
   const width=this.single?preferred:Math.max(1,(this.grid.clientWidth-gap*(count-1))/count);
   this.grid.style.setProperty('--monitor-tile-width',width+'px');
@@ -47,26 +45,10 @@ class GlobalMonitor {
  }
  openWorkbench(){document.querySelector('main').scrollIntoView({behavior:'smooth',block:'start'});}
  scrollToTop(){document.getElementById('global-monitor').scrollIntoView({behavior:'smooth',block:'start'});}
- isFullscreen(){return document.fullscreenElement===this.section||this.section.classList.contains('monitor-window-fullscreen');}
- syncFullscreen(){const on=this.isFullscreen();this.fullscreenButton.textContent=on?'退出全屏 · Esc':'全屏监看';this.fullscreenButton.setAttribute('aria-pressed',String(on));}
- async exitFullscreen(){
-  if(document.fullscreenElement===this.section)await document.exitFullscreen();
-  this.section.classList.remove('monitor-window-fullscreen');document.body.classList.remove('monitor-fullscreen-open');this.syncFullscreen();
- }
- async toggleFullscreen(){
-  try{
-   if(this.isFullscreen()){await this.exitFullscreen();return;}
-   if(!this.section.requestFullscreen)throw Error('unsupported');
-   await this.section.requestFullscreen();
-  }catch(error){
-   this.section.classList.add('monitor-window-fullscreen');document.body.classList.add('monitor-fullscreen-open');
-   document.getElementById('monitor-notice').textContent='当前客户端未开放浏览器全屏，已铺满窗口；按 Esc 退出。';
-  }
-  this.syncFullscreen();
- }
  revoke(tile){if(tile.url){URL.revokeObjectURL(tile.url);tile.url=null;}}
  render(ordered,cards,sortValue) {
   this.cards=cards;
+  this.displayOrder=ordered;
   const connected=new Set(ordered.map(row=>row.device.udid));
   for(const [id,tile] of this.tiles)if(!connected.has(id)){this.revoke(tile);tile.node.remove();this.tiles.delete(id);}
   document.getElementById('monitor-count').textContent=ordered.length+' 台设备 · '+[...this.tiles.values()].filter(tile=>tile.url&&tile.device?.ready).length+' 台已显示 · '+ordered.filter(row=>row.device.ready).length+' 台投屏就绪';
@@ -78,12 +60,14 @@ class GlobalMonitor {
    if(!tile){
     const node=document.createElement('button');node.type='button';node.className='monitor-tile';node.dataset.udid=device.udid;
     const heading=document.createElement('span');heading.className='monitor-tile-heading';
-    const number=document.createElement('strong'),badge=document.createElement('span');badge.className='monitor-badge';heading.append(number,badge);
+    const flip=document.createElement('span');flip.className='monitor-device-flip';
+    const number=document.createElement('strong'),backLabel=document.createElement('strong');number.className='monitor-device-front';backLabel.className='monitor-device-back';backLabel.textContent='待跟进';flip.append(number,backLabel);
+    const badge=document.createElement('span');badge.className='monitor-badge';heading.append(flip,badge);
     const screen=document.createElement('span');screen.className='monitor-screen';
     const image=document.createElement('img');image.alt='';image.hidden=true;image.draggable=false;
     const placeholder=document.createElement('span');placeholder.className='monitor-placeholder';screen.append(image,placeholder);
     node.append(heading,screen);
-    tile={node,number,badge,image,placeholder,nextAt:now+position*1500/Math.max(1,ordered.length),url:null,received:0,pending:null};
+    tile={node,number,flip,backLabel,badge,image,placeholder,nextAt:now+position*1500/Math.max(1,ordered.length),url:null,received:0,pending:null};
     node.addEventListener('click',()=>this.pick(device.udid));
     node.addEventListener('contextmenu',event=>this.menu(event,tile.device,tile.index));
     this.tiles.set(device.udid,tile);
@@ -93,6 +77,9 @@ class GlobalMonitor {
    const frame=cards.get(device.udid)?.frame;
    if(tile.frame!==frame){tile.frame=frame;tile.pending=null;tile.received=0;tile.firstRequestAt=0;this.revoke(tile);tile.image.hidden=true;tile.image.removeAttribute('src');}
    tile.number.textContent='设备 '+label.number;
+   const hasFollowup=followupCount>0||label.followup===true;
+   tile.flip.classList.toggle('has-followup',hasFollowup);
+   tile.backLabel.hidden=!hasFollowup;
    const count=device.notifications?.card_count??device.notifications?.items?.length??0;
    tile.badge.textContent=count?String(count):'';tile.badge.hidden=!count;
    tile.node.title=device.name+' · '+device.udid.slice(-8)+(followupCount?' · 待跟进 '+followupCount:label.followup?' · 待跟进':'')+' · 点击进入操作；右键管理设备';
@@ -100,11 +87,29 @@ class GlobalMonitor {
    this.updateState(tile,now);this.grid.append(tile.node);
   });
   this.updateSize();
+  this.syncDeviceSwitcher();
+ }
+ syncDeviceSwitcher(){
+  if(!this.switcher)return;
+  const entries=this.displayOrder.filter(({device})=>{
+   const tile=this.tiles.get(device.udid);return !!(tile?.url&&device.ready);
+  });
+  const signature=[this.selected||'',...entries.map(({device,label})=>device.udid+':'+label.number)].join('|');
+  if(signature===this.switcherSignature)return;
+  this.switcherSignature=signature;this.switcher.replaceChildren();this.switcher.hidden=!entries.length;
+  for(const {device,label} of entries){
+   const button=document.createElement('button');button.type='button';button.className='current-display-device';
+   button.textContent=label.number;button.title='切换到 '+label.number;button.setAttribute('aria-pressed',String(device.udid===this.selected));
+   if(device.udid===this.selected)button.classList.add('current');
+   button.addEventListener('click',()=>this.pick(device.udid));this.switcher.append(button);
+  }
  }
  updateState(tile,now){
   const ready=tile.device.ready,stale=tile.received&&now-tile.received>10000;
   const waiting=ready&&!tile.received&&tile.firstRequestAt&&now-tile.firstRequestAt>15000;
   tile.node.classList.toggle('monitor-stale',!!stale||tile.streamState==='retrying'||!ready);
+  const alert=tile.device.enabled!==false&&((!ready&&!tile.device.reconnecting&&!tile.device.trust_pending)||!!stale||tile.streamState==='retrying');
+  tile.node.classList.toggle('monitor-offline-alert',!!alert);
   tile.placeholder.hidden=!!tile.url;
   const status=tile.device.enabled===false?'已断开，右键选择“接入此台”':tile.device.trust_pending?'正在检查并修复信任，如手机弹窗请确认':tile.device.reconnecting?(tile.device.reconnect_stage==='trusting'?'正在检查并修复信任，如手机弹窗请确认':'正在重新连接，请稍候'):!ready?tile.device.error||tile.device.reconnect_error||'正在准备手机画面，请稍候':stale?'更新中断，保留上次画面':tile.streamState==='retrying'?'画面重连中':waiting?'暂未收到手机画面，可右键重新连接此设备':tile.received?'画面已显示':'正在等待手机画面';
   tile.placeholder.textContent=status;
@@ -132,6 +137,7 @@ class GlobalMonitor {
    if(!(blob instanceof Blob)||blob.type!=='image/jpeg'||blob.size>1024*1024)return;
    const previous=tile.url;tile.url=URL.createObjectURL(blob);tile.image.src=tile.url;tile.image.hidden=false;
    if(previous)URL.revokeObjectURL(previous);
+   this.syncDeviceSwitcher();
    tile.received=Date.now();this.updateState(tile,tile.received);return;
   }
  }
@@ -139,25 +145,57 @@ class GlobalMonitor {
 
 
 const cards=new Map();let active=null;let busy=false;let latest=[];let controlPaused=false;
-const workbench=document.querySelector('main'),phoneViewport=document.getElementById('selected');
+const phoneScaleInput=document.createElement('input'),phoneScaleValue=document.createElement('output');
+phoneScaleInput.type='range';phoneScaleInput.id='phone-screen-size';phoneScaleInput.min='50';phoneScaleInput.max='130';phoneScaleInput.step='5';
+let phoneScreenScale=100;try{const saved=Number(localStorage.getItem('phone-screen-size'));if(saved>=50&&saved<=130)phoneScreenScale=saved;}catch{}
+phoneScaleInput.value=String(phoneScreenScale);phoneScaleValue.value=phoneScreenScale+'%';phoneScaleValue.textContent=phoneScreenScale+'%';
+const workbench=document.querySelector('main'),phoneViewport=document.getElementById('selected'),phonePanel=document.querySelector('.phone-panel');
+function syncPhoneScaleLayout(){
+ workbench.style.height=Math.round(window.innerHeight*phoneScreenScale/100)+'px';
+ schedulePhoneLayout();
+}
+function applyPhoneScale(){
+ phoneScreenScale=Number(phoneScaleInput.value);phoneScaleValue.value=phoneScreenScale+'%';phoneScaleValue.textContent=phoneScaleValue.value;
+ try{localStorage.setItem('phone-screen-size',String(phoneScreenScale));}catch{}
+ syncPhoneScaleLayout();
+}
+phoneScaleInput.addEventListener('input',applyPhoneScale);
+const phoneSizeLabel=document.createElement('label');phoneSizeLabel.className='phone-screen-size-control';phoneSizeLabel.title='调整实时画面默认大小，仍随窗口空间自适应';phoneSizeLabel.append('画面大小 ',phoneScaleInput,phoneScaleValue);
+document.querySelector('.phone-panel .section-title h2').after(phoneSizeLabel);
+const phoneDisplayTools=document.createElement('div');phoneDisplayTools.className='phone-display-tools';
+phoneSizeLabel.after(phoneDisplayTools);
+phoneDisplayTools.append(phoneSizeLabel,document.querySelector('.phone-panel .phone-actions'));
 let phoneLayoutFrame=null;
 function schedulePhoneLayout(){
  if(phoneLayoutFrame===null)phoneLayoutFrame=requestAnimationFrame(updatePhoneLayout);
 }
 function updatePhoneLayout(){
  phoneLayoutFrame=null;
- if(window.innerWidth<=820||!phoneViewport.clientHeight)return;
  const aspect=cards.get(active)?.videoAspect||9/19.5;
- const limit=Math.min(440,Math.max(270,window.innerWidth*.30));
+ if(window.innerWidth<=820){
+  const titleHeight=phonePanel.querySelector('.section-title').getBoundingClientRect().height;
+  const screenHeight=Math.ceil(Math.max(1,phoneViewport.clientWidth-18)/aspect+18);
+  const height=Math.ceil(titleHeight+8+screenHeight)+'px';
+  if(phonePanel.style.height!==height)phonePanel.style.height=height;
+  return;
+ }
+ phonePanel.style.removeProperty('height');
+ if(!phoneViewport.clientHeight)return;
+ // Reserve the reading panel's minimum width while allowing the live screen
+ // to grow with the slider instead of stopping at a fixed 30vw/440px ceiling.
+ const sideRailWidth=72;
+ const limit=Math.max(270,window.innerWidth-440-sideRailWidth);
  // The embedded stage reserves 12px padding and 4px frame clearance;
  // #selected adds a 2px border. Use source dimensions, never scaled width.
  const fitted=Math.max(0,phoneViewport.clientHeight-16)*aspect+18;
- const width=Math.ceil(Math.max(220,Math.min(limit,fitted)))+'px';
+ const width=Math.ceil(Math.max(220,Math.min(limit,fitted))+sideRailWidth)+'px';
  if(workbench.style.getPropertyValue('--phone-column-width')!==width)workbench.style.setProperty('--phone-column-width',width);
 }
 const phoneLayoutObserver=new ResizeObserver(schedulePhoneLayout);
 phoneLayoutObserver.observe(workbench);phoneLayoutObserver.observe(phoneViewport);
 window.addEventListener('pagehide',()=>{phoneLayoutObserver.disconnect();if(phoneLayoutFrame!==null)cancelAnimationFrame(phoneLayoutFrame);});
+window.addEventListener('resize',syncPhoneScaleLayout);
+syncPhoneScaleLayout();
 let selectionRevision=0;
 let controlOwner=null;
 const devicePreview=location.hash==='#preview-devices';
@@ -167,25 +205,50 @@ const globalMonitor=typeof GlobalMonitor==='function'?new GlobalMonitor({
 }):null;
 if(globalMonitor){
  const back=document.createElement('button');back.id='monitor-back';back.type='button';back.className='secondary monitor-back';back.textContent='↑ 设备列表';
- back.addEventListener('click',()=>showGlobalMonitor());document.querySelector('.phone-panel .section-title').prepend(back);
+ const page=document.scrollingElement||document.documentElement;
+ let navDestination='devices';
+ const updateNav=()=>{back.dataset.destination=navDestination;back.textContent=navDestination==='screen'?'↓ 当前画面':'↑ 设备列表';};
+ back.addEventListener('click',()=>{
+  const goToScreen=back.dataset.destination==='screen';
+  navDestination=goToScreen?'devices':'screen';updateNav();
+  const top=goToScreen?Math.max(0,page.scrollHeight-window.innerHeight):0;
+  window.scrollTo(0,top);
+ });
+ const title=document.querySelector('.phone-panel .section-title h2'),titleBox=document.createElement('div');
+ titleBox.className='phone-title-container';title.before(titleBox);titleBox.append(title,back);
+ const toolsToggle=document.createElement('button');toolsToggle.id='phone-display-tools-toggle';toolsToggle.type='button';toolsToggle.className='secondary phone-display-tools-toggle';
+ let toolsCollapsed=false;try{toolsCollapsed=localStorage.getItem('phone-display-tools-collapsed')==='true';}catch{}
+ const syncToolsToggle=()=>{
+  phoneDisplayTools.hidden=toolsCollapsed;toolsToggle.textContent=toolsCollapsed?'展开工具':'收起工具';
+  toolsToggle.title=toolsCollapsed?'展开画面大小、主页、截屏和设备信息':'折叠画面大小、主页、截屏和设备信息';
+  toolsToggle.setAttribute('aria-expanded',String(!toolsCollapsed));
+ };
+ toolsToggle.addEventListener('click',()=>{
+  toolsCollapsed=!toolsCollapsed;try{localStorage.setItem('phone-display-tools-collapsed',String(toolsCollapsed));}catch{}
+  syncToolsToggle();schedulePhoneLayout();
+ });
+ titleBox.append(toolsToggle);syncToolsToggle();
+ const syncNav=()=>{
+  const maxTop=Math.max(0,page.scrollHeight-window.innerHeight);
+  if(maxTop>1)navDestination=page.scrollTop>=maxTop/2?'devices':'screen';
+  updateNav();
+ };
+ window.addEventListener('scroll',syncNav,{passive:true});window.addEventListener('resize',syncNav);syncNav();
 }
 function showGlobalMonitor(){
  closeDeviceMenu();globalMonitor?.scrollToTop();
 }
 const autoScanSwitch=document.getElementById('auto-scan');
-const autoScanStatus=document.getElementById('auto-scan-status');
 let autoScanEnabled=true,autoScanUpdating=false,scanRevision=0;
 function syncAutoScan(enabled){
  if(typeof enabled!=='boolean'||autoScanUpdating)return;
  autoScanEnabled=enabled;
  if(autoScanSwitch){autoScanSwitch.checked=enabled;autoScanSwitch.disabled=devicePreview;}
- if(autoScanStatus)autoScanStatus.textContent=enabled?'已开启':'已关闭';
 }
 autoScanSwitch?.addEventListener('change',async()=>{
  if(autoScanUpdating||devicePreview)return;
  const enabled=autoScanSwitch.checked;
  autoScanUpdating=true;scanRevision++;autoScanSwitch.disabled=true;
- autoScanStatus.textContent=enabled?'正在开启…':'正在停止…';
  try{
   const response=await fetch('/api/notification-scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
   const result=await response.json();
@@ -336,13 +399,16 @@ let revealingDeveloperMode=false;
 let developerModeFeedbackDevice=null;
 const revealDeveloperModeButton=document.getElementById('reveal-developer-mode');
 const developerModeStatus=document.getElementById('developer-mode-status');
+const deviceSetupLabel=document.getElementById('device-setup-device');
 function syncDeveloperModeButton(){
+ const selectedDevice=latest.find(device=>device.udid===active);
+ if(deviceSetupLabel){deviceSetupLabel.textContent=selectedDevice?'设备'+deviceLabel(selectedDevice,latest.indexOf(selectedDevice)).number:'';deviceSetupLabel.hidden=!selectedDevice;}
  if(!revealDeveloperModeButton)return;
     revealDeveloperModeButton.disabled=!active||latest.find(d=>d.udid===active)?.enabled===false||latest.find(d=>d.udid===active)?.readonly===true||busy||workspaceBusy||revealingDeveloperMode||devicePreview;
- revealDeveloperModeButton.textContent=revealingDeveloperMode?'正在显示入口…':'显示开发者模式入口';
+ revealDeveloperModeButton.textContent=revealingDeveloperMode?'正在显示入口…':'显示开发者入口';
  if(developerModeFeedbackDevice!==active){
   developerModeFeedbackDevice=active;
-  developerModeStatus.textContent=active?'仅显示当前手机的设置入口；请在手机上手动开启。':'选中手机后点击，再到手机设置中开启开发者模式。';
+  developerModeStatus.textContent=active?'仅显示当前手机的设置入口；请在手机上手动开启开发者模式：设置内搜索“开发者”或“Developer”，若找不到，就点击本弹窗的“显示开发者入口”按钮后间隔10秒再搜索。':'选中手机后，请在手机上手动开启开发者模式：设置内搜索“开发者”或“Developer”，若找不到，就点击本弹窗的“显示开发者入口”按钮后间隔10秒再搜索。';
  }
 }
 revealDeveloperModeButton?.addEventListener('click',async()=>{
@@ -476,13 +542,15 @@ document.addEventListener('scroll',closeDeviceMenu,true);
 window.addEventListener('resize',closeDeviceMenu);
 const readingPopups=new Map();
 function positionReadingCards(){
- for(const [id,selector,width] of [['followup-panel','.followup-contact-list',368],['profile-panel','.profile-body',380]]){
+ for(const [id,selector] of [['followup-panel','.followup-contact-list']]){
   const panel=document.getElementById(id);
   const popup=readingPopups.get(id)||panel.querySelector(selector);if(!popup)continue;
   if(!panel.open){if(readingPopups.has(id)){panel.append(popup);popup.classList.remove('reading-floating-card');readingPopups.delete(id);}continue;}
   if(!readingPopups.has(id)){popup.classList.add('reading-floating-card');document.body.append(popup);readingPopups.set(id,popup);}
   const bounds=panel.getBoundingClientRect();
-  const popupWidth=Math.min(width,window.innerWidth-24);
+  popup.style.maxWidth=Math.max(80,window.innerWidth-24)+'px';
+  popup.style.width='max-content';
+  const popupWidth=Math.min(popup.getBoundingClientRect().width,window.innerWidth-24);
   const top=Math.min(bounds.bottom+6,window.innerHeight-100);
   popup.style.width=popupWidth+'px';
   popup.style.left=Math.max(12,Math.min(bounds.right-popupWidth,window.innerWidth-popupWidth-12))+'px';
@@ -490,7 +558,7 @@ function positionReadingCards(){
   popup.style.maxHeight=Math.max(80,window.innerHeight-top-12)+'px';
  }
 }
-for(const id of ['followup-panel','profile-panel'])document.getElementById(id).addEventListener('toggle',positionReadingCards);
+document.getElementById('followup-panel').addEventListener('toggle',positionReadingCards);
 window.addEventListener('resize',positionReadingCards);
 document.addEventListener('scroll',positionReadingCards,true);
 function deviceLabelKey(device){return 'iphone-device-label:'+(devicePreview?'preview:':'device:')+device.udid;}
@@ -503,6 +571,33 @@ function contactFollowups(device){
 }
 function isContactFollowup(value){return value===true||value?.followup===true;}
 function contactFollowupCount(device){return Object.values(contactFollowups(device)).filter(isContactFollowup).length;}
+const followupProfileCache=new Map();
+let followupRenderRevision=0;
+function normalizedProfilePhone(value){
+ const raw=String(value||'').trim(),digits=raw.replace(/\D/g,'');
+ if(!digits)return '';
+ if(digits.length===10)return '1'+digits;
+ if(digits.length===11&&digits.startsWith('1'))return digits;
+ return digits;
+}
+function followupConversation(number){
+ const digits=normalizedProfilePhone(number);
+ return (typeof savedConversations!=='undefined'?savedConversations:[]).find(row=>
+  normalizedProfilePhone(row.phone_number||row.contact)===digits);
+}
+function followupProfile(device,number){
+ const conversation=followupConversation(number);if(!conversation?.id)return Promise.resolve({});
+ const key=device+':'+conversation.id;
+ if(!followupProfileCache.has(key))followupProfileCache.set(key,fetch('/api/contact-profile?'+new URLSearchParams({device,conversation:conversation.id}),{cache:'no-store'})
+  .then(async response=>{const data=await response.json();if(!response.ok||data.error)throw Error(data.error||'资料读取失败');return data.fields||{};})
+  .catch(()=>({})));
+ return followupProfileCache.get(key);
+}
+window.addEventListener('contact-profile-saved',event=>{
+ const {device,conversation}=event.detail||{};
+ if(device&&conversation)followupProfileCache.delete(device+':'+conversation);
+ if(device===active)renderFollowupContacts();
+});
 function contactFollowupContext(){
  const device=latest.find(row=>row.udid===active);
  if(!device||typeof currentConversation==='undefined'||!currentConversation)return null;
@@ -521,6 +616,7 @@ function syncContactFollowup(){
  renderFollowupContacts();
 }
 function renderFollowupContacts(){
+ const renderRevision=++followupRenderRevision;
  const list=document.getElementById('followup-contact-list');list.replaceChildren();
  const device=latest.find(row=>row.udid===active);
  const records=device?Object.entries(contactFollowups(device)).filter(([,value])=>isContactFollowup(value)):[];
@@ -530,10 +626,17 @@ function renderFollowupContacts(){
   const number=key.startsWith('phone:')?'+'+key.slice(6):null;
   const button=document.createElement('button');button.type='button';button.className='followup-contact';
   button.disabled=workspaceBusy||!number;
-  button.textContent=(value?.contact||number||key.slice(8))+(number&&value?.contact&&value.contact!==number?' · '+number:'');
+  button.textContent=number||value?.contact||key.slice(8);
   button.title=number?'在手机打开 '+number+' 并读取会话':'没有完整号码，请先手动进入会话读取';
   button.onclick=()=>openFollowupContact(device.udid,number);list.append(button);
+  if(number)followupProfile(device.udid,number).then(fields=>{
+   if(renderRevision!==followupRenderRevision||!button.isConnected)return;
+   const summary=['日期','姓名','年龄','工作','地区','婚否','爱好'].map(name=>
+    String(fields[name]||'').replace(/\s+/g,' ').trim()).filter(Boolean).join(' ');
+   if(summary){button.textContent=number+' '+summary;positionReadingCards();}
+  });
  }
+ positionReadingCards();
 }
 async function openFollowupContact(device,number){
  if(workspaceBusy||busy||!number||active!==device)return;
@@ -646,8 +749,6 @@ function render(rows,selected,controller=controlOwner){
  controlPaused=autoScanEnabled&&rows.some(row=>row.udid===selected&&row.notifications?.state==='scanning');
  if(phoneHomeButton)phoneHomeButton.disabled=!(controlOwner===selected&&rows.some(row=>row.udid===selected&&row.ready))||busy||workspaceBusy||controlPaused||devicePreview;
  const selectedDevice=rows.find(device=>device.udid===selected);
- const readingDeviceLabel=selectedDevice?deviceLabel(selectedDevice,rows.indexOf(selectedDevice)):null;
- document.getElementById('reading-device-number').textContent='设备：'+(readingDeviceLabel?.number||'—');
  if(devicePreview)loadPreviewContacts(selectedDevice);else{loadWorkspace(selected);syncWorkspaceControls();}
  syncContactFollowup();
  document.getElementById('device-count').textContent=rows.length+' 台';
@@ -656,6 +757,8 @@ function render(rows,selected,controller=controlOwner){
  ordered.sort((a,b)=>{
   const available=Number(b.device.ready===true)-Number(a.device.ready===true);
   if(available)return available;
+  const manualOff=Number(a.device.enabled===false)-Number(b.device.enabled===false);
+  if(manualOff)return manualOff;
   const numberOrder=String(a.label.number).localeCompare(String(b.label.number),undefined,{numeric:true})||a.index-b.index;
   return sortControl.value==='unread'?
    ((b.device.notifications?.card_count??b.device.notifications?.items?.length??0)-(a.device.notifications?.card_count??a.device.notifications?.items?.length??0)||a.index-b.index):
@@ -700,7 +803,6 @@ function render(rows,selected,controller=controlOwner){
  if(devicePreview){
   const device=rows.find(d=>d.udid===selected);
   const label=device?deviceLabel(device,rows.indexOf(device)):null;
-  document.getElementById('screen-device').textContent=label?'· 设备 '+label.number+(label.followup?' / 待跟进':''):'';
   document.getElementById('empty').style.display='';
   for(const id of ['capture-current','refresh-messages','send-reply'])document.getElementById(id).disabled=true;
   globalMonitor?.render(ordered,cards,sortControl.value);
@@ -741,13 +843,11 @@ function render(rows,selected,controller=controlOwner){
  const empty=document.getElementById('empty');if(empty)empty.style.display=selected?'none':'';
  const owner=rows.find(d=>d.udid===selected);
  const ownerLabel=owner?deviceLabel(owner,rows.indexOf(owner)):null;
- document.getElementById('screen-device').textContent=ownerLabel?'· 设备 '+ownerLabel.number+(ownerLabel.followup?' / 待跟进':''):'';
  globalMonitor?.render(ordered,cards,sortControl.value);
 }
 async function select(udid){
  if(busy||workspaceBusy||refreshingDevices||phonePastePending)return;
  window.ForegroundSync?.activity('select');
- if(globalMonitor?.isFullscreen()){await globalMonitor.exitFullscreen();if(busy||workspaceBusy||refreshingDevices||phonePastePending)return;}
  globalMonitor?.openWorkbench();
  if(devicePreview){previewSelection=udid;render(previewDevices,previewSelection);return;}
   if(busy||workspaceBusy||refreshingDevices)return;selectionRevision++;busy=true;active=udid;controlOwner=null;for(const card of cards.values()){sendFocus(card,false);card.lastActive=false;}render(latest,active);
@@ -779,3 +879,12 @@ async function refreshCpuUsage(){
 }
 async function refresh(){if(devicePreview){showCpuUsage(null);syncAutoScan(false);render(previewDevices,previewSelection);return;}const revision=selectionRevision,scanVersion=scanRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);if(scanVersion===scanRevision)syncAutoScan(j.scan_enabled);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){notice('管理页面连接中断');}}
 refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInterval(refreshCpuUsage,3000);}
+
+
+
+
+
+
+
+
+

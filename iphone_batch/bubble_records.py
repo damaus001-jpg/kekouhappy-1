@@ -10,11 +10,11 @@ ENGLISH_DATE = re.compile(r'^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?'
     r'\s+(?P<day>\d{1,2})(?:,?\s+(?P<year>\d{4}))?(?:\s+at\s+\d{1,2}:\d{2}(?:\s*[AP]M)?)?$', re.I)
 CHINESE_DATE = re.compile(r'^(?:(?P<year>\d{4})年)?(?P<month>\d{1,2})月(?P<day>\d{1,2})[日号](?:\s+.*)?$')
 ISO_DATE = re.compile(r'^(?P<year>\d{4})[-/](?P<month>\d{1,2})[-/](?P<day>\d{1,2})(?:\s+.*)?$')
-RELATIVE_DATE = re.compile(r'^(Today|Yesterday|今天|昨天|前天|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*)(?:\s+(?:at\s+)?\d{1,2}:\d{2}(?:\s*[AP]M)?)?$', re.I)
+RELATIVE_DATE = re.compile(r'^(Today|Yesterday|今天|昨天|前天|(?:星期|周)[一二三四五六日天]|Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)(?:\s+(?:at\s+)?\d{1,2}:\d{2}(?:\s*[AP]M)?)?$', re.I)
 
 
 def date_separator(caption):
-    text = caption.strip()
+    text = caption.strip().strip('\u200e\u200f').strip()
     match = ENGLISH_DATE.fullmatch(text)
     month = MONTHS[match['month'][:3].lower()] if match else None
     if match is None:
@@ -51,6 +51,13 @@ def parse_bubbles(records, contact):
             separator = date_separator(caption)
             if separator:
                 date = separator
+            # Link-preview summaries can use the same Message prefix as the
+            # composer, without exposing sender or timestamp. Preserve them for
+            # review instead of silently losing content or inventing a bubble.
+            if caption.startswith('Message, ') and caption not in (
+                    'Message, iMessage', 'Message, Text Message', 'Message, Text Message, SMS'):
+                if not unclassified:
+                    unclassified = [record]
             unknown.extend(unclassified)
             continue
         message.update(date)

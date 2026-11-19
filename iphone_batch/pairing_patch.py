@@ -3,6 +3,40 @@ from pathlib import Path
 import plistlib
 
 
+class PhoneTrustRequired(RuntimeError):
+    def __init__(self):
+        super().__init__('手机未接受当前 USB 配对，无法读取短信。请解锁手机，在设备卡片右键选择“重新连接此设备”，若手机弹出信任提示请确认。')
+
+
+async def open_paired_usb(device, cache):
+    """Open an existing, device-validated session for this phone only."""
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.pair_records import get_itunes_pairing_record, get_usbmux_pairing_record
+
+    install()
+    address = '127.0.0.1:27015'
+    options = dict(serial=device, connection_type='USB', autopair=False,
+                   pairing_records_cache_folder=cache, usbmux_address=address)
+    client = await create_using_usbmux(**options)
+    if client.paired:
+        return client
+    tried = [client.pair_record]
+    await client.close()
+    # A stale project record can hide the current Apple record. Ask only the
+    # official active stores for this UDID, and let the phone validate each.
+    for source in ('usbmux', 'itunes'):
+        record = (await get_usbmux_pairing_record(device, address) if source == 'usbmux'
+                  else get_itunes_pairing_record(device))
+        if not record or record in tried:
+            continue
+        tried.append(record)
+        client = await create_using_usbmux(pair_record=record, **options)
+        if client.paired:
+            return client
+        await client.close()
+    raise PhoneTrustRequired()
+
+
 def prevent_automatic_pairing():
     """Ordinary CLI reconnection must not create a new host identity/dialog.
 

@@ -260,6 +260,8 @@ def install():
         if parts[0] == 'GET' and path in ('/codec', '/stream.bin', '/audio.bin'):
             if not await prepare_media():
                 return
+        if parts[0] == 'GET' and path in ('/', '/index.html'):
+            screen_stream.VIEWER_HTML = (folder / 'viewer.html').read_bytes()
         if path == '/viewer.js':
             screen_stream.VIEWER_JS_TEMPLATE = viewer_script(folder)
         if not special and not restricted:
@@ -351,7 +353,15 @@ def install():
                             await self._ensure_keyboard()
                         if path == '/manual-paste':
                             try:
-                                return await originals['_handle_key'](self, b'{"usages":[227,25]}')
+                                for keys in ([], [227], [227, 25], [227]):
+                                    if not active(self) or generation != getattr(self, '_batch_input_generation', 0):
+                                        return 409, b'input connection changed'
+                                    code, message = await originals['_handle_key'](
+                                        self, json.dumps({'usages': keys}).encode())
+                                    if code != 200:
+                                        return code, message
+                                    await asyncio.sleep(.12)
+                                return 200, b'ok'
                             finally:
                                 await originals['_handle_key'](self, b'{"usages":[]}')
                         if path == '/manual-composer-focus':

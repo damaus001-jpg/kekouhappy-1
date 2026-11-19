@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from message_archive import conversations
 from message_ledger import append_verified_window, key
+from pairing_patch import PhoneTrustRequired
 
 
 class ReadingCancelled(Exception):
@@ -30,7 +31,7 @@ def run_native(root, device, action, base, options, cancelled):
             '--device', device, '--action', action, '--base', base, '--record', str(record)],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             encoding='utf-8', creationflags=0x08000000 if sys.platform == 'win32' else 0)
-        deadline = time.monotonic() + 35
+        deadline = time.monotonic() + 70
         while True:
             if cancelled():
                 raise ReadingCancelled()
@@ -156,6 +157,8 @@ class ForegroundReader:
                 return {'phase': 'busy'}
             self._ensure_session(client, device, generation, cancelled)
             return {'phase': 'prepared'}
+        except PhoneTrustRequired as error:
+            return {'phase': 'cancelled'} if cancelled() else {'phase': 'trust_required', 'message': str(error)}
         except ReadingCancelled:
             return {'phase': 'cancelled'}
         except Exception as error:
@@ -226,7 +229,11 @@ class ForegroundReader:
         return {'messages': cached[0]['messages'], 'conversation_id': cached[0]['id']} if cached else None
 
     def probe(self, body, device, base):
-        """Run one title probe for one completed phone-screen tap. Never retry here."""
+        """Run one of up to three client-scheduled probes for a completed tap."""
+        attempt = body.get('probe_attempt', 1)
+        if type(attempt) is not int or not 1 <= attempt <= 3:
+            raise ValueError('号码识别次数无效')
+        options = {'recover_first': attempt > 1}
         try:
             state = self._state(body, device)
         except ReadingCancelled:
@@ -249,10 +256,10 @@ class ForegroundReader:
                 raise ReadingCancelled()
             client, generation = self.identity(body)
             if self._native_injected:
-                result = self.native(device, 'auto_probe', base, {'recover_first': False}, cancelled)
+                result = self.native(device, 'auto_probe', base, options, cancelled)
             else:
                 result = self._ensure_session(client, device, generation, cancelled).call(
-                    'auto_probe', {'recover_first': False}, cancelled)
+                    'auto_probe', options, cancelled)
             if cancelled():
                 raise ReadingCancelled()
             if not result.get('found'):
@@ -263,6 +270,8 @@ class ForegroundReader:
             state.expand, state.attempts, state.unconfirmed_fingerprint = False, 0, None
             return {'phase': 'identified', 'phone_number': state.number,
                     'conversations': self._records(device, state.number), 'next_seconds': .3}
+        except PhoneTrustRequired as error:
+            return {'phase': 'cancelled'} if cancelled() else {'phase': 'trust_required', 'message': str(error)}
         except ReadingCancelled:
             return {'phase': 'cancelled'}
         except Exception as error:
@@ -272,6 +281,72 @@ class ForegroundReader:
         finally:
             if acquired:
                 operation_lock.release()
+            self.service.phone_lock.release()
+
+    def verify_sent(self, body, device, base):
+        """Read-only confirmation of a new outgoing occurrence after user input."""
+        from native_conversation import phone_key
+        number = phone_key(body.get('phone_number') or '')
+        expected = body.get('expected_text')
+        if not number or (expected is not None and not isinstance(expected, str)):
+            raise ValueError('发送核验参数无效')
+        try:
+            state = self._state(body, device)
+        except ReadingCancelled:
+            return {'phase': 'cancelled'}
+        cancelled = lambda: state.cancelled.is_set() or not self.eligible(device)
+        if cancelled():
+            return {'phase': 'cancelled'}
+        if not self.service.phone_lock.acquire(blocking=False):
+            return {'phase': 'send_pending'}
+        lock = self.service.device_lock(device)
+        acquired = lock.acquire(blocking=False)
+        try:
+            if not acquired:
+                return {'phase': 'send_pending'}
+            prior = self._prior(device, number)
+            history = (prior or {}).get('messages', [])
+            options = {'phone_number': number, 'history': history[-80:]}
+            client, generation = self.identity(body)
+            if self._native_injected:
+                result = self.native(device, 'auto_sent_tail', base, options, cancelled)
+            else:
+                result = self._ensure_session(client, device, generation, cancelled).call(
+                    'auto_sent_tail', options, cancelled)
+            if cancelled():
+                raise ReadingCancelled()
+            if result.get('changed') or result.get('phone_number') != number:
+                return {'phase': 'send_changed'}
+            window = result.get('messages') or []
+            merged, aligned = append_verified_window(history, window)
+            added = merged[len(history):] if aligned and history else []
+            outgoing = [m for m in added if m.get('side') == 'outgoing' and
+                        (expected is None or m.get('text') == expected)]
+            if (not outgoing or not result.get('composer_empty') or not result.get('bottom_confirmed') or result.get('input_active')
+                    or result.get('unclassified') or not result.get('bounded_complete')):
+                return {'phase': 'send_pending'}
+            with self.lock:
+                if cancelled():
+                    raise ReadingCancelled()
+                saved = self.service._save_visible_capture(device, number,
+                    {'phone_number': number, 'contact': result.get('contact') or number},
+                    result, prior)
+                state.number = number
+                state.contact = result.get('contact') or number
+                state.needs_read = False
+                state.fingerprint = result.get('fingerprint')
+                state.verified_at = self.clock()
+            if cancelled():
+                raise ReadingCancelled()
+            return {'phase': 'send_saved', 'phone_number': number, 'after_send': True,
+                    'conversations': self._records(device, number, saved['conversation_id'])}
+        except ReadingCancelled:
+            return {'phase': 'cancelled'}
+        except PhoneTrustRequired as error:
+            return {'phase': 'trust_required', 'message': str(error)}
+        finally:
+            if acquired:
+                lock.release()
             self.service.phone_lock.release()
 
     def tick(self, body, device, base):
@@ -298,7 +373,7 @@ class ForegroundReader:
             reading = state.needs_read and self.clock() >= state.retry_at
             action = 'auto_read' if reading else 'auto_tail'
             options = {'phone_number': state.number, 'contact': state.contact or state.number,
-                       'history': history[-80:], 'allow_overlap_stop': not state.expand}
+                       'history': history[-80:], 'allow_overlap_stop': not state.expand and not bool((prior or {}).get('pending_windows'))}
             client, generation = self.identity(body)
             if self._native_injected:
                 result = self.native(device, action, base, options, cancelled)
@@ -318,7 +393,7 @@ class ForegroundReader:
                         'message': '当前未读到气泡，等待会话更新', 'next_seconds': 2}
             if not reading:
                 merged, aligned = append_verified_window(history, messages)
-                if (aligned and len(merged) == len(history) and result.get('bounded_complete')
+                if (aligned and merged == history and result.get('bounded_complete')
                         and not result.get('unclassified')):
                     # Only establish a checkpoint against already persisted history.
                     state.fingerprint = result['fingerprint']
@@ -328,7 +403,10 @@ class ForegroundReader:
                     if repeated and self.clock() - state.verified_at >= 15:
                         state.needs_read = True
                     return {'phase': 'waiting', 'phone_number': state.number, 'next_seconds': 2}
-                if state.attempts >= 2 and result.get('fingerprint') == state.unconfirmed_fingerprint:
+                date_refresh = (aligned and len(merged) == len(history) and merged != history
+                                and result.get('bounded_complete') and not result.get('unclassified')
+                                and bool(result.get('context_fingerprint')))
+                if not date_refresh and state.attempts >= 2 and result.get('fingerprint') == state.unconfirmed_fingerprint:
                     # This is an observed unresolved window, not a saved checkpoint.
                     # One expanded retry is enough; wait for a new window or manual action.
                     state.needs_read = False
@@ -338,8 +416,9 @@ class ForegroundReader:
                 if (result.get('fingerprint') != state.fingerprint or self.clock() - state.verified_at >= 15
                         or result.get('unclassified') or not result.get('bounded_complete')):
                     state.needs_read = True
-                return {'phase': 'changed' if state.needs_read else 'waiting',
-                        'phone_number': state.number, 'next_seconds': 2}
+                if not date_refresh:
+                    return {'phase': 'changed' if state.needs_read else 'waiting',
+                            'phone_number': state.number, 'next_seconds': 2}
             with self.lock:
                 if cancelled():
                     raise ReadingCancelled()
@@ -370,6 +449,8 @@ class ForegroundReader:
                 if records:
                     response['conversations'] = records
             return response
+        except PhoneTrustRequired as error:
+            return {'phase': 'cancelled'} if cancelled() else {'phase': 'trust_required', 'message': str(error)}
         except ReadingCancelled:
             return {'phase': 'cancelled'}
         except Exception as error:

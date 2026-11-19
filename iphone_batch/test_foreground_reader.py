@@ -23,6 +23,91 @@ def window(texts, **extra):
 
 
 class ForegroundReaderTests(unittest.TestCase):
+    def test_sent_tail_saves_new_outgoing_then_returns_updated_reading(self):
+        self.service.ledger.commit('one', NUMBER, [message('A'), message('B')], [], True)
+        result = window(['A', 'B', 'Hello'])
+        result['messages'][-1]['side'] = 'outgoing'
+        result['composer_empty'] = True
+        result['bottom_confirmed'] = True
+        result['context_fingerprint'] = digest(result['messages'])
+        with patch.object(self.reader, 'native', return_value=result) as native:
+            response = self.reader.verify_sent({**self.body, 'phone_number': NUMBER,
+                                                'expected_text': 'Hello'}, 'one', 'base')
+        self.assertEqual(response['phase'], 'send_saved')
+        self.assertTrue(response['after_send'])
+        self.assertEqual(native.call_args.args[1], 'auto_sent_tail')
+        self.assertEqual(response['conversations'][0]['messages'][-1]['text'], 'Hello')
+        self.assertEqual(self.service.ledger.load('one', NUMBER)['messages'][-1]['side'], 'outgoing')
+
+    def test_sent_tail_requires_new_occurrence_and_empty_composer(self):
+        history = [message('A'), dict(message('Hello'), side='outgoing')]
+        self.service.ledger.commit('one', NUMBER, history, [], True)
+        for empty in (False, True):
+            result = window(['A','Hello'])
+            result['messages'][-1]['side'] = 'outgoing'
+            result['composer_empty'] = empty
+            result['bottom_confirmed'] = True
+            with patch.object(self.reader, 'native', return_value=result):
+                response = self.reader.verify_sent({**self.body, 'phone_number': NUMBER,
+                    'expected_text': 'Hello'}, 'one', 'base')
+            self.assertEqual(response['phase'], 'send_pending')
+        result['messages'].append(dict(message('Hello'), side='outgoing'))
+        with patch.object(self.reader, 'native', return_value=result):
+            response = self.reader.verify_sent({**self.body, 'phone_number': NUMBER,
+                'expected_text': 'Hello'}, 'one', 'base')
+        self.assertEqual(response['phase'], 'send_saved')
+        self.assertEqual(len(self.service.ledger.load('one', NUMBER)['messages']), 3)
+
+    def test_sent_tail_rejects_changed_phone(self):
+        with patch.object(self.reader, 'native', return_value={'changed':True,'phone_number':'+12025550124'}):
+            result = self.reader.verify_sent({**self.body,'phone_number':NUMBER},'one','base')
+        self.assertEqual(result['phase'],'send_changed')
+        self.assertIsNone(self.service.ledger.load('one',NUMBER))
+
+    def test_second_click_probe_attempt_recovers_first_focus(self):
+        with patch.object(self.reader, 'native', return_value={'found': False}) as native:
+            result = self.reader.probe({**self.body, 'probe_attempt': 1}, 'one', 'base')
+            self.assertEqual(result['phase'], 'not_found')
+            self.assertFalse(native.call_args.args[3]['recover_first'])
+        with patch.object(self.reader, 'native', return_value={'found': True, 'phone_number': NUMBER}) as native:
+            result = self.reader.probe({**self.body, 'generation': 2, 'probe_attempt': 2}, 'one', 'base')
+            self.assertEqual(result['phase'], 'identified')
+            self.assertTrue(native.call_args.args[3]['recover_first'])
+
+    def test_probe_attempt_limit_validation(self):
+        for attempt in (0, 4, True, '2'):
+            with self.assertRaises(ValueError):
+                self.reader.probe({**self.body, 'probe_attempt': attempt}, 'one', 'base')
+
+    def test_tail_reread_updates_yesterday_without_new_bubbles(self):
+        from bubble_records import date_separator
+        self.results.append({'found': True, 'phone_number': NUMBER})
+        self.assertEqual(self.reader.probe(self.body, 'one', 'test')['phase'], 'identified')
+        def dated(label):
+            result = window(['A', 'B'])
+            for m in result['messages']:
+                m.update(date_separator(label))
+            return result
+        first = self.tick(dated('Today 09:00'))
+        before = self.service.ledger.load('one', NUMBER)['messages']
+        second = self.tick(dated('Yesterday 09:00'))
+        after = self.service.ledger.load('one', NUMBER)['messages']
+        self.assertEqual([m['message_id'] for m in before], [m['message_id'] for m in after])
+        self.assertEqual([m['date_label'] for m in after], ['Yesterday 09:00']*2)
+        self.assertNotEqual(first['conversations'][0]['id'], second['conversations'][0]['id'])
+        self.assertEqual(second['conversations'][0]['messages'][0]['date_label'], 'Yesterday 09:00')
+        self.assertEqual(self.tick(dated('Yesterday 09:00'))['phase'], 'waiting')
+
+    def test_rejected_pairing_reported_at_prewarm_and_click(self):
+        from pairing_patch import PhoneTrustRequired
+        with patch.object(self.reader, '_ensure_session', side_effect=PhoneTrustRequired()):
+            prepared = self.reader.prepare(self.body, 'one')
+        with patch.object(self.reader, 'native', side_effect=PhoneTrustRequired()):
+            probed = self.reader.probe(self.body, 'one', 'test')
+        for result in (prepared, probed):
+            self.assertEqual(result['phase'], 'trust_required')
+            self.assertIn('重新连接此设备', result['message'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

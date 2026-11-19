@@ -6,7 +6,7 @@ import re
 from pymobiledevice3.services.accessibilityaudit import Direction, deserialize_object
 from native_conversation import phone_key
 from native_ui_scan import scan
-from bubble_records import parse_bubbles
+from bubble_records import date_separator, parse_bubbles
 from message_ledger import append_verified_window
 from pathlib import Path
 
@@ -30,6 +30,11 @@ async def run_foreground(service, action, options):
     try:
         if action == 'auto_probe':
             return await probe_title(service, recover_first=options.get('recover_first', False))
+        if action == 'auto_read':
+            from ax_conversation import capture_conversation
+            return await capture_conversation(service, options)
+        if action == 'auto_sent_tail':
+            return await read_sent_tail(service, options)
         return await read_window(service, options, tail=action == 'auto_tail')
     finally:
         watcher.cancel()
@@ -104,17 +109,70 @@ async def confirmed_title(service):
     return result
 
 
+async def read_sent_tail(service, options):
+    title = await confirmed_title(service)
+    if not title.get('found'):
+        return {'phone_number': options['phone_number'], 'send_pending': True}
+    if title['phone_number'] != options['phone_number']:
+        return {'phone_number': title['phone_number'], 'changed': True}
+    result = await read_window(service, {**options, 'contact': title['contact']}, tail=True)
+    if result.get('input_active') or not result.get('messages'):
+        return result
+    from ax_bottom import move_focus, reach_bottom
+    from ax_recheck import inspect_node
+    from ax_traversal import focus_row
+    deadline = asyncio.get_running_loop().time()+4
+    async def move(direction):
+        item = await move_focus(service, direction)
+        other = title_number(item.caption or '')
+        if other and other != options['phone_number']:
+            raise ValueError('发送核验期间会话发生变化')
+        return item
+    async def inspect(item, *, deadline):
+        return await inspect_node(focus_row(item), title['contact'], occurrence=0,
+            query_label=lambda: service.element_attribute(item.element.identifier, 'Label'),
+            deadline=deadline)
+    await service.set_app_monitoring_enabled(True)
+    await service.set_monitored_event_type()
+    try:
+        async with asyncio.timeout(4):
+            bottom = await reach_bottom(move=move, inspect=inspect, deadline=deadline,
+                                        anchor=result['messages'][-1])
+        result['bottom_confirmed'] = bottom['confirmed']
+        if bottom['confirmed']:
+            result['messages'].extend(bottom['messages'][1:])
+            result['context_fingerprint'] = hashlib.sha256(json.dumps(
+                [(m['side'],m['text'],m.get('time'),m.get('kind')) for m in result['messages']],
+                ensure_ascii=False).encode()).hexdigest()
+    except (TimeoutError, ValueError):
+        result['bottom_confirmed'] = False
+    finally:
+        await service.set_app_monitoring_enabled(False)
+    return result
+
+
 async def read_window(service, options, *, tail=False):
     expected = options['phone_number']
     contact = options.get('contact') or expected
     observed, stop = [], {'reason': None}
+    empty_composer_seen = False
     history = options.get('history') or []
+    relative_span = next((len(history)-i for i, m in enumerate(history)
+                          if m.get('date_precision') == 'relative-label'
+                          or (date_separator(m.get('date_label') or '') or {}).get('date_precision') == 'relative-label'), 0)
 
     def finished(item):
+        nonlocal empty_composer_seen
         observed.append({'caption': item.caption or '', 'platform_identifier': item.platform_identifier})
         caption = item.caption or ''
-        empty_composers = ('Message, iMessage', 'Message, Text Message', 'Message, Text Message, SMS')
-        if (caption.startswith('Message, ') and caption not in empty_composers) or caption.startswith('Send, Button'):
+        empty_composers = ('Message', 'Message, iMessage', 'Message, Text Message', 'Message, Text Message, SMS')
+        if caption in empty_composers:
+            empty_composer_seen = True
+        # Reverse traversal reaches the composer before message content. Link
+        # previews also expose "Message, ..." labels; after the empty composer
+        # was acknowledged, those labels are content, not an unsent draft.
+        if (caption.startswith('Message, ') and caption not in empty_composers
+                and not empty_composer_seen) or caption.startswith('Send, Button'):
             stop['reason'] = 'input_active'
             return True
         if any(marker in caption for marker, _ in TITLE_MARKERS):
@@ -122,12 +180,14 @@ async def read_window(service, options, *, tail=False):
             return True
         messages, _ = parse_bubbles(list(reversed(observed)), contact)
         if tail:
-            if len(messages) >= 6:
+            if len(messages) >= 6 and (not relative_span or messages[-1].get('date_label')):
                 stop['reason'] = 'tail'
                 return True
         elif history and messages and options.get('allow_overlap_stop', True):
-            _, aligned = append_verified_window(history, messages)
-            if aligned:
+            merged, aligned = append_verified_window(history, messages)
+            overlap = len(messages) - (len(merged) - len(history))
+            if aligned and (not relative_span or
+                    (overlap >= relative_span and messages[overlap-relative_span].get('date_label'))):
                 stop['reason'] = 'overlap'
                 return True
         return False
@@ -144,6 +204,7 @@ async def read_window(service, options, *, tail=False):
     context_fingerprint = hashlib.sha256(json.dumps(
         [(m['side'], m['text'], m.get('time'), m.get('kind')) for m in messages], ensure_ascii=False).encode()).hexdigest()
     return {'phone_number': expected, 'contact': contact, 'messages': messages,
+            'composer_empty': empty_composer_seen,
             'unclassified': unknown, 'fingerprint': signature,
             'context_fingerprint': context_fingerprint,
             'bounded_complete': bool(stop['reason']), 'stop_reason': stop['reason'] or scanned.reason,

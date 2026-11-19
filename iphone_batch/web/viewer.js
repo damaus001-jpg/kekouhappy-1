@@ -1,4 +1,4 @@
-// Reader lifecycle stays in this dynamic asset so existing servers can load it on F5.
+﻿// Reader lifecycle stays in this dynamic asset so existing servers can load it on F5.
 class VideoConnection {
     constructor({selected = () => true, now = () => performance.now(),
         setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = id => clearTimeout(id)} = {}) {
@@ -118,7 +118,7 @@ startVideoReports();
 window.addEventListener('pagehide',()=>{clearInterval(videoReportTimer);videoReportTimer=null;});
 let inputReady = !batchManaged, inputHealthPaused = false, inputMonitor = null, inputEpoch = 0;
 function controlAvailable() { return batchActive && inputReady; }
-if (batchManaged) document.body.classList.add('batch-preview');
+if (batchManaged) document.body.classList.add('batch-preview', 'frame-on');
 window.AUDIO_DEFAULT_ON = __AUDIO_DEFAULT_ON__;
 // Resolution-collapse compensation default (server --compensate flag), with a
 // per-load URL override for research: append ?compensate=0 / ?compensate=1.
@@ -174,7 +174,7 @@ function fitCanvasToViewport() {
         const el = document.getElementById(id);
         return el ? el.getBoundingClientRect().width : 0;
     };
-    const frameOn = document.body.classList.contains('frame-on');
+    const frameOn = batchManaged || document.body.classList.contains('frame-on');
     // The bezel is proportional to the displayed screen (see below), so it
     // takes a fixed share of the available box rather than a pixel count.
     const bezelShare = frameOn ? 1 + 2 * BEZEL_RATIO : 1;
@@ -195,6 +195,7 @@ function fitCanvasToViewport() {
         : Math.min(1, availW / naturalW, availH / naturalH) * zoom;
     canvas.style.width  = (naturalW * scale) + 'px';
     canvas.style.height = (naturalH * scale) + 'px';
+    canvas.style.transform = '';
     // Bezel geometry follows the displayed size so the frame looks the same
     // at every zoom level: screen corner radius, bezel width, button depth.
     const shortSide = Math.min(naturalW, naturalH) * scale;
@@ -214,6 +215,7 @@ const ZOOM_STEP = 1.2, ZOOM_MIN = 0.25, ZOOM_MAX = 4;
 const zoomResetBtn = document.getElementById('zoom-reset');
 const stageWrap = document.getElementById('stage-wrap');
 let zoom = 1;
+let batchScreenScale=1;
 try {
     const saved = parseFloat(localStorage.getItem('zoom'));
     if (saved >= ZOOM_MIN && saved <= ZOOM_MAX) zoom = saved;
@@ -416,7 +418,7 @@ function onUp(e) {
     if(completedTap&&gesture!==null){
         pointerInput.idle(gesture).then(async ok=>{
             if(!ok)return;
-            await new Promise(resolve=>setTimeout(resolve,500));
+            await new Promise(resolve=>setTimeout(resolve,300));
             if(controlAvailable()&&batchSelected&&!document.hidden&&tapRevision===foregroundTapRevision&&tapEpoch===inputEpoch)notifyForegroundActivity('tap-complete');
         }).catch(()=>{});
     }
@@ -598,6 +600,7 @@ function deviceKeyUsages(usages, windowsEdit) {
     return [...mapped];
 }
 let lastKeyPost = Promise.resolve();
+let enterSendPending = null;
 let pastePending = false, pasteRevision = 0;
 function postKeys() {
     // Serialize POSTs so the device sees them in order even when the
@@ -665,6 +668,7 @@ function queueHostPaste(suppliedText = null) {
 const kbIndicator = document.getElementById('kb-indicator');
 function keyboardCaptureOn() { return controlAvailable() && document.activeElement === canvas; }
 function releaseAllKeys() {
+    enterSendPending = null;
     pasteRevision++;
     windowsEditKeys.clear();
     if (pressedUsages.size) {
@@ -758,6 +762,9 @@ window.addEventListener('keydown', (e) => {
     if (!pressedUsages.has(usage)) {
         pressedUsages.add(usage);
         postKeys();
+        if(usage===0x28&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey){
+            enterSendPending={epoch:inputEpoch,down:lastKeyPost};
+        }
         notifyForegroundActivity('key-state');
     }
 });
@@ -767,8 +774,21 @@ window.addEventListener('keyup', (e) => {
     if (usage === undefined) return;
     e.preventDefault();
     windowsEditKeys.delete(usage);
+    const sentEnter=usage===0x28?enterSendPending:null;
+    if(usage===0x28)enterSendPending=null;
     if (pressedUsages.delete(usage)) postKeys();
     notifyForegroundActivity('key-state');
+    if(sentEnter){
+        const revision=foregroundTapRevision,release=lastKeyPost;
+        Promise.all([sentEnter.down,release]).then(async results=>{
+            if(!results.every(ok=>ok===true))return;
+            await new Promise(resolve=>setTimeout(resolve,300));
+            if(sentEnter.epoch===inputEpoch&&revision===foregroundTapRevision&&
+                keyboardCaptureOn()&&pressedUsages.size===0&&!document.hidden){
+                notifyForegroundActivity('send-complete');
+            }
+        }).catch(()=>{});
+    }
 });
 window.addEventListener('blur', () => {
     // Window-blur means we won't see keyup; flush the bitmap so no
@@ -947,7 +967,7 @@ function setFrameLabel() {
     frameBtn.classList.toggle('active', on);
 }
 try {
-    if (localStorage.getItem('frameOn') === 'false') document.body.classList.remove('frame-on');
+    if (!batchManaged && localStorage.getItem('frameOn') === 'false') document.body.classList.remove('frame-on');
 } catch (e) {}
 setFrameLabel();
 frameBtn.addEventListener('click', () => {
@@ -2175,3 +2195,6 @@ if (batchManaged) {
         updateKbIndicator();
     });
 }
+
+
+

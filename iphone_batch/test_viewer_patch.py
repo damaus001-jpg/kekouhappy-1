@@ -196,17 +196,29 @@ class ClipboardHTTPTests(ViewerHTTPFixture):
         self.instance._uhs=SimpleNamespace(send_keyboard=keys)
         code,_=await self.request('POST',{},path='/manual-paste')
         self.assertEqual(code,200)
-        self.assertEqual([call.args for call in keys.await_args_list],[(9,[227,25]),(9,[])])
+        self.assertEqual([call.args for call in keys.await_args_list],
+                         [(9,[]),(9,[227]),(9,[227,25]),(9,[227]),(9,[])])
 
     async def test_manual_paste_failure_still_releases_and_never_retries(self):
         self.instance._ensure_hid=AsyncMock()
         self.instance._stop_hid=AsyncMock()
         self.instance._kb_service_id=9
-        keys=AsyncMock(side_effect=[ConnectionError('lost acknowledgement'),None])
+        keys=AsyncMock(side_effect=[None,None,ConnectionError('lost acknowledgement'),None])
         self.instance._uhs=SimpleNamespace(send_keyboard=keys)
         code,_=await self.request('POST',{},path='/manual-paste')
         self.assertEqual(code,500)
-        self.assertEqual([call.args for call in keys.await_args_list],[(9,[227,25]),(9,[])])
+        self.assertEqual([call.args for call in keys.await_args_list],
+                         [(9,[]),(9,[227]),(9,[227,25]),(9,[])])
+
+    async def test_manual_paste_modifier_failure_never_sends_v(self):
+        self.instance._ensure_hid=AsyncMock()
+        self.instance._stop_hid=AsyncMock()
+        self.instance._kb_service_id=9
+        keys=AsyncMock(side_effect=[None,ConnectionError('modifier failed'),None])
+        self.instance._uhs=SimpleNamespace(send_keyboard=keys)
+        code,_=await self.request('POST',{},path='/manual-paste')
+        self.assertEqual(code,500)
+        self.assertEqual([call.args for call in keys.await_args_list],[(9,[]),(9,[227]),(9,[])])
 
     async def test_composer_focus_registers_keyboard_before_touch(self):
         self.instance._ensure_hid=AsyncMock()

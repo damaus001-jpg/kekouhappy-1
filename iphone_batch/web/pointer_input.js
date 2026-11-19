@@ -112,14 +112,17 @@ class WheelInput {
         if (!rect.width || !rect.height || (!this.active && this.pointer.active)) return false;
         event.preventDefault();
         const multiplier = event.deltaMode === 1 ? 18 : event.deltaMode === 2 ? rect.height * .8 : 1;
-        const delta = event.deltaY * multiplier;
+        // Keep wheel-driven touch displacement at one quarter of the original
+        // mapping. This reduces travel most noticeably while also lowering
+        // finger velocity and native momentum after release.
+        const delta = event.deltaY * multiplier * .25;
         if (this.timer !== null) this.clearTimer(this.timer);
         // Holding the last position stops visible movement immediately. Only
         // the finger lift waits for a quiet gap, avoiding a flick per notch.
         this.timer = this.setTimer(() => this.stop(), 120);
         if (!this.active) {
             this.pending += delta;
-            if (Math.abs(this.pending) < 6) return true;
+            if (Math.abs(this.pending) < 1.5) return true;
             this.active = true;
             this.position = {clientX: rect.left + rect.width * .5,
                 clientY: rect.top + rect.height * (this.pending > 0 ? .75 : .25)};

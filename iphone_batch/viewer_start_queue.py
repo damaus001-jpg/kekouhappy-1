@@ -7,13 +7,14 @@ import logging
 
 class ViewerStartQueue:
     def __init__(self,start,ready,allowed,failed,stopping,*,busy=lambda:False,
-                 startup_timeout=180,busy_timeout=90,poll=.25):
+                 startup_timeout=60,busy_timeout=90,retry_delay=30,poll=.25):
         self.start,self.ready,self.allowed,self.failed=start,ready,allowed,failed
         self.stopping,self.busy=stopping,busy
-        self.startup_timeout,self.busy_timeout,self.poll=startup_timeout,busy_timeout,poll
+        self.startup_timeout,self.busy_timeout,self.retry_delay,self.poll=startup_timeout,busy_timeout,retry_delay,poll
         self.lock=threading.Condition(threading.RLock())
         self.waiting=OrderedDict()
         self.generations={}
+        self.terminal=set()
         self.current=None
         self.closed=False
         self.thread=threading.Thread(target=self.run,name='viewer-start-queue',daemon=True)
@@ -24,6 +25,17 @@ class ViewerStartQueue:
             return identifier in self.waiting or (self.current is not None and self.current[0]==identifier
                 and self.current[1]==self.generations.get(identifier,0))
 
+    def attempt(self,identifier):
+        with self.lock:
+            if self.current is not None and self.current[0]==identifier:
+                return self.current[2]
+            queued=self.waiting.get(identifier)
+            return queued[2] if queued else None
+
+    def terminal_failure(self,identifier):
+        with self.lock:
+            return identifier in self.terminal
+
     def valid(self,identifier,ticket):
         with self.lock:
             return not self.closed and not self.stopping.is_set() and ticket==self.generations.get(identifier,0)
@@ -32,7 +44,8 @@ class ViewerStartQueue:
         identifier=device['udid']
         with self.lock:
             if self.closed or self.stopping.is_set() or self.pending(identifier):return False
-            self.waiting[identifier]=(device,self.generations.get(identifier,0))
+            self.terminal.discard(identifier)
+            self.waiting[identifier]=(device,self.generations.get(identifier,0),0,0.0)
             self.lock.notify_all()
             return True
 
@@ -40,17 +53,28 @@ class ViewerStartQueue:
         with self.lock:
             self.generations[identifier]=self.generations.get(identifier,0)+1
             self.waiting.pop(identifier,None)
+            self.terminal.discard(identifier)
             self.lock.notify_all()
 
     def run(self):
         while not self.stopping.is_set():
             with self.lock:
-                self.lock.wait_for(lambda:self.closed or self.stopping.is_set() or self.waiting,timeout=.5)
+                while not self.closed and not self.stopping.is_set():
+                    if not self.waiting:
+                        self.lock.wait(timeout=.5)
+                        continue
+                    now=time.monotonic()
+                    due_entry=next(((key,value) for key,value in self.waiting.items() if value[3]<=now),None)
+                    if due_entry is not None:
+                        identifier,(device,ticket,attempt,_due)=due_entry
+                        self.waiting.pop(identifier,None)
+                        self.current=(identifier,ticket,attempt)
+                        break
+                    next_due=min(value[3] for value in self.waiting.values())
+                    self.lock.wait(timeout=min(.5,max(.01,next_due-now)))
                 if self.closed or self.stopping.is_set():return
-                if not self.waiting:continue
-                identifier,(device,ticket)=self.waiting.popitem(last=False)
-                self.current=(identifier,ticket)
             valid=lambda:self.valid(identifier,ticket) and self.allowed(device)
+            failed=False
             try:
                 deadline=time.monotonic()+self.busy_timeout
                 while valid() and self.busy():
@@ -60,16 +84,22 @@ class ViewerStartQueue:
                 deadline=time.monotonic()+self.startup_timeout
                 while valid():
                     if self.ready(device):break
-                    if time.monotonic()>=deadline:raise TimeoutError('该台画面准备超时，未继续并行启动')
+                    if time.monotonic()>=deadline:raise TimeoutError('连接超过60秒，已跳过此台')
                     self.stopping.wait(self.poll)
             except Exception as error:
                 if valid():
+                    failed=True
                     try:self.failed(device,error,ticket)
                     except Exception as cleanup_error:
                         logging.getLogger(__name__).warning('Viewer startup cleanup failed: %s',type(cleanup_error).__name__)
             finally:
                 with self.lock:
-                    if self.current==(identifier,ticket):self.current=None
+                    if self.current==(identifier,ticket,attempt):self.current=None
+                    if failed and self.valid(identifier,ticket) and self.allowed(device):
+                        if attempt==0:
+                            self.waiting[identifier]=(device,ticket,1,time.monotonic()+self.retry_delay)
+                        else:
+                            self.terminal.add(identifier)
                     self.lock.notify_all()
 
     def close(self):

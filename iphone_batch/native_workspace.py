@@ -10,7 +10,6 @@ import time
 from difflib import SequenceMatcher
 
 from pymobiledevice3 import common
-from pymobiledevice3.lockdown import create_using_usbmux
 from pymobiledevice3.services.accessibilityaudit import AccessibilityAudit
 from native_conversation import NativeConversation, phone_key
 from native_ui_scan import scan, ScanResult
@@ -21,8 +20,7 @@ from visual_composer import input_point, send_point
 
 ROOT = Path(__file__).resolve().parent / '.device-data'
 common._HOMEFOLDER = ROOT
-from pairing_patch import install as install_pairing
-install_pairing()
+from pairing_patch import open_paired_usb
 
 
 def digest(messages):
@@ -405,11 +403,10 @@ async def list_page(service, phone):
 
 
 async def run(args):
-    lockdown = await create_using_usbmux(serial=args.device, connection_type='USB',
-        usbmux_address='127.0.0.1:27015', pairing_records_cache_folder=ROOT, autopair=False)
+    lockdown = await open_paired_usb(args.device, ROOT)
     try:
         async with AccessibilityAudit(lockdown) as service:
-            if args.action in ('auto_probe', 'auto_tail', 'auto_read'):
+            if args.action in ('auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail'):
                 from native_foreground import run_foreground
                 record_path = Path(args.record).resolve()
                 if record_path.parent != (ROOT/'workspace'/'foreground').resolve():
@@ -441,7 +438,13 @@ async def run(args):
             if args.action == 'identify':
                 return {'device': args.device, **await identify_conversation(service)}
             if args.action == 'capture':
-                return {'device': args.device, **await read(service)}
+                from ax_conversation import capture_conversation
+                from message_ledger import MessageLedger
+                identity = await identify_conversation(service)
+                prior = MessageLedger(ROOT).load(args.device, identity['phone_number']) or {}
+                return {'device': args.device, **await capture_conversation(service,
+                    {'phone_number': identity['phone_number'], 'history': prior.get('messages', []),
+                     'allow_overlap_stop': not bool(prior.get('pending_windows'))})}
             if args.action == 'latest':
                 phone = NativeConversation(); phone.base = args.base
                 # A bounded attempt to expose the newest loaded bubbles. If
@@ -528,7 +531,7 @@ async def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', required=True)
-    parser.add_argument('--action', choices=['auto_probe', 'auto_tail', 'auto_read', 'capture', 'latest', 'identify', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification'], required=True)
+    parser.add_argument('--action', choices=['auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail', 'capture', 'latest', 'identify', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification'], required=True)
     parser.add_argument('--base'); parser.add_argument('--record')
     parser.add_argument('--phone')
     args = parser.parse_args()

@@ -5,7 +5,7 @@ import json
 
 from native_conversation import phone_key
 
-FIELDS = ('姓名', '年龄', '工作', '地区', '婚否', '兴趣爱好', '其他信息', '资料依据', '待确认')
+FIELDS = ('日期', '姓名', '年龄', '工作', '地区', '婚否', '爱好')
 
 
 def profile_path(root, device, conversation):
@@ -22,7 +22,7 @@ def validate_fields(fields):
     result = {}
     for key in FIELDS:
         value = fields.get(key, '')
-        if not isinstance(value, str) or len(value) > (8000 if key in FIELDS[6:] else 1000):
+        if not isinstance(value, str) or len(value) > 1000:
             raise ValueError('联系人资料内容过长或格式无效')
         result[key] = value.strip()
     return result
@@ -33,7 +33,13 @@ def read_profile(root, device, conversation):
     if not path.exists():
         return {'fields': {}, 'updated': None}
     value = json.loads(path.read_text(encoding='utf-8'))
-    return {'fields': validate_fields(value['fields']), 'updated': value['updated']}
+    stored_fields = value.get('fields', {})
+    if not isinstance(stored_fields, dict):
+        raise ValueError('联系人资料格式无效')
+    fields = {name: stored_fields.get(name, '') for name in FIELDS}
+    if not fields['爱好']:
+        fields['爱好'] = stored_fields.get('兴趣爱好', '')
+    return {'fields': validate_fields(fields), 'updated': value.get('updated')}
 
 
 def save_profile(root, device, conversation, fields):

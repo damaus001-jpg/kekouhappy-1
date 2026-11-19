@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import uuid
 
+DATE_FIELDS = ('date_label', 'date', 'date_precision', 'date_year', 'date_source')
+
 
 def key(message):
     return (message.get('side'), message.get('text'), message.get('kind', 'text'))
@@ -14,6 +16,10 @@ def key(message):
 def append_window(history, window):
     if not history:
         return deepcopy(window), True
+    if any(m.get('date_source') == 'ui_separator' for m in window):
+        refreshed, aligned = append_verified_window(history, window, skip_known_attachments=False)
+        if aligned:
+            return refreshed, True
     old, new = list(map(key, history)), list(map(key, window))
     for size in range(min(len(old), len(new), 8), 0, -1):
         if size < 2 and len(old) > 1:
@@ -49,7 +55,9 @@ def append_verified_window(history, window, *, skip_known_attachments=True):
             visible = [m for m in history if m.get('kind') != 'attachment']
             merged, aligned = append_verified_window(visible, window, skip_known_attachments=False)
             if aligned:
-                return deepcopy(history) + merged[len(visible):], True
+                refreshed = iter(merged[:len(visible)])
+                return [deepcopy(m) if m.get('kind') == 'attachment' else next(refreshed)
+                        for m in history] + merged[len(visible):], True
         return deepcopy(history), False
     if not old or not new:
         return unmatched()
@@ -70,7 +78,12 @@ def append_verified_window(history, window, *, skip_known_attachments=True):
             timestamp = before.get('time')
             if timestamp and 'T' not in timestamp and timestamp != after.get('time'):
                 return unmatched()
-        return deepcopy(history) + deepcopy(window[end:]), True
+        refreshed = deepcopy(history)
+        for saved, observed in zip(refreshed[-end:], window[:end]):
+            if observed.get('date_source') == 'ui_separator' and observed.get('date_label'):
+                for field in DATE_FIELDS:
+                    saved[field] = observed.get(field)
+        return refreshed + deepcopy(window[end:]), True
     return unmatched()
 
 
