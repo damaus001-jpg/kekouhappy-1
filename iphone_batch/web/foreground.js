@@ -1,7 +1,10 @@
 /* Foreground conversation reading. This is separate from notification scanning. */
 class ForegroundSyncController {
- constructor({request,context,apply,status,clock=()=>Date.now(),client=crypto.randomUUID()}){
-  Object.assign(this,{request,context,apply,status,clock,client});
+ constructor({request,context,apply,status,baseline=()=>[],clock=()=>Date.now(),client=crypto.randomUUID()}){
+  Object.assign(this,{request,context,apply,status,baseline,clock,client});
+  this.sendSerial=0;
+  this.submissions=new Map();
+  this.progressWatch=null;this.progressPending=null;
   this.generation=1;this.device=null;this.number=null;this.pending=null;this.nextAt=0;
   this.seekArmed=false;
   this.sessionDevice=null;this.preparePending=null;this.prepareAt=0;this.sessionPrepared=false;
@@ -11,6 +14,7 @@ class ForegroundSyncController {
   this.manualUntil=0;this.held=false;this.keysHeld=false;this.historyPaused=false;this.inputPaused=false;
  }
  invalidate(){
+  this.endProgress();
   clearTimeout(this.sendTimer);this.sendTimer=null;this.sendCheck=null;
   clearTimeout(this.probeRetryTimer);this.probeRetryTimer=null;
   const generation=this.generation++;
@@ -28,6 +32,7 @@ class ForegroundSyncController {
   this.sessionDevice=null;this.sessionPrepared=false;this.prepareAt=0;
   this.invalidate();this.seekArmed=false;
   this.expectedSend=null;
+  this.submissions.clear();
   if(device)this.request({action:'release',client:this.client,generation,device}).catch(()=>{});
  }
  prepare(context){
@@ -47,6 +52,30 @@ class ForegroundSyncController {
   this.sessionPrepared=false;this.prepareAt=Infinity;this.nextAt=Infinity;
   this.status(result.message,false);
  }
+ beginProgress(){
+  const watch={device:this.device||this.context().device,generation:this.generation,since:Date.now(),revision:null};
+  this.progressWatch=watch;return watch;
+ }
+ endProgress(watch=null){
+  if(watch&&this.progressWatch!==watch)return;
+  this.progressWatch=null;this.progressPending?.abort();this.progressPending=null;
+ }
+ async pollProgress(){
+  const watch=this.progressWatch,context=this.context();
+  if(!watch||this.progressPending||!context.allowed||context.device!==watch.device||watch.generation!==this.generation)return;
+  const abort=new AbortController();this.progressPending=abort;
+  try{
+   const result=await this.request({action:'progress',client:this.client,generation:watch.generation,device:watch.device},abort.signal);
+   const value=result.progress,current=this.context();
+   if(this.progressWatch!==watch||abort.signal.aborted||!current.allowed||current.device!==watch.device||
+      !value||value.device!==watch.device||value.updated_at<watch.since||!value.messages?.length)return;
+   const revision=value.read_id+':'+value.revision;
+   if(revision===watch.revision)return;
+   watch.revision=revision;
+   this.apply({phase:'reading_progress',progress:value});
+   this.status('正在补充会话，已有内容保留',false);
+  }catch(error){}finally{if(this.progressPending===abort)this.progressPending=null;}
+ }
  retryProbe(){
   if(this.probeAttempts>=3)return false;
   this.invalidate();this.number=null;this.seekArmed=true;
@@ -59,17 +88,22 @@ class ForegroundSyncController {
   this.status('会话尚未稳定，正在重试识别号码',false);
   return true;
  }
- expectSend(number,text){
-  if(number)this.expectedSend={number,text};
+ prepareSend(number,text,id=null){
+  if(!number||typeof text!=='string'||!text.trim())return null;
+  return {id:id||this.client+':'+(++this.sendSerial),device:this.device||this.context().device,
+   number,text,baseline:this.baseline(number)};
  }
- startSendCheck(){
-  const number=this.expectedSend?.number||this.number;
+ expectSend(number,text,id=null,prepared=null){
+  if(number)this.expectedSend=prepared||this.prepareSend(number,text,id)||{number,text:null};
+ }
+ startSendCheck(receipt=this.expectedSend){
+  const number=receipt?.number||this.number;
   if(!number||!this.context().allowed)return false;
-  const expected=this.expectedSend?.text??null;
+  const expected=receipt?.text??null;
   this.invalidate();this.seekArmed=false;
   this.historyPaused=false;this.inputPaused=false;this.held=false;this.keysHeld=false;
   this.sendCheck={number,expected,attempts:0,generation:this.generation,device:this.device,
-   sendExpected:!!this.expectedSend};
+   sendExpected:!!receipt,receipt};
   void this.checkSent();
   return true;
  }
@@ -97,8 +131,9 @@ class ForegroundSyncController {
     device:task.device,phone_number:task.number,expected_text:task.expected},abort.signal);
    if(this.sendCheck!==task||abort.signal.aborted||this.context().device!==task.device||!this.context().allowed)return;
    if(result.phase==='send_saved'){
-    this.sendCheck=null;this.expectedSend=null;this.number=result.phone_number;this.nextAt=this.clock()+2000;
-    this.apply(result);this.status('已确认发送并更新最新气泡',false);return;
+    this.sendCheck=null;if(this.expectedSend===task.receipt)this.expectedSend=null;this.number=result.phone_number;this.nextAt=this.clock()+2000;
+    result.confirmed_receipt_id=task.receipt?.id;
+    this.apply(result);this.status('已核对最新气泡',false);return;
    }
    if(result.phase==='trust_required'){this.sendCheck=null;this.showTrustRequired(result);return;}
    if(result.phase==='send_changed'){
@@ -116,8 +151,27 @@ class ForegroundSyncController {
   this.retarget(this.context().device);
   clearTimeout(this.probeRetryTimer);this.probeRetryTimer=null;
   const now=this.clock();
+  if(kind==='paste-ready'){
+   if(this.number&&typeof details.text==='string')this.expectSend(this.number,details.text,details.id);
+   return;
+  }
+  if(kind==='send-start'){
+   if(details.id){
+    this.submissions.set(details.id,this.expectedSend);
+    this.expectedSend=null;
+    while(this.submissions.size>32)this.submissions.delete(this.submissions.keys().next().value);
+   }
+   return;
+  }
   if(kind==='send-complete'){
-   this.startSendCheck();return;
+   const receipt=details.id?this.submissions.get(details.id):this.expectedSend;
+   if(details.id)this.submissions.delete(details.id);
+   if(receipt?.device===this.device&&typeof receipt.text==='string'&&receipt.text.trim()&&this.context().allowed){
+    this.apply({phase:'send_acknowledged',phone_number:receipt.number,after_send:true,receipt});
+   }
+   this.startSendCheck(receipt);
+   if(this.expectedSend===receipt)this.expectedSend=null;
+   return;
   }
   if(kind==='tap-complete'){
    const context=this.context();
@@ -144,6 +198,7 @@ class ForegroundSyncController {
   if(kind==='scroll')this.historyPaused=true;
   if(kind==='select'){this.historyPaused=false;this.inputPaused=false;this.held=false;this.keysHeld=false;}
   if(kind==='key'||kind==='paste')this.inputPaused=false;
+  if(kind==='key'&&details.editing===true)this.expectedSend=null;
   if(kind==='key'&&this.number&&!this.expectedSend)this.expectedSend={number:this.number,text:null};
  }
  resume(){
@@ -174,7 +229,8 @@ class ForegroundSyncController {
   this.sessionDevice=device;
   if(action==='probe'){this.seekArmed=false;this.lastProbeGeneration=generation;this.probeAttempts++;}
   this.pending=abort;
-  this.status(action==='probe'?'正在识别刚点击的会话号码':'正在检查当前会话更新',false);
+  const progressWatch=action==='tick'?this.beginProgress():null;
+  if(action==='probe')this.status('正在识别刚点击的会话号码',false);
   try{
    if(action==='probe'&&this.prepareTask)await this.prepareTask;
    if(generation!==this.generation||abort.signal.aborted)return;
@@ -184,6 +240,13 @@ class ForegroundSyncController {
    if(generation!==this.generation||device!==current.device||!current.allowed||abort.signal.aborted)return;
    if(current.busy){if(action==='probe')this.retryProbe();return;}
    if(result.phase==='trust_required'){this.showTrustRequired(result);return;}
+   if(action==='tick'&&result.phase==='awaiting_tap'&&this.number){
+    // Cancelling a read advances the client generation. Its new backend state
+    // has no verified recipient, even while this view still displays a number.
+    if(this.retryProbe())return;
+    this.number=null;this.seekArmed=false;this.nextAt=Infinity;
+    this.status('读取已中断，请点击当前短信会话重新识别',false);return;
+   }
    if(action==='probe'&&['not_found','busy','awaiting_tap','error'].includes(result.phase)&&this.retryProbe())return;
    this.nextAt=result.phase==='not_found'?Infinity:this.clock()+Math.max(300,Number(result.next_seconds||2)*1000);
    if(result.phase==='error'){
@@ -194,14 +257,14 @@ class ForegroundSyncController {
    if(result.phone_number)this.number=result.phone_number;
    if(result.conversations)this.apply(result);
    if(result.phase==='input_paused')this.inputPaused=true;
-   const labels={identified:'已识别号码，准备自动读取',not_found:'本次未识别，等待下一次手机画面点击',awaiting_tap:'点击手机会话以识别号码',saved:'已保存本轮消息，等待更新',waiting:result.message||'等待当前会话更新',
+   const labels={identified:'已识别号码，准备自动读取',not_found:'本次未识别，等待下一次手机画面点击',awaiting_tap:'点击手机会话以识别号码',saved:'已同步，等待新消息',waiting:result.message||'已同步，等待新消息',
     changed:'发现变化，准备补读',unconfirmed:'气泡衔接未确认，历史已保留',seeking:'等待打开短信会话',
     busy:action==='probe'?'本次未识别：人工任务繁忙，等待下一次手机画面点击':'人工任务优先，稍后继续',input_paused:'手机输入框已有草稿，已暂停',error:result.message||'读取未完成'};
    this.status(labels[result.phase]||'等待当前会话更新',this.inputPaused);
   }catch(error){
    if(!abort.signal.aborted&&generation===this.generation&&action==='probe'&&this.retryProbe())return;
    if(!abort.signal.aborted&&generation===this.generation){this.nextAt=Infinity;this.seekArmed=false;this.status('本次识别未完成，请再次点击手机会话重试',false);}
-  }finally{if(this.pending===abort)this.pending=null;}
+  }finally{if(this.pending===abort)this.pending=null;if(progressWatch)this.endProgress(progressWatch);}
  }
 }
 
@@ -209,17 +272,51 @@ if(typeof module!=='undefined'&&module.exports)module.exports={ForegroundSyncCon
 else {
  const status=document.getElementById('foreground-status'),resume=document.getElementById('foreground-resume');
  function applyForeground(result){
-  if(workspaceBusy||phonePastePending||(draftEl.value.trim()&&!result.after_send)||workspaceDevice!==active)return;
+  if(result.phase==='reading_progress'){
+   const value=result.progress;
+   if(value.device!==workspaceDevice||workspaceDevice!==active)return;
+   window.ForegroundSync.number=value.phone_number;
+   const sameNumber=String(currentConversation?.phone_number||'').replace(/\D/g,'')===String(value.phone_number||'').replace(/\D/g,'');
+   const rows=mergeReadingRows(sameNumber?currentConversation.messages:[],value.messages,{progress:true});
+   const conversation={id:'live:'+value.read_id,phone_number:value.phone_number,contact:value.contact,
+    messages:rows,ui_reading:true,source:'native-reading-progress',
+    scope:'已显示 '+rows.length+' 条；正在补充读取，已有历史保留。'};
+   savedConversations=savedConversations.filter(c=>!c.ui_reading);
+   savedConversations.unshift(conversation);currentConversationId=conversation.id;
+   renderConversation({preserveInput:sameNumber});
+   return;
+  }
+  if(result.phase==='send_acknowledged'){
+   const receipt=result.receipt;
+   if(receipt.device!==workspaceDevice||workspaceDevice!==active)return;
+   const number=currentConversation?.phone_number||window.ForegroundSync.number;
+   if(String(number||'').replace(/\D/g,'')!==String(receipt.number).replace(/\D/g,''))return;
+   if(acknowledgeOutgoing(receipt)){
+    renderConversation({preserveInput:true});
+    scrollReadingToBottom();
+   }
+   return;
+  }
+  const finishingRead=currentConversation?.ui_reading===true;
+  if(workspaceBusy||phonePastePending||workspaceDevice!==active)return;
   const records=result.conversations||[];
+  if(result.phase==='identified'&&!records.length&&currentConversation)return;
+  const sameContact=records[0]&&String(currentConversation?.phone_number||'').replace(/\D/g,'')===String(records[0].phone_number||'').replace(/\D/g,'');
+  if(sameContact)records[0]={...records[0],messages:mergeReadingRows(currentConversation.messages,records[0].messages)};
+  if(result.confirmed_receipt_id){
+   readingOutgoingRows(workspaceDevice,result.phone_number,records[0]?.messages||[]);
+   saveOutgoingReceipts(workspaceDevice,result.phone_number,
+    outgoingReceipts(workspaceDevice,result.phone_number).filter(r=>r.id!==result.confirmed_receipt_id));
+  }
   const keptDraft=draftEl.value,keptBlocked=sendBlocked;
-  if(currentConversationId===(records[0]?.id||null)&&currentConversation?.phone_number===window.ForegroundSync.number)return;
+  if(!result.confirmed_receipt_id&&currentConversationId===(records[0]?.id||null)&&currentConversation?.phone_number===window.ForegroundSync.number)return;
   const containers=[messagesEl,document.querySelector('.work-panel')].filter(Boolean);
   const sameNumber=currentConversation?.phone_number===window.ForegroundSync.number;
   const positions=containers.map(node=>({node,top:node.scrollTop||0,
    bottom:node.scrollHeight-node.clientHeight-(node.scrollTop||0)<32}));
   ++workspaceRevision;savedConversations=records;currentConversationId=records[0]?.id||null;
-  renderConversation();
-  if(result.after_send){draftEl.value=keptDraft;sendBlocked=keptBlocked;resizeDraft();syncWorkspaceControls();}
+  renderConversation({preserveInput:sameContact===true});
+  if(sameContact&&(result.after_send||finishingRead)){draftEl.value=keptDraft;sendBlocked=keptBlocked;resizeDraft();syncWorkspaceControls();}
   if(!currentConversation)document.getElementById('peer-phone').textContent=window.ForegroundSync.number||'—';
   for(const {node,top,bottom} of positions)node.scrollTop=!sameNumber||bottom?node.scrollHeight:top;
  }
@@ -236,16 +333,17 @@ else {
     busy:busy||workspaceBusy||!!phonePastePending||!!draftEl.value.trim()||!!generatedDraft||refreshingDevices,
     inputBusy:busy||workspaceBusy||!!phonePastePending||refreshingDevices};
   },apply:applyForeground,
-  status:(text,paused)=>{status.textContent='自动读取：'+text;resume.hidden=!paused;}
+  baseline:number=>outgoingBaseline(workspaceDevice,number),
+  status:(text,paused)=>{const label='自动读取：'+text;if(status.textContent!==label)status.textContent=label;resume.hidden=!paused;}
  });
  resume.addEventListener('click',()=>window.ForegroundSync.resume());
  window.addEventListener('message',event=>{
   if(event.data?.type!=='phone-activity')return;
   const card=cards.get(active);
   if(!card?.frame||event.source!==card.frame.contentWindow||event.origin!==card.origin)return;
-  if(['pointer-start','pointer-end','tap-complete','send-complete','scroll','key','key-state','paste'].includes(event.data.kind))window.ForegroundSync.activity(event.data.kind,{keysHeld:event.data.keysHeld===true});
+  if(['pointer-start','pointer-end','tap-complete','send-start','send-complete','scroll','key','key-state','paste','paste-ready'].includes(event.data.kind))window.ForegroundSync.activity(event.data.kind,{keysHeld:event.data.keysHeld===true,editing:event.data.editing===true,text:event.data.text,id:event.data.id});
  });
  document.addEventListener('visibilitychange',()=>{if(document.hidden)window.ForegroundSync.stop();});
- const timer=setInterval(()=>void window.ForegroundSync.tick(),500);
+ const timer=setInterval(()=>{void window.ForegroundSync.tick();void window.ForegroundSync.pollProgress();},500);
  window.addEventListener('pagehide',()=>{clearInterval(timer);window.ForegroundSync.stop();});
 }

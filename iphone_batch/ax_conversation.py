@@ -10,6 +10,8 @@ from ax_bottom import reach_bottom
 from ax_recheck import EMPTY_COMPOSERS, inspect_node, message_key
 from ax_traversal import delivery_receipt, focus_row, read_pass, UP_QUIET_SECONDS, DOWN_QUIET_SECONDS
 from native_foreground import confirmed_title, title_number
+from bubble_status import attach_checks
+from reading_progress import ReadingProgress, visible_messages
 
 
 async def capture_conversation(service, options=None):
@@ -53,12 +55,20 @@ async def capture_conversation(service, options=None):
     async def inspect(item, *, deadline):
         nonlocal serial
         serial += 1
-        return await inspect_node(focus_row(item), contact, occurrence=serial,
+        checked = await inspect_node(focus_row(item), contact, occurrence=serial,
             query_label=lambda: service.element_attribute(item.element.identifier, 'Label'),
             deadline=deadline)
+        if progress is not None and not progress.best:
+            progress.publish(visible_messages([checked]))
+        return checked
 
     bottom_checks = []
     finish_messages = []
+    progress = None
+
+    def publish_node(event, **data):
+        if progress is not None and event == 'node':
+            progress.publish(visible_messages(data['checks'], reverse=data['reverse']))
 
     async def verify_bottom(anchor=None):
         result = await reach_bottom(move=move, inspect=inspect, deadline=deadline, anchor=anchor)
@@ -76,6 +86,8 @@ async def capture_conversation(service, options=None):
             if options.get('phone_number') and options['phone_number'] != number:
                 changed = True
                 return {'changed': True, 'phone_number': number}
+            progress = ReadingProgress(options.get('device'), number, contact,
+                                       callback=options.get('on_progress'))
             await service.set_app_monitoring_enabled(True)
             await service.set_monitored_event_type()
             history = options.get('history') or []
@@ -85,12 +97,13 @@ async def capture_conversation(service, options=None):
                 quiet = UP_QUIET_SECONDS if reverse else DOWN_QUIET_SECONDS
                 result = await read_pass(reverse=reverse, phone_number=number, bottom=bottom,
                     move=move, inspect=inspect, deadline=deadline-8,
+                    record=publish_node,
                     history=history if options.get('allow_overlap_stop', True) else None)
                 rounds.append(result)
                 if result['summary']['reason'] == 'conversation_changed':
                     changed = True
                     break
-                if result['summary']['reason'] not in ('top_within_three', 'bottom_confirmed', 'history_overlap_verified'):
+                if result['summary']['reason'] not in ('top_within_three', 'focus_cycle_verified', 'bottom_confirmed', 'history_overlap_verified'):
                     break
     except ChangedConversation:
         changed = True
@@ -132,6 +145,8 @@ async def capture_conversation(service, options=None):
         # Match order follows recorded visits within each pass.
         result['messages'].sort(key=lambda m: m['occurrence'],
                                 reverse=result['summary']['direction'] == 'up')
+        attach_checks(result['node_checks'], result['messages'],
+                      reverse=result['summary']['direction'] == 'up')
     from native_workspace import digest, merge_history_messages
     messages = rounds[0]['messages'] if rounds else []
     aligned = False
@@ -160,12 +175,19 @@ async def capture_conversation(service, options=None):
         r['summary']['unresolved_intervals'] for r in rounds))
     if uncertain:
         unknown.append({'reason': 'two_pass_order_or_fields_unconfirmed'})
+    reading_messages = messages
+    if uncertain and rounds:
+        reading_messages = visible_messages(rounds[0]['node_checks'], rounds[0]['messages'],
+                                            reverse=rounds[0]['summary']['direction'] == 'up') or messages
+    if progress is not None:
+        progress.publish(reading_messages, phase='complete', final=True)
     for index, message in enumerate(messages, 1):
         message['sequence'] = index
     fingerprint = hashlib.sha256(json.dumps(
-        [(m.get('side'), m.get('time'), m.get('kind'), m.get('text'), m.get('element_id'))
+        [(m.get('side'), m.get('time'), m.get('kind'), m.get('text'), m.get('element_id'), m.get('bubble_status'))
          for m in messages[-6:]], ensure_ascii=False).encode()).hexdigest()
     return {'phone_number': number, 'contact': contact, 'messages': messages,
+            'reading_messages': reading_messages,
             'unclassified': unknown, 'raw_elements': [row for r in rounds for row in r['rows']],
             'fingerprint': fingerprint, 'context_fingerprint': digest(messages),
             'bounded_complete': not uncertain, 'history_complete': False,

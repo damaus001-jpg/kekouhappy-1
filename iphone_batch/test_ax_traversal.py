@@ -31,6 +31,29 @@ async def replay(captions, reverse, history=None):
 
 
 class TraversalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_observed_encrypted_rcs_header_is_a_top_boundary(self):
+        result = await replay([LATEST, 'Text Message • RCS \ufffc Encrypted', HEADER], True)
+        self.assertEqual(result['summary']['reason'], 'top_within_three')
+        self.assertEqual(len(result['messages']), 1)
+
+    async def test_composer_cycle_does_not_append_the_same_bubble_again(self):
+        bubble = 'Your Text Message, Are u around tomorrow?, 09:37'
+        path = ['Record audio, Button', 'Message, Text Message, SMS', 'add, Button',
+                'Sent as SMS', bubble, 'Thu, Oct 15 at 09:37', 'Text Message • SMS, extra hint',
+                HEADER, 'Back, Button']
+        result = await replay(path * 4, True)
+        self.assertEqual(result['summary']['reason'], 'focus_cycle_verified')
+        self.assertEqual([m['text'] for m in result['messages']], ['Are u around tomorrow?'])
+        self.assertEqual(sum(c['event']['caption'] == bubble for c in result['node_checks']), 1)
+
+    async def test_real_identical_bubbles_inside_one_composer_cycle_are_preserved(self):
+        bubble = 'Your Text Message, Same, 09:37'
+        path = ['Record audio, Button', 'Message, Text Message, SMS', 'add, Button',
+                bubble, bubble, 'Thu, Oct 15 at 09:37', 'Text Message • SMS, extra hint', HEADER, 'Back, Button']
+        result = await replay(path * 3, True)
+        self.assertEqual(result['summary']['reason'], 'focus_cycle_verified')
+        self.assertEqual([m['text'] for m in result['messages']], ['Same', 'Same'])
+
     async def test_history_checks_after_three_texts_media_does_not_count(self):
         a = 'Your iMessage, A, 13:18'
         photo = 'Your iMessage, Includes picture, 13:19, Button, Image'

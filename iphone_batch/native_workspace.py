@@ -109,7 +109,15 @@ def merge_history_messages(existing, incoming):
         return existing, False
     merged = []
     for tag, a, b, c, d in matcher.get_opcodes():
-        if tag in ('equal', 'delete'):
+        if tag == 'equal':
+            from bubble_status import update_status
+            from copy import deepcopy
+            for old, new in zip(existing[a:b], incoming[c:d]):
+                message = deepcopy(old)
+                if new.get('bubble_status'):
+                    update_status(message, new['bubble_status'])
+                merged.append(message)
+        elif tag == 'delete':
             merged.extend(existing[a:b])
         elif tag == 'insert':
             merged.extend(incoming[c:d])
@@ -443,7 +451,7 @@ async def run(args):
                 identity = await identify_conversation(service)
                 prior = MessageLedger(ROOT).load(args.device, identity['phone_number']) or {}
                 return {'device': args.device, **await capture_conversation(service,
-                    {'phone_number': identity['phone_number'], 'history': prior.get('messages', []),
+                    {'device': args.device, 'phone_number': identity['phone_number'], 'history': prior.get('messages', []),
                      'allow_overlap_stop': not bool(prior.get('pending_windows'))})}
             if args.action == 'latest':
                 phone = NativeConversation(); phone.base = args.base

@@ -14,6 +14,11 @@ function protectNotificationDraft(){
   body:JSON.stringify({device:workspaceDevice,protected:protectedDraft})}).catch(()=>notificationProtection.delete(workspaceDevice));
 }
 const messagesEl=document.getElementById('messages'), draftEl=document.getElementById('reply-zh');
+function scrollReadingToBottom(){
+ // Follow the new bubble inside the reading pane without scrolling the page
+ // or moving the adjacent live phone screen out of the user's view.
+ messagesEl.scrollTop=messagesEl.scrollHeight;
+}
 function draftKey(){const device=workspaceDevice||(typeof devicePreview!=='undefined'&&devicePreview?'preview:'+active:'');return 'sms-draft:'+device+':'+(currentConversation?.contact||window.ForegroundSync?.number||'');}
 function resizeDraft(){draftEl.style.height='auto';draftEl.style.height=Math.min(draftEl.scrollHeight||44,128)+'px';}
 const emojiPicker=document.getElementById('emoji-picker'),emojiToggle=document.getElementById('toggle-emoji');
@@ -57,6 +62,134 @@ function notice(text){
   if(/^设备\s/.test(text))monitorNotice.dataset.operation='true';
  }
 }
+// Local submission receipts stay separate from phone observations and exports.
+const outgoingReceiptCache=new Map();
+let readingKeySerial=0;
+function readingPhoneClock(row){
+ const values=String(row.time||'').includes('T')?[row.date_label]:[row.time,row.date_label];
+ for(const value of values){
+  const match=String(value||'').match(/(?:^|\s)(\d{1,2}):(\d{2})(?::\d{2})?\s*([ap]m)?$/i);
+  if(match){let hour=Number(match[1]);if(match[3])hour=hour%12+(match[3].toLowerCase()==='pm'?12:0);return hour*60+Number(match[2]);}
+ }
+ return null;
+}
+function readingRowsMatch(a,b){
+ const before=readingPhoneClock(a),after=readingPhoneClock(b);
+ if(before!==null&&after!==null&&before!==after)return false;
+ if(a.date&&b.date&&a.date.slice(-5)!==b.date.slice(-5))return false;
+ return a.text===b.text&&(a.kind||'text')===(b.kind||'text')&&
+  (a.side===b.side||a.side==='unknown'||b.side==='unknown');
+}
+function readingRowKey(row){return row.reading_key||(row.reading_key='reading:'+ ++readingKeySerial);}
+function overlayReadingRow(old,observed){
+ const row={...old,...observed,reading_key:readingRowKey(old)};
+ if(['incoming','outgoing'].includes(old.side)&&!['incoming','outgoing'].includes(observed.side))row.side=old.side;
+ // Database timestamps and phone clocks have different formats/timezones.
+ // Keep already displayed, known metadata until a previously missing field is filled.
+ if(!old.reading_pending)for(const field of ['time','date','date_label','date_precision','date_year','date_source']){
+  if(old[field]!==undefined&&old[field]!==null&&old[field]!=='')row[field]=old[field];
+ }
+ const oldRelative=String(old.date_label||'').match(/^(Today|Yesterday|今天|昨天)(?=\s|$)/i);
+ const newRelative=String(observed.date_label||'').match(/^(Today|Yesterday|今天|昨天)(?=\s|$)/i);
+ if(oldRelative&&newRelative&&oldRelative[1].toLowerCase()!==newRelative[1].toLowerCase()&&!observed.reading_pending)row.date_label=observed.date_label;
+ if(observed.bubble_status){
+  row.bubble_status={...old.bubble_status,...observed.bubble_status};
+  if(observed.bubble_status.delivery&&!observed.bubble_status.read_time)delete row.bubble_status.read_time;
+ }
+ if(observed.reading_pending!==true&&['incoming','outgoing'].includes(observed.side)&&observed.time)delete row.reading_pending;
+ if(!old.reading_pending&&['incoming','outgoing'].includes(old.side)&&old.time)delete row.reading_pending;
+ return row;
+}
+function mergeReadingRows(existing,incoming,{progress=false}={}){
+ if(!existing.length)return incoming.map(row=>({...row,reading_key:readingRowKey(row)}));
+ if(!incoming.length)return existing;
+ const positions=(haystack,needle)=>{
+  const found=[];
+  for(let i=0;i<=haystack.length-needle.length;i++)if(needle.every((row,j)=>readingRowsMatch(haystack[i+j],row)))found.push(i);
+  return found;
+ };
+ const inside=positions(existing,incoming);
+ if(inside.length===1){
+  const rows=existing.slice();incoming.forEach((row,i)=>{rows[inside[0]+i]=overlayReadingRow(rows[inside[0]+i],row);});return rows;
+ }
+ const around=positions(incoming,existing);
+ if(around.length===1)return incoming.map((row,i)=>i>=around[0]&&i<around[0]+existing.length?
+  overlayReadingRow(existing[i-around[0]],row):{...row,reading_key:readingRowKey(row)});
+ for(let size=Math.min(existing.length,incoming.length);size>0;size--){
+  const suffix=existing.slice(-size),prefix=existing.slice(0,size);
+  if(suffix.every((row,i)=>readingRowsMatch(row,incoming[i]))&&positions(existing,suffix).length===1&&positions(incoming,suffix).length===1)
+   return existing.slice(0,-size).concat(incoming.map((row,i)=>i<size?overlayReadingRow(suffix[i],row):{...row,reading_key:readingRowKey(row)}));
+  if(prefix.every((row,i)=>readingRowsMatch(row,incoming[incoming.length-size+i]))&&positions(existing,prefix).length===1&&positions(incoming,prefix).length===1)
+   return incoming.slice(0,-size).map(row=>({...row,reading_key:readingRowKey(row)})).concat(prefix.map((row,i)=>overlayReadingRow(row,incoming[incoming.length-size+i])),existing.slice(size));
+ }
+ if(!progress&&incoming.length>=existing.length){
+  const used=new Set();
+  return incoming.map(row=>{
+   const index=existing.findIndex((old,i)=>!used.has(i)&&readingRowsMatch(old,row));
+   if(index<0)return {...row,reading_key:readingRowKey(row)};
+   used.add(index);return overlayReadingRow(existing[index],row);
+  });
+ }
+ // An incomplete window never erases known history. Show newly observed bodies
+ // without collapsing genuine repeated occurrences inside the incoming window.
+ return existing.concat(incoming.filter(row=>!existing.some(old=>readingRowsMatch(old,row)))
+  .map(row=>({...row,reading_key:readingRowKey(row)})));
+}
+function outgoingReceiptKey(device,number){return 'sms-outgoing:'+JSON.stringify([device,String(number||'').replace(/\D/g,'')]);}
+function outgoingReceipts(device,number){
+ const key=outgoingReceiptKey(device,number);
+ if(!outgoingReceiptCache.has(key)){
+  let receipts=[];
+  try{const saved=JSON.parse(localStorage.getItem(key)||'[]');if(Array.isArray(saved))receipts=saved.filter(r=>r&&typeof r.id==='string'&&typeof r.text==='string'&&Array.isArray(r.baseline));}catch{}
+  outgoingReceiptCache.set(key,receipts);
+ }
+ return outgoingReceiptCache.get(key);
+}
+function saveOutgoingReceipts(device,number,receipts){
+ const key=outgoingReceiptKey(device,number);outgoingReceiptCache.set(key,receipts);
+ try{if(receipts.length)localStorage.setItem(key,JSON.stringify(receipts));else localStorage.removeItem(key);}catch{}
+}
+function outgoingMessageKey(message){return JSON.stringify([message.side,message.text,message.time||null,message.kind||'text']);}
+function outgoingBaseline(device,number){
+ if(device!==workspaceDevice||String(currentConversation?.phone_number||'').replace(/\D/g,'')!==String(number||'').replace(/\D/g,''))return [];
+ return (currentConversation?.messages||[]).slice(-8).map(outgoingMessageKey);
+}
+function acknowledgeOutgoing(receipt){
+ const {device,number,id,text}=receipt;
+ if(!device||!number||!id||typeof text!=='string'||!text.trim())return false;
+ const receipts=outgoingReceipts(device,number);
+ if(receipts.some(r=>r.id===id))return false;
+ receipts.push({id,text,submitted_at:new Date().toISOString(),baseline:receipt.baseline||outgoingBaseline(device,number)});
+ saveOutgoingReceipts(device,number,receipts);return true;
+}
+function readingOutgoingRows(device,number,rows){
+ rows=rows.slice();
+ if(!device||!number)return rows;
+ const receipts=outgoingReceipts(device,number);
+ if(!receipts.length)return rows;
+ const keys=rows.map(outgoingMessageKey),remaining=[],used=new Set();
+ let lastMatched=-1;
+ for(const receipt of receipts){
+  let start=null;
+  for(let size=receipt.baseline.length;size>0;size--){
+   const suffix=receipt.baseline.slice(-size),positions=[];
+   for(let i=0;i<=keys.length-size;i++)if(suffix.every((key,j)=>keys[i+j]===key))positions.push(i+size);
+   if(positions.length){if(positions.length===1)start=positions[0];break;}
+  }
+  // No baseline means an old identical bubble cannot prove this submission.
+  const match=start===null?-1:rows.findIndex((m,i)=>i>=start&&!used.has(i)&&m.side==='outgoing'&&m.text===receipt.text);
+  if(match>=0){rows[match].reading_key='pending:'+receipt.id;used.add(match);lastMatched=Math.max(lastMatched,match);continue;}
+  if(start!==null&&lastMatched>=start)receipt.baseline=keys.slice(0,lastMatched+1).slice(-8);
+  remaining.push(receipt);
+ }
+ saveOutgoingReceipts(device,number,remaining);
+ return rows.concat(remaining.map(receipt=>{
+  const submitted=new Date(receipt.submitted_at);
+  return {side:'outgoing',kind:'text',text:receipt.text,time:submitted.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}),
+   date_label:submitted.getFullYear()+'年'+(submitted.getMonth()+1)+'月'+submitted.getDate()+'日',
+   local_outgoing_id:receipt.id,reading_key:'pending:'+receipt.id,record_source:'local-submission'};
+ }));
+}
 const monthNumbers=Object.fromEntries('jan feb mar apr may jun jul aug sep oct nov dec'.split(' ').map((m,i)=>[m,i+1]));
 const chineseWeekdays={sun:'周日',mon:'周一',tue:'周二',wed:'周三',thu:'周四',fri:'周五',sat:'周六'};
 function readingDateLabel(message){
@@ -84,56 +217,104 @@ function readingDateLabel(message){
  const numeric=stored.match(/^(?:(\d{4})[-/])?(\d{1,2})[-/](\d{1,2})$/);
  return numeric?(numeric[1]?numeric[1]+'年':'')+Number(numeric[2])+'月'+Number(numeric[3])+'日'+clockText:'';
 }
-function renderConversation(){
+function readingBubbleStatus(message){
+ if(message.reading_pending)return '字段待核对';
+ if(message.side!=='outgoing')return '';
+ if(message.local_outgoing_id)return '已提交，待核对';
+ const status=message.bubble_status||{};
+ const method={sms:'以短信形式发送',rcs:'以 RCS 形式发送'}[status.sending_method];
+ const delivery={not_delivered:'未送达',delivered:'已送达',read:'已读'}[status.delivery];
+ const receipt=delivery?delivery+(delivery==='已读'&&status.read_time?' '+status.read_time:''):'';
+ return [method,receipt].filter(Boolean).join(' · ');
+}
+function renderConversation({preserveInput=false}={}){
  closeEmojiPicker();
- sendBlocked=false;
- document.getElementById('send-reply').textContent='确认发送';
- pastedEnglish=false;
- generatedDraft=null;
+ if(!preserveInput){
+  sendBlocked=false;
+  document.getElementById('send-reply').textContent='确认发送';
+  pastedEnglish=false;
+  generatedDraft=null;
+ }
  currentConversation=savedConversations.find(c=>c.id===currentConversationId)||null;
  if(typeof refreshContactProfile==='function')refreshContactProfile();
- document.getElementById('peer-phone').textContent=currentConversation?.phone_number||'—';
+ const readingNumber=currentConversation?.phone_number||window.ForegroundSync?.number;
+ document.getElementById('peer-phone').textContent=readingNumber||'—';
  if(typeof syncContactFollowup==='function')syncContactFollowup();
- messagesEl.replaceChildren();
+ const contactKey=outgoingReceiptKey(workspaceDevice,readingNumber);
+ const reuse=messagesEl.dataset.readingContact===contactKey;
+ const oldMessages=new Map(reuse?Array.from(messagesEl.querySelectorAll('.message'),node=>[node.dataset.readingKey,node]):[]);
+ const oldDates=new Map(reuse?Array.from(messagesEl.querySelectorAll('.message-date'),node=>[node.dataset.readingDate,node]):[]);
+ const nextNodes=[];
+ messagesEl.dataset.readingContact=contactKey;
  draftEl.disabled=workspaceBusy;
- try{draftEl.value=currentConversation?localStorage.getItem(draftKey())||'':'';}catch{draftEl.value='';}
- const rows=currentConversation?.messages||[];
+ if(!preserveInput)try{draftEl.value=currentConversation?localStorage.getItem(draftKey())||'':'';}catch{draftEl.value='';}
+ const rows=readingOutgoingRows(workspaceDevice,readingNumber,currentConversation?.messages||[]);
  syncWorkspaceControls();
  document.getElementById('message-count').textContent=rows.length+' 条记录';
- if(!rows.length){const empty=document.createElement('div');empty.className='message-empty';empty.textContent='尚无当前手机的保存记录。读取当前会话后显示短信原文。';messagesEl.append(empty);notice('仅显示所选手机的保存记录，不是手机当前会话的实时同步。');return;}
+ if(!rows.length){const empty=document.createElement('div');empty.className='message-empty';empty.textContent='尚无当前手机的保存记录。读取当前会话后显示短信原文。';messagesEl.replaceChildren(empty);notice('仅显示所选手机的保存记录，不是手机当前会话的实时同步。');return;}
  const peerNumber=String(currentConversation?.phone_number||currentConversation?.contact||'').trim();
- let previousDate='';
+ let previousDate='';const dateCounts=new Map();
  for(const [index,message] of rows.entries()){
   // Backup timestamps already carry an offset. Preserve their recorded day
   // and timezone even when the workstation is in a different timezone.
   const iso=typeof message.time==='string'&&message.time.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/);
   const date=readingDateLabel(message)||(iso?iso[1]+'年'+Number(iso[2])+'月'+Number(iso[3])+'日':'');
-  const time=iso?iso[4]+' UTC'+(['Z','+00:00'].includes(iso[5])?'':iso[5]):message.time;
+  let time=iso?iso[4]+' UTC'+(['Z','+00:00'].includes(iso[5])?'':iso[5]):message.time;
+  const clock=!iso&&typeof time==='string'&&time.match(/^(\d{1,2}):(\d{2})\s*([ap]m)?$/i);
+  if(clock){let hour=Number(clock[1]);if(clock[3])hour=hour%12+(clock[3].toLowerCase()==='pm'?12:0);time=String(hour).padStart(2,'0')+':'+clock[2];}
   if(date!==previousDate){
-   const separator=document.createElement('div');separator.className='message-date';separator.textContent=date||'日期待确认';
-   messagesEl.append(separator);
+   const count=(dateCounts.get(date)||0)+1;dateCounts.set(date,count);
+   const dateKey=JSON.stringify([date,count]);
+   const separator=oldDates.get(dateKey)||document.createElement('div');separator.className='message-date';separator.dataset.readingDate=dateKey;
+   if(separator.textContent!==(date||'日期待确认'))separator.textContent=date||'日期待确认';
+   nextNodes.push(separator);
   }
   previousDate=date;
-  const node=document.createElement('div');node.className='message '+(message.side==='outgoing'?'outgoing':'incoming');
-  node.dataset.messageId=index;
-  const meta=document.createElement('div');meta.className='message-meta';meta.textContent=(message.side==='outgoing'?'我方':message.side==='incoming'?'对方':'待核对')+' · '+(time||'时间未知')+(message.side==='incoming'&&peerNumber?' · '+peerNumber:'');
-  const bubble=document.createElement('div');bubble.className='bubble';
-  const original=document.createElement('div');original.className='original';original.textContent=message.text||(message.kind==='attachment'?'[附件消息]':message.decode_error?'[正文解析未完成]':'[无文字内容]');
-  bubble.append(original);node.append(meta,bubble);messagesEl.append(node);
+  const key=readingRowKey(message),node=oldMessages.get(key)||document.createElement('div');
+  if(!node.classList.contains('message'))node.classList.add('message');
+  const outgoing=message.side==='outgoing';
+  if(node.classList.contains('outgoing')!==outgoing)node.classList.toggle('outgoing',outgoing);
+  if(node.classList.contains('incoming')===outgoing)node.classList.toggle('incoming',!outgoing);
+  node.dataset.readingKey=key;if(node.dataset.messageId!==String(index))node.dataset.messageId=index;
+  let meta=node.querySelector('.message-meta'),bubble=node.querySelector('.bubble'),original=node.querySelector('.original');
+  if(!meta){meta=document.createElement('div');meta.className='message-meta';node.append(meta);}
+  if(!bubble){bubble=document.createElement('div');bubble.className='bubble';node.append(bubble);}
+  if(!original){original=document.createElement('div');original.className='original';bubble.append(original);}
+  const metaText=(message.side==='outgoing'?'我方':message.side==='incoming'?'对方':'待核对')+' · '+(time||'时间未知')+(message.side==='incoming'&&peerNumber?' · '+peerNumber:'');
+  if(meta.textContent!==metaText)meta.textContent=metaText;
+  const body=message.text||(message.kind==='attachment'?'[附件消息]':message.decode_error?'[正文解析未完成]':'[无文字内容]');
+  if(original.textContent!==body)original.textContent=body;
+  const statusText=readingBubbleStatus(message);
+  let status=node.querySelector('.message-status');
+  if(statusText){
+   if(!status){status=document.createElement('div');node.append(status);}
+   const statusClass='message-status'+(message.bubble_status?.delivery==='not_delivered'?' failed':'');
+   if(status.className!==statusClass)status.className=statusClass;
+   if(status.textContent!==statusText)status.textContent=statusText;
+  }else if(status)status.remove();
+  nextNodes.push(node);
  }
+ let cursor=messagesEl.firstChild;
+ for(const node of nextNodes){if(node===cursor)cursor=cursor.nextSibling;else messagesEl.insertBefore(node,cursor);}
+ while(cursor){const next=cursor.nextSibling;cursor.remove();cursor=next;}
  notice(currentConversation.scope||('已保存记录 · '+(currentConversation.created||'时间未知')+' · 非实时同步，重复记录保留，历史完整性待核对。'));
 }
 async function loadWorkspace(device,force=false,preferred=null){
  if(!force&&workspaceDevice===device)return;
+ const sameDevice=workspaceDevice===device,previousConversation=currentConversation;
  const requested=preferred||(workspaceDevice===device?currentConversationId:null);
- workspaceDevice=device;const revision=++workspaceRevision;savedConversations=[];currentConversation=null;currentConversationId=null;
- renderConversation();
+ workspaceDevice=device;const revision=++workspaceRevision;
+ if(!sameDevice){savedConversations=[];currentConversation=null;currentConversationId=null;renderConversation();}
  if(!device){notice('选择手机后加载已保存的短信原文。');return;}
  notice('正在加载已保存的短信原文…');
  try{const r=await fetch('/api/messages?device='+encodeURIComponent(device),{cache:'no-store'});const data=await r.json();if(!r.ok||data.error)throw Error(data.error||'读取失败');if(revision!==workspaceRevision)return;
   savedConversations=data.conversations||[];
-  currentConversationId=savedConversations.some(c=>c.id===requested)?requested:savedConversations[0]?.id||null;
-  renderConversation();
+  currentConversationId=savedConversations.some(c=>c.id===requested)?requested:
+   (sameDevice?savedConversations.find(c=>c.phone_number===previousConversation?.phone_number)?.id:null)||savedConversations[0]?.id||null;
+  const selected=savedConversations.find(c=>c.id===currentConversationId);
+  const sameContact=sameDevice&&selected&&selected.phone_number===previousConversation?.phone_number;
+  if(sameContact)selected.messages=mergeReadingRows(previousConversation.messages,selected.messages);
+  renderConversation({preserveInput:!!sameContact});
  }catch(e){if(revision===workspaceRevision)notice('记录读取失败：'+e.message);}
 }
 document.getElementById('refresh-messages').addEventListener('click',()=>loadWorkspace(workspaceDevice,true));
@@ -148,7 +329,7 @@ function syncWorkspaceControls(){
  if(typeof sendFocus==='function')for(const card of cards.values()){
   if(card.lastWorking!==workspaceBusy){sendFocus(card,card.lastActive===true);card.lastWorking=workspaceBusy;}
  }
- const selected=!!workspaceDevice&&(typeof controlOwner==='undefined'||controlOwner===workspaceDevice), available=!!currentConversation;
+ const selected=!!workspaceDevice&&(typeof controlOwner==='undefined'||controlOwner===workspaceDevice), available=!!currentConversation&&!currentConversation.ui_reading;
  for(const id of ['capture-current','sync-full-history','refresh-messages'])document.getElementById(id).disabled=workspaceBusy||!selected;
  if(typeof syncContactProfileControls==='function')syncContactProfileControls();
  const sendButton=document.getElementById('send-reply');
@@ -189,9 +370,12 @@ async function operation(text, action){
 async function captureConversation(full=false){
  const device=workspaceDevice, revision=workspaceRevision;
  operation(full?'正在同步手机短信数据库，可能需要较长时间…':'正在回到底部并读取当前会话…',async()=>{
-  const result=await workspaceRequest('capture',full?{full:true}:{},device);if(revision!==workspaceRevision)return;
-  await loadWorkspace(device,true,result.conversation_id);
-  notice('已读取 '+result.contact+'；'+(result.scope||'历史范围待核对')+'。');
+  const watch=window.ForegroundSync?.beginProgress?.();
+  try{
+   const result=await workspaceRequest('capture',full?{full:true}:{},device);if(revision!==workspaceRevision)return;
+   await loadWorkspace(device,true,result.conversation_id);
+   notice('已读取 '+result.contact+'；'+(result.scope||'历史范围待核对')+'。');
+  }finally{if(watch)window.ForegroundSync?.endProgress?.(watch);}
  });
 }
 document.getElementById('capture-current').addEventListener('click',()=>captureConversation(false));
@@ -203,7 +387,7 @@ function showSentReply(result){
   savedConversations.unshift(conversation);
   currentConversationId=conversation.id;
   renderConversation();
-  messagesEl.lastElementChild?.scrollIntoView({block:'end',behavior:'smooth'});
+  scrollReadingToBottom();
  }
  if(result.reading_error)notice('发送已确认；阅读区更新失败：'+result.reading_error+'。请读取当前会话，勿重复发送。');
 }
@@ -227,7 +411,9 @@ function pasteReplyToPhone(){
  const id=crypto.randomUUID(),device=workspaceDevice,revision=workspaceRevision;
  const text=draftEl.value;
  const timer=setTimeout(()=>finishPhonePaste(id,false,'粘贴结果未确认，请先检查手机输入框，避免重复粘贴'),20000);
- phonePastePending={id,device,revision,text,frame:card.frame,origin:card.origin,timer};
+ const number=currentConversation?.phone_number||window.ForegroundSync?.number;
+ const prepared=window.ForegroundSync?.prepareSend?.(number,text,id);
+ phonePastePending={id,device,revision,text,number,prepared,frame:card.frame,origin:card.origin,timer};
  syncWorkspaceControls();notice('正在将正文粘贴到当前手机短信输入框…');
  card.frame.contentWindow.postMessage({type:'paste-composer',id,text},card.origin);
 }
@@ -240,7 +426,7 @@ function finishPhonePaste(id,ok,error){
   let cleared=false;
   if(ok){
    sendBlocked=true;
-   window.ForegroundSync?.expectSend(currentConversation?.phone_number||window.ForegroundSync.number,pending.text);
+   window.ForegroundSync?.expectSend(pending.number||currentConversation?.phone_number||window.ForegroundSync.number,pending.text,pending.id,pending.prepared);
    if(draftEl.value===pending.text){
     draftEl.value='';try{localStorage.removeItem(draftKey());}catch{}
     resizeDraft();cleared=true;

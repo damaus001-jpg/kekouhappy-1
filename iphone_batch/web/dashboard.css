@@ -239,13 +239,16 @@ body{background-image:radial-gradient(ellipse at 8% 0%,#d7b62d0b,transparent 48%
 .work-panel .profile-followup-container .followup-controls{gap:30px}
 .work-panel .profile-followup-container .followup-toggle{gap:0;padding-left:0;margin-left:0}
 .work-panel .profile-followup-container .followup-toggle input{margin:0;flex:none}
-.work-panel .profile-followup-container .reading-heading-controls{margin-left:-27px;padding:0;justify-content:flex-start;overflow:visible}
+.work-panel .profile-followup-container .reading-heading-controls{margin-left:0;padding:0;justify-content:flex-start;overflow:visible}
 .work-panel .profile-followup-container .followup-controls{justify-content:flex-start;gap:30px;margin:0;padding:0}
-.work-panel .profile-followup-container .followup-toggle{gap:0;margin:0;padding:0}
+.work-panel .profile-followup-container #followup-panel{position:relative;left:-15px}
+.work-panel .profile-followup-container .followup-toggle{display:inline-flex;flex-direction:row;align-items:center;justify-content:flex-start;direction:ltr;gap:0;margin:0;padding:0;position:relative;left:5px}
 .work-panel .profile-followup-container .followup-toggle input{margin:0}
-.foreground-reading #capture-current{letter-spacing:.14em;flex:none}
+#device-followup{width:16px;height:16px;min-width:16px;min-height:16px;flex:0 0 16px;order:-1;position:relative;left:-5px}
+.foreground-reading #capture-current{letter-spacing:.14em;flex:none;color:#ffe284;font-weight:400}
 .followup-controls .followup-contact-list,.reading-floating-card.followup-contact-list{width:max-content;flex-wrap:nowrap;align-items:flex-start}
-.followup-contact-list .followup-contact{width:max-content;max-width:none;white-space:nowrap;overflow-wrap:normal}
+.followup-contact-list .followup-contact{width:max-content;max-width:none;white-space:nowrap;overflow-wrap:normal;user-select:text;-webkit-user-select:text;cursor:text;border-radius:8px;font-weight:600}
+.followup-contact[aria-disabled="true"]{opacity:.6}
 .phone-panel{display:grid;grid-template-columns:64px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);gap:8px}
 .phone-panel>.section-title{grid-column:1/-1;grid-row:1;min-width:0}
 #current-display-devices{grid-column:1;grid-row:2;display:flex;flex-direction:column;align-items:stretch;gap:4px;min-width:48px;max-width:100px;min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 2px 0 0}
@@ -304,8 +307,8 @@ body{background-image:radial-gradient(ellipse at 8% 0%,#d7b62d0b,transparent 48%
 /* Let the workbench use wide displays instead of centering a capped panel. */
 main{max-width:none;width:100%;margin:0;padding:8px;gap:8px;transition:height 180ms ease,grid-template-columns 180ms ease}
 .phone-panel{min-width:0}
-.foreground-reading{display:flex;align-items:center;gap:8px;padding:6px 12px;color:var(--muted);font-size:11px;flex-wrap:wrap}
-.foreground-reading button{font-size:11px;padding:4px 8px}
+.foreground-reading{display:flex;align-items:center;gap:8px;padding:6px 12px;color:#fff;font-size:14px;flex-wrap:wrap}
+.foreground-reading button{font-size:14px;padding:4px 8px}
 .foreground-reading button[hidden]{display:none}
 .phone-panel>.section-title{height:auto;gap:6px}
 .phone-actions{display:flex;align-items:center;gap:6px;flex:0 1 auto;flex-wrap:nowrap;min-width:0;max-width:100%;overflow:visible;white-space:nowrap}
@@ -335,6 +338,8 @@ html body #global-monitor .monitor-actions>*{flex:none}
 html body #global-monitor .monitor-actions .runtime-status{margin-left:0}
 html body .messages{overscroll-behavior-y:contain}
 html{scrollbar-width:auto}
+.work-panel .message-status{margin-top:5px;font-size:12px;line-height:1.5;color:#9ca98f;text-align:right;overflow-wrap:anywhere}
+.work-panel .message-status.failed{color:#f27979}
 html::-webkit-scrollbar{width:15px}
 html body .phone-actions .device-setup{position:relative;flex:none;margin:0;padding:0;border:0;background:transparent}
 html body .phone-actions .device-setup summary{display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:0;list-style:none}

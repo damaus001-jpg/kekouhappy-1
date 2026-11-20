@@ -80,7 +80,7 @@ class ForegroundAXSession:
             operation = probe_title(self.audit, recover_first=options.get('recover_first', False))
         elif action == 'auto_read':
             from ax_conversation import capture_conversation
-            operation = capture_conversation(self.audit, options)
+            operation = capture_conversation(self.audit, {**options, 'device': self.device})
         elif action == 'auto_sent_tail':
             operation = read_sent_tail(self.audit, options)
         else:

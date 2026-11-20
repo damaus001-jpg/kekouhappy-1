@@ -445,7 +445,6 @@ sortControl.addEventListener('change',()=>{
  render(latest,active);
 });
 let deviceMenuTarget=null;
-const trustRequests=new Set();
 const accessRequests=new Set();
 const accessNotices=new Map();
 const reconnectRequests=new Set(),reconnectNotices=new Map();
@@ -453,8 +452,6 @@ const deviceMenu=document.getElementById('device-context-menu');
 function closeDeviceMenu(){deviceMenu.hidden=true;deviceMenuTarget=null;}
 function showDeviceMenu(event,device,index){
  event.preventDefault();deviceMenuTarget={device,index};deviceMenu.hidden=false;
- const trustButton=document.getElementById('device-context-trust');
- trustButton.disabled=device.enabled===false||device.readonly===true||devicePreview||device.ready||device.trust_pending||device.reconnecting||trustRequests.has(device.udid);
  const connectionButton=document.getElementById('device-context-connection'),readonlyButton=document.getElementById('device-context-readonly');
  connectionButton.textContent=device.enabled===false?'接入此台':'断开此台：停止画面和操作';
  readonlyButton.textContent=device.readonly?'允许操作':'仅监看：锁定鼠标和键盘';
@@ -463,7 +460,6 @@ function showDeviceMenu(event,device,index){
  reconnectButton.disabled=device.enabled===false||devicePreview||device.trust_pending||device.reconnecting||reconnectRequests.has(device.udid)||workspaceBusy||busy;
  reconnectButton.textContent=device.reconnecting?'正在重新连接…':'重新连接此设备';
  reconnectButton.title='按需修复此台信任连接，再恢复画面与操控；手机若出现信任提示，请完成确认。';
- trustButton.textContent=(device.trust_pending||trustRequests.has(device.udid))?'正在等待信任确认…':'重新建立信任';
  const followup=deviceLabel(device,index).followup;
  document.getElementById('device-context-followup').setAttribute('aria-checked',String(followup));
  document.getElementById('device-context-none').setAttribute('aria-checked',String(!followup));
@@ -494,19 +490,6 @@ document.getElementById('device-context-readonly').addEventListener('click',()=>
 });
 document.getElementById('device-context-edit').addEventListener('click',()=>{
  const target=deviceMenuTarget;closeDeviceMenu();if(target)editDevice(target.device,target.index);
-});
-document.getElementById('device-context-trust').addEventListener('click',async()=>{
- const target=deviceMenuTarget;closeDeviceMenu();if(!target||target.device.enabled===false||devicePreview)return;
- const device=target.device,label=deviceLabel(device,target.index).number;
- if(trustRequests.has(device.udid))return;
- trustRequests.add(device.udid);
- notice('设备 '+label+'：正在检查并修复信任，请保持手机解锁；若手机弹出提示，请确认信任。');
- try{
-  const response=await fetch('/api/devices/trust',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:device.udid}),signal:AbortSignal.timeout(100000)});
-  const result=await response.json();if(!response.ok)throw Error(result.error||'建立信任未完成');
-  notice('设备 '+label+'：'+result.message);
- }catch(error){notice('设备 '+label+'：'+(error.name==='TimeoutError'?'等待结果超时，请查看设备状态后再重试':error.message));}
- finally{trustRequests.delete(device.udid);refresh();}
 });
 document.getElementById('device-context-reconnect').addEventListener('click',async()=>{
  const target=deviceMenuTarget;closeDeviceMenu();if(!target||target.device.enabled===false||devicePreview)return;
@@ -615,27 +598,56 @@ function syncContactFollowup(){
  followupControl.title=context?'标记当前联系人，同一手机的同一联系人只计一次':'先读取联系人会话';
  renderFollowupContacts();
 }
+function followupTextSelected(node){
+ const selection=window.getSelection();
+ return !!(selection&&!selection.isCollapsed&&(node.contains(selection.anchorNode)||node.contains(selection.focusNode)));
+}
+function bindFollowupContact(row,device,number){
+ let start=null,dragged=false;
+ row.onpointerdown=event=>{
+  if(event.button!==0)return;
+  start={x:event.clientX,y:event.clientY};dragged=false;row.followupSelecting=true;
+  const finish=()=>{row.followupSelecting=false;document.removeEventListener('pointerup',finish,true);document.removeEventListener('pointercancel',finish,true);};
+  document.addEventListener('pointerup',finish,{capture:true,once:true});
+  document.addEventListener('pointercancel',finish,{capture:true,once:true});
+ };
+ row.onpointermove=event=>{if(start&&(event.buttons&1)&&Math.hypot(event.clientX-start.x,event.clientY-start.y)>4)dragged=true;};
+ const activate=()=>{if(row.getAttribute('aria-disabled')!=='true')openFollowupContact(device,number);};
+ row.onclick=event=>{if(dragged||followupTextSelected(row)){event.preventDefault();return;}activate();};
+ row.onkeydown=event=>{
+  if(['Enter',' '].includes(event.key)&&!event.ctrlKey&&!event.metaKey&&!event.altKey){event.preventDefault();activate();}
+ };
+}
 function renderFollowupContacts(){
+ const list=document.getElementById('followup-contact-list');
+ if(followupTextSelected(list)||Array.from(list.children).some(row=>row.followupSelecting))return;
  const renderRevision=++followupRenderRevision;
- const list=document.getElementById('followup-contact-list');list.replaceChildren();
+ const existing=new Map(Array.from(list.querySelectorAll('.followup-contact'),row=>[row.dataset.followupKey,row]));
  const device=latest.find(row=>row.udid===active);
  const records=device?Object.entries(contactFollowups(device)).filter(([,value])=>isContactFollowup(value)):[];
  document.getElementById('followup-contact-count').textContent=String(records.length);
- if(!records.length){const hint=document.createElement('span');hint.className='muted';hint.textContent='在阅读区勾选联系人后显示在这里。';list.append(hint);return;}
+ if(!records.length){const hint=document.createElement('span');hint.className='muted';hint.textContent='在阅读区勾选联系人后显示在这里。';list.replaceChildren(hint);return;}
+ const rows=[];
  for(const [key,value] of records){
   const number=key.startsWith('phone:')?'+'+key.slice(6):null;
-  const button=document.createElement('button');button.type='button';button.className='followup-contact';
-  button.disabled=workspaceBusy||!number;
-  button.textContent=number||value?.contact||key.slice(8);
-  button.title=number?'在手机打开 '+number+' 并读取会话':'没有完整号码，请先手动进入会话读取';
-  button.onclick=()=>openFollowupContact(device.udid,number);list.append(button);
+  const rowKey=device.udid+':'+key;
+  const button=existing.get(rowKey)||document.createElement('div');button.className='followup-contact';
+  button.dataset.followupKey=rowKey;button.setAttribute('role','button');button.tabIndex=0;
+  button.setAttribute('aria-disabled',String(workspaceBusy||!number));
+  if(!existing.has(rowKey))button.textContent=number||value?.contact||key.slice(8);
+  button.title=number?'单击打开 '+number+'；可拖选文字后复制':'可拖选文字后复制；没有完整号码，请先手动进入会话读取';
+  bindFollowupContact(button,device.udid,number);rows.push(button);
   if(number)followupProfile(device.udid,number).then(fields=>{
-   if(renderRevision!==followupRenderRevision||!button.isConnected)return;
+   if(renderRevision!==followupRenderRevision||!button.isConnected||button.followupSelecting||followupTextSelected(button))return;
    const summary=['日期','姓名','年龄','工作','地区','婚否','爱好'].map(name=>
     String(fields[name]||'').replace(/\s+/g,' ').trim()).filter(Boolean).join(' ');
-   if(summary){button.textContent=number+' '+summary;positionReadingCards();}
+   const text=summary?number+' '+summary:number;
+   if(button.textContent!==text){button.textContent=text;positionReadingCards();}
   });
  }
+ let cursor=list.firstChild;
+ for(const row of rows){if(row===cursor)cursor=cursor.nextSibling;else list.insertBefore(row,cursor);}
+ while(cursor){const next=cursor.nextSibling;cursor.remove();cursor=next;}
  positionReadingCards();
 }
 async function openFollowupContact(device,number){

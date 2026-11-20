@@ -76,6 +76,7 @@ class ReadingState:
     expand: bool = False
     attempts: int = 0
     unconfirmed_fingerprint: str | None = None
+    unconfirmed_window: list = field(default_factory=list)
 
 
 class ForegroundReader:
@@ -216,7 +217,15 @@ class ForegroundReader:
                    if isinstance(record.get('phone_number') or record.get('contact'), str)
                    and phone_key(record.get('phone_number') or record.get('contact') or '') == number]
         if preferred is None:
-            preferred = (self.service.ledger.load(device, number) or {}).get('conversation_id')
+            ledger = self.service.ledger.load(device, number) or {}
+            preferred = ledger.get('conversation_id')
+            selected = next((r for r in records if r['id'] == preferred), None)
+            if ledger.get('pending_windows'):
+                candidates = [r for r in records if (r.get('incremental') or {}).get('overlap_confirmed') is False]
+                if candidates:
+                    visible = max(candidates, key=lambda r: len(r['messages']))
+                    if len(visible['messages']) > len((selected or {}).get('messages', [])):
+                        return [visible]
         if preferred:
             return [record for record in records if record['id'] == preferred][:1]
         return records[:1]
@@ -227,6 +236,12 @@ class ForegroundReader:
             return prior
         cached = self._records(device, number)
         return {'messages': cached[0]['messages'], 'conversation_id': cached[0]['id']} if cached else None
+
+    def progress(self, body, device):
+        self.identity(body)
+        from reading_progress import load_progress
+        value = load_progress(device, self.service.root) if self.eligible(device) else None
+        return {'phase': 'reading_progress', 'progress': value}
 
     def probe(self, body, device, base):
         """Run one of up to three client-scheduled probes for a completed tap."""
@@ -268,6 +283,11 @@ class ForegroundReader:
             state.contact = result.get('contact') or state.number
             state.needs_read = True
             state.expand, state.attempts, state.unconfirmed_fingerprint = False, 0, None
+            prior = self.service.ledger.load(device, state.number) or {}
+            if prior.get('overlap_confirmed') is False and prior.get('pending_windows') and prior.get('last_window'):
+                state.unconfirmed_window = [dict(m) for m in prior['last_window']]
+                state.attempts = 2
+                state.needs_read = False
             return {'phase': 'identified', 'phone_number': state.number,
                     'conversations': self._records(device, state.number), 'next_seconds': .3}
         except PhoneTrustRequired as error:
@@ -306,7 +326,7 @@ class ForegroundReader:
                 return {'phase': 'send_pending'}
             prior = self._prior(device, number)
             history = (prior or {}).get('messages', [])
-            options = {'phone_number': number, 'history': history[-80:]}
+            options = {'phone_number': number, 'history': history[-80:], 'expected_text': expected}
             client, generation = self.identity(body)
             if self._native_injected:
                 result = self.native(device, 'auto_sent_tail', base, options, cancelled)
@@ -374,6 +394,8 @@ class ForegroundReader:
             action = 'auto_read' if reading else 'auto_tail'
             options = {'phone_number': state.number, 'contact': state.contact or state.number,
                        'history': history[-80:], 'allow_overlap_stop': not state.expand and not bool((prior or {}).get('pending_windows'))}
+            if not reading and state.attempts >= 2 and state.unconfirmed_window:
+                options['tail_limit'] = 1
             client, generation = self.identity(body)
             if self._native_injected:
                 result = self.native(device, action, base, options, cancelled)
@@ -393,8 +415,30 @@ class ForegroundReader:
                         'message': '当前未读到气泡，等待会话更新', 'next_seconds': 2}
             if not reading:
                 merged, aligned = append_verified_window(history, messages)
+                date_refresh = (aligned and len(merged) == len(history) and merged != history
+                                and result.get('bounded_complete') and not result.get('unclassified')
+                                and bool(result.get('context_fingerprint')))
+                if not date_refresh and state.attempts >= 2:
+                    # Compare against the unresolved full window before the old
+                    # short history can mistakenly reset the retry counter.
+                    observed = state.unconfirmed_window or (prior or {}).get('last_window') or history
+                    expanded, matched = append_verified_window(observed, messages)
+                    latest_changed = (len(messages) == 1 and observed and result.get('bounded_complete')
+                                      and not result.get('unclassified') and messages[0].get('time')
+                                      and observed[-1].get('time') and tuple(messages[0].get(k) for k in
+                                      ('side', 'text', 'time', 'kind')) != tuple(observed[-1].get(k) for k in
+                                      ('side', 'text', 'time', 'kind')))
+                    if not latest_changed and (not matched or len(expanded) <= len(observed)):
+                        state.needs_read = False
+                        return {'phase': 'unconfirmed', 'phone_number': state.number,
+                                'conversations': self._records(device, state.number), 'next_seconds': 5}
                 if (aligned and merged == history and result.get('bounded_complete')
                         and not result.get('unclassified')):
+                    if state.unconfirmed_window:
+                        # A healthy three-row tail does not resolve an earlier
+                        # longer window or grant another unlimited retry budget.
+                        return {'phase': 'unconfirmed', 'phone_number': state.number,
+                                'conversations': self._records(device, state.number), 'next_seconds': 5}
                     # Only establish a checkpoint against already persisted history.
                     state.fingerprint = result['fingerprint']
                     state.needs_read = False
@@ -403,14 +447,6 @@ class ForegroundReader:
                     if repeated and self.clock() - state.verified_at >= 15:
                         state.needs_read = True
                     return {'phase': 'waiting', 'phone_number': state.number, 'next_seconds': 2}
-                date_refresh = (aligned and len(merged) == len(history) and merged != history
-                                and result.get('bounded_complete') and not result.get('unclassified')
-                                and bool(result.get('context_fingerprint')))
-                if not date_refresh and state.attempts >= 2 and result.get('fingerprint') == state.unconfirmed_fingerprint:
-                    # This is an observed unresolved window, not a saved checkpoint.
-                    # One expanded retry is enough; wait for a new window or manual action.
-                    state.needs_read = False
-                    return {'phase': 'unconfirmed', 'phone_number': state.number, 'next_seconds': 2}
                 if state.attempts >= 2:
                     state.attempts = 0
                 if (result.get('fingerprint') != state.fingerprint or self.clock() - state.verified_at >= 15
@@ -432,6 +468,7 @@ class ForegroundReader:
                 state.expand = not confirmed
                 state.attempts = 0 if confirmed else state.attempts + 1
                 state.unconfirmed_fingerprint = None if confirmed else result.get('fingerprint')
+                state.unconfirmed_window = [] if confirmed else [dict(m) for m in messages]
                 state.needs_read = not confirmed
                 if state.attempts >= 2:
                     state.needs_read = False
@@ -445,7 +482,7 @@ class ForegroundReader:
             if confirmed or not history:
                 response['conversations'] = self._records(device, state.number)
             elif (prior or {}).get('conversation_id'):
-                records = self._records(device, state.number, prior['conversation_id'])
+                records = self._records(device, state.number)
                 if records:
                     response['conversations'] = records
             return response

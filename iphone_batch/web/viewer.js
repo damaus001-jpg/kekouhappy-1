@@ -338,9 +338,9 @@ async function postJson(path, payload) {
 
 let activePointer = null;
 let foregroundPointerStart=null,foregroundDragReported=false,foregroundPointerMoved=false,foregroundPointerGesture=null,foregroundTapRevision=0;
-function notifyForegroundActivity(kind){
+function notifyForegroundActivity(kind,details={}){
     if(kind!=='tap-complete')foregroundTapRevision++;
-    if(batchManaged&&batchSelected)parent.postMessage({type:'phone-activity',kind,keysHeld:pressedUsages.size>0},
+    if(batchManaged&&batchSelected)parent.postMessage({type:'phone-activity',kind,keysHeld:pressedUsages.size>0,...details},
         new URLSearchParams(location.search).get('manager')||'http://127.0.0.1:8070');
 }
 let lastCoords = {x: 0, y: 0};
@@ -617,7 +617,7 @@ function pasteFeedback(message) {
         new URLSearchParams(location.search).get('manager') || 'http://127.0.0.1:8070');
 }
 
-function queueHostPaste(suppliedText = null) {
+function queueHostPaste(suppliedText = null, receiptId = null) {
     notifyForegroundActivity('paste');
     if (pastePending) return Promise.reject(Error('正在粘贴，请稍候'));
     pastePending = true;
@@ -653,6 +653,8 @@ function queueHostPaste(suppliedText = null) {
             throw error;
         }
         if (!current()) throw Error('控制目标已变化，粘贴结果请在原手机核对');
+        if(!content.image&&content.text)notifyForegroundActivity('paste-ready',{
+            text:content.text,id:receiptId||'paste-'+Date.now()+'-'+Math.random().toString(36).slice(2)});
         pasteFeedback('粘贴快捷键已发出（' + (content.image ? '图片' : '文字') + '），请核对手机输入框；确认后再手动发送');
     });
     lastKeyPost = task.catch(error => pasteFeedback('粘贴未完成：' + (error.message || error)))
@@ -734,7 +736,7 @@ window.addEventListener('keydown', (e) => {
         if (k === '0') { e.preventDefault(); setZoom(1); return; }
     }
     if (!keyboardCaptureOn()) return;
-    notifyForegroundActivity('key');
+    notifyForegroundActivity('key',{editing:!['Enter','NumpadEnter','ShiftLeft','ShiftRight','ControlLeft','ControlRight','AltLeft','AltRight','MetaLeft','MetaRight'].includes(e.code)});
     // Ctrl-hotkey path consumes the event; don't also type it.
     if (e.ctrlKey && !e.altKey && !e.metaKey) {
         const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
@@ -763,7 +765,8 @@ window.addEventListener('keydown', (e) => {
         pressedUsages.add(usage);
         postKeys();
         if(usage===0x28&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey){
-            enterSendPending={epoch:inputEpoch,down:lastKeyPost};
+            enterSendPending={epoch:inputEpoch,down:lastKeyPost,id:'enter-'+Date.now()+'-'+Math.random().toString(36).slice(2)};
+            notifyForegroundActivity('send-start',{id:enterSendPending.id});
         }
         notifyForegroundActivity('key-state');
     }
@@ -779,13 +782,11 @@ window.addEventListener('keyup', (e) => {
     if (pressedUsages.delete(usage)) postKeys();
     notifyForegroundActivity('key-state');
     if(sentEnter){
-        const revision=foregroundTapRevision,release=lastKeyPost;
+        const release=lastKeyPost;
         Promise.all([sentEnter.down,release]).then(async results=>{
             if(!results.every(ok=>ok===true))return;
-            await new Promise(resolve=>setTimeout(resolve,300));
-            if(sentEnter.epoch===inputEpoch&&revision===foregroundTapRevision&&
-                keyboardCaptureOn()&&pressedUsages.size===0&&!document.hidden){
-                notifyForegroundActivity('send-complete');
+            if(sentEnter.epoch===inputEpoch&&keyboardCaptureOn()&&!document.hidden){
+                notifyForegroundActivity('send-complete',{id:sentEnter.id});
             }
         }).catch(()=>{});
     }
@@ -2166,7 +2167,7 @@ if (batchManaged) {
                 respond(false, '手机控制连接不可用或正文为空'); return;
             }
             canvas.focus({preventScroll: true});
-            queueHostPaste(event.data.text).then(() => respond(true), error => respond(false, error.message));
+            queueHostPaste(event.data.text,id).then(() => respond(true), error => respond(false, error.message));
             return;
         }
         if (event.data?.type === 'device-home') {

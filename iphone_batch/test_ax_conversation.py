@@ -6,6 +6,38 @@ from test_native_foreground import Inspector, NUMBER, HEADER
 
 
 class ConversationCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unrecognized_top_marker_cannot_multiply_one_bubble_on_wall(self):
+        phone = Inspector(['Back, Button', HEADER, 'Text Message • SMS, extra hint',
+            'Thu, Oct 15 at 09:37', 'Your Text Message, Are u around tomorrow?, 09:37',
+            'Sent as SMS', 'add, Button', 'Message, Text Message, SMS', 'Record audio, Button'])
+        snapshots = []
+        result = await capture_conversation(phone, {'on_progress': snapshots.append})
+        self.assertEqual(result['traversal']['rounds'][0]['summary']['reason'], 'focus_cycle_verified')
+        self.assertTrue(result['bounded_complete'])
+        self.assertEqual(len(result['messages']), 1)
+        self.assertEqual(max(len(s['messages']) for s in snapshots), 1)
+
+    async def test_observed_bubbles_are_published_before_final_verification(self):
+        phone = self.phone([NUMBER+', A, 10:00', NUMBER+', B, 10:01', 'Your iMessage, C, 10:02'])
+        snapshots = []
+        result = await capture_conversation(phone, {'on_progress': lambda value:
+            snapshots.append((value, len(phone.moves)))})
+        reading = [(value, moves) for value, moves in snapshots if value['phase'] == 'reading' and value['messages']]
+        self.assertTrue(reading)
+        self.assertEqual(len(reading[0][0]['messages']), 1)
+        self.assertLess(reading[0][1], len(phone.moves))
+        self.assertEqual(len(result['messages']), 3)
+        self.assertEqual(snapshots[-1][0]['phase'], 'complete')
+
+    async def test_single_outgoing_bubble_is_complete_and_keeps_status(self):
+        phone = self.phone(['Your Text Message, Only bubble, 10:00', 'Sent as SMS'])
+        result = await capture_conversation(phone)
+        self.assertTrue(result['bounded_complete'])
+        self.assertTrue(result['bottom_confirmed'])
+        self.assertEqual(len(result['messages']), 1)
+        self.assertEqual(result['messages'][0]['text'], 'Only bubble')
+        self.assertEqual(result['messages'][0]['bubble_status']['sending_method'], 'sms')
+
     async def test_unconfirmed_revisit_stays_outside_display_timeline(self):
         from ax_recheck import parse_caption
         phone = self.phone([NUMBER+', A, 10:00', NUMBER+', B, 10:01'])

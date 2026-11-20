@@ -31,7 +31,12 @@ def append_window(history, window):
         previous = [i for i in range(len(old)-size+1) if old[i:i+size] == anchor]
         if len(positions) != 1 or len(previous) != 1:
             return deepcopy(history), False
-        return deepcopy(history) + deepcopy(window[positions[0]+size:]), True
+        refreshed = deepcopy(history)
+        for saved, observed in zip(refreshed[-size:], window[positions[0]:positions[0]+size]):
+            if observed.get('bubble_status'):
+                from bubble_status import update_status
+                update_status(saved, observed['bubble_status'])
+        return refreshed + deepcopy(window[positions[0]+size:]), True
     return deepcopy(history), False
 
 
@@ -80,6 +85,9 @@ def append_verified_window(history, window, *, skip_known_attachments=True):
                 return unmatched()
         refreshed = deepcopy(history)
         for saved, observed in zip(refreshed[-end:], window[:end]):
+            if observed.get('bubble_status'):
+                from bubble_status import update_status
+                update_status(saved, observed['bubble_status'])
             if observed.get('date_source') == 'ui_separator' and observed.get('date_label'):
                 for field in DATE_FIELDS:
                     saved[field] = observed.get(field)

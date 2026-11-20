@@ -180,6 +180,16 @@ async def read_window(service, options, *, tail=False):
             return True
         messages, _ = parse_bubbles(list(reversed(observed)), contact)
         if tail:
+            if options.get('tail_limit') == 1 and messages:
+                stop['reason'] = 'latest_watch'
+                return True
+            expected = options.get('expected_text')
+            if history and expected is not None:
+                merged, aligned = append_verified_window(history, messages)
+                added = merged[len(history):] if aligned else []
+                if any(m.get('side') == 'outgoing' and m.get('text') == expected for m in added):
+                    stop['reason'] = 'verified_send_overlap'
+                    return True
             if len(messages) >= 6 and (not relative_span or messages[-1].get('date_label')):
                 stop['reason'] = 'tail'
                 return True
@@ -199,7 +209,7 @@ async def read_window(service, options, *, tail=False):
         return {'phone_number': expected, 'input_active': True}
     messages, unknown = parse_bubbles(records, contact)
     signature = hashlib.sha256(json.dumps(
-        [(m.get('side'), m.get('time'), m.get('kind'), m.get('text'), m.get('element_id'))
+        [(m.get('side'), m.get('time'), m.get('kind'), m.get('text'), m.get('element_id'), m.get('bubble_status'))
          for m in messages[-6:]], ensure_ascii=False).encode()).hexdigest() if messages else None
     context_fingerprint = hashlib.sha256(json.dumps(
         [(m['side'], m['text'], m.get('time'), m.get('kind')) for m in messages], ensure_ascii=False).encode()).hexdigest()

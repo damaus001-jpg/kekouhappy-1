@@ -611,10 +611,12 @@ def main():
                         return self.respond(200, foreground_reader.release(body))
                     device = next((d for d in devices if d['udid'] == body.get('device')), None)
                     action = body.get('action')
-                    if action not in ('prepare', 'probe', 'tick', 'sent_tail') or device is None:
+                    if action not in ('prepare', 'probe', 'tick', 'sent_tail', 'progress') or device is None:
                         raise ValueError('自动读取设备无效')
                     require_control(device)
-                    if action == 'prepare':
+                    if action == 'progress':
+                        result = foreground_reader.progress(body, device['udid'])
+                    elif action == 'prepare':
                         result = foreground_reader.prepare(body, device['udid'])
                     elif action == 'probe':
                         result = foreground_reader.probe(body, device['udid'], f"http://127.0.0.1:{device['port']}")
@@ -836,7 +838,7 @@ def main():
             if not startup_queue.valid(device['udid'],ticket) or not connection_allowed(device,enabled):return
             stop_viewer(device)
             if (startup_queue.attempt(device['udid']) or 0)>0:
-                device['error']='请重启手机'
+                device['error']='请重连此设备'
             elif isinstance(error,TimeoutError) and '连接超过60秒' in str(error):
                 device['error']='连接超过60秒，已跳过；30秒后重试一次'
             else:

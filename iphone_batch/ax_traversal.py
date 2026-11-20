@@ -10,7 +10,8 @@ from bubble_records import date_separator
 from native_foreground import title_number
 
 
-TOP_MARKERS = {'Text Message', 'Text Message • SMS', 'Text Message • MMS', 'iMessage \ufffc Encrypted'}
+TOP_MARKERS = {'Text Message', 'Text Message • SMS', 'Text Message • MMS',
+               'Text Message • RCS', 'Text Message • RCS \ufffc Encrypted', 'iMessage \ufffc Encrypted'}
 UP_QUIET_SECONDS = .160
 DOWN_QUIET_SECONDS = .210
 TARGET_SECONDS = 70
@@ -59,6 +60,9 @@ async def read_pass(*, reverse, phone_number, bottom, move, inspect, deadline, r
     reason, marker, previous = 'time_limit', None, None
     anchor_seen = False
     batch_texts = 0
+    boundary_anchor = None
+    boundary_next = None
+    cycle_probe = False
 
     async def revisit(item, initial, anomaly, previous_messages):
         probes = []
@@ -115,12 +119,34 @@ async def read_pass(*, reverse, phone_number, bottom, move, inspect, deadline, r
             while len(rows) < 700:
                 row = focus_row(item)
                 caption = row['caption']
+                boundary_key = (caption, row.get('platform_identifier'))
+                if not rows and (caption in EMPTY_COMPOSERS or caption == 'add, Button'
+                                 or caption.startswith('Record audio, Button')):
+                    boundary_anchor = boundary_key
+                elif boundary_anchor and len(rows) == 1:
+                    boundary_next = boundary_key
+                if cycle_probe:
+                    if boundary_key == boundary_next:
+                        reason = 'focus_cycle_verified'
+                        break
+                    reason = 'focus_cycle_unconfirmed'
+                    break
+                if boundary_anchor and len(rows) >= 3 and messages and boundary_key == boundary_anchor:
+                    # Re-entering the unique composer edge is a traversal wrap,
+                    # not another occurrence of the message body. Confirm the
+                    # next edge before stopping; identical adjacent texts within
+                    # one path must still remain separate messages.
+                    cycle_probe = True
+                    item = await move(step)
+                    continue
                 rows.append(row)
                 number = title_number(caption)
                 if number and number != phone_number:
                     raise ConversationChanged()
                 checked = await inspect(item, deadline=deadline)
                 checks.append(checked)
+                if record:
+                    record('node', checks=checks, reverse=reverse)
                 if caption.strip() in TOP_MARKERS:
                     marker = len(rows)
                 if reverse and marker is not None and number == phone_number and 1 <= len(rows)-marker <= 3:

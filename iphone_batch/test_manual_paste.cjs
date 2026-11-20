@@ -9,20 +9,20 @@ const deferred = () => {let resolve; const promise = new Promise(r => {resolve =
 const pause = () => new Promise(resolve => setImmediate(resolve));
 
 function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatus = 200} = {}) {
-    const listeners = {}, requests = [], feedback = [];
+    const listeners = {}, requests = [], feedback = [], activities = [];
     const node = () => ({classList: {toggle() {}, contains() {return true;}}, addEventListener() {}, setAttribute() {}});
     const canvas = node(), document = {activeElement: canvas, getElementById: node};
     const context = {
         Blob, Uint8Array, atob, URLSearchParams, AbortSignal,
         inputEpoch: 0, batchManaged: true, enabled: true,
         pointerInput: {idle: async () => {}},
-        notifyForegroundActivity() {},
+        notifyForegroundActivity(kind,details={}) {activities.push({kind,...details});},
         canvas, document, navigator: {}, CTRL_HOTKEYS: {},
         location: {search: '?batch=1&manager=http%3A%2F%2F127.0.0.1%3A8070'},
         parent: {postMessage(message) {feedback.push(message);}},
         window: {addEventListener(name, handler) {listeners[name] = handler;}},
         controlAvailable() {return context.enabled;},
-        postJson: async (url, body) => {requests.push({url, body});},
+        postJson: async (url, body) => {requests.push({url, body});return true;},
         clipboardResult() {}, log() {}, lastShared: null,
         fingerprint: async value => value.image ? 'image:mock' : 'text:' + value.text,
         inputMonitor: {invalidate() {context.inputEpoch++; context.enabled = false;}},
@@ -46,7 +46,7 @@ function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatu
     const paste = () => {key('ControlLeft'); key('KeyV', {ctrlKey: false}); key('KeyV', {up: true, ctrlKey: false}); key('ControlLeft', {up: true, ctrlKey: false});};
     const idle = () => vm.runInContext('lastKeyPost', context);
     const chords = () => requests.filter(r => r.url === '/manual-paste').map(r => JSON.parse(r.options.body));
-    return {context, requests, feedback, key, paste, idle, chords};
+    return {context, requests, feedback, activities, key, paste, idle, chords};
 }
 
 (async () => {
@@ -141,5 +141,25 @@ function setup({text = '  中文\nHello 🙂  ', image = null, host, uploadStatu
     const local = setup(); local.context.document.activeElement = {};
     assert(!local.key('KeyV').prevented);
     await local.idle(); assert.equal(local.requests.length, 0);
-    console.log('Manual paste passed: Unicode, image priority, one chord, repeated content, failure and focus/control cancellation; no Return or SMS send');
+
+    const enter=setup(), down=deferred();let keyPosts=0;
+    enter.context.postJson=async()=>++keyPosts===1?down.promise:true;
+    enter.key('Enter',{ctrlKey:false});enter.key('Enter',{up:true,ctrlKey:false});
+    assert.equal(enter.activities.filter(a=>a.kind==='send-start').length,1);
+    assert.equal(enter.activities.filter(a=>a.kind==='send-complete').length,0);
+    enter.key('KeyA',{ctrlKey:false});
+    down.resolve(true);await enter.idle();await pause();
+    const started=enter.activities.find(a=>a.kind==='send-start'),completed=enter.activities.find(a=>a.kind==='send-complete');
+    assert(completed,'new typing must not discard the earlier successful Enter acknowledgement');
+    assert.equal(completed.id,started.id);
+    const failedEnter=setup();failedEnter.context.postJson=async()=>false;
+    failedEnter.key('Enter',{ctrlKey:false});failedEnter.key('Enter',{up:true,ctrlKey:false});
+    await failedEnter.idle();await pause();
+    assert(!failedEnter.activities.some(a=>a.kind==='send-complete'));
+    const changedEnter=setup(), lateDown=deferred();
+    changedEnter.context.postJson=async()=>lateDown.promise;
+    changedEnter.key('Enter',{ctrlKey:false});changedEnter.key('Enter',{up:true,ctrlKey:false});
+    changedEnter.context.inputEpoch++;lateDown.resolve(true);await changedEnter.idle();await pause();
+    assert(!changedEnter.activities.some(a=>a.kind==='send-complete'));
+    console.log('Paste and Enter receipts passed: exact body, one chord, failed-key rejection, rapid next input and control-change cancellation; simulated input only');
 })().catch(error => {console.error(error); process.exitCode = 1;});

@@ -2,6 +2,7 @@
 import calendar
 import re
 from sms_collect import parse_records
+from bubble_status import parse_status, update_status
 
 MONTHS = {name: index for index, name in enumerate(
     ('jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'), 1)}
@@ -37,8 +38,16 @@ def date_separator(caption):
 def parse_bubbles(records, contact):
     header = {'caption': contact + ', Show Conversation Details, Button'}
     messages, unknown, date = [], [], {}
+    status_target = None
     for record in records:
         caption = record.get('caption') or ''
+        status = parse_status(caption)
+        if status:
+            if status_target is not None:
+                update_status(status_target, status)
+            continue
+        if caption.strip() in ('Send failure, Button', '发送失败, 按钮'):
+            continue
         _, parsed, unclassified = parse_records([header, record])
         if parsed:
             message = dict(parsed[0])
@@ -48,6 +57,7 @@ def parse_bubbles(records, contact):
             message = {'side': side, 'kind': 'attachment', 'text': '[图片：未读取图片内容]',
                        'time': None, 'element_id': record.get('platform_identifier'), 'raw_caption': caption}
         else:
+            status_target = None
             separator = date_separator(caption)
             if separator:
                 date = separator
@@ -63,4 +73,5 @@ def parse_bubbles(records, contact):
         message.update(date)
         message['sequence'] = len(messages) + 1
         messages.append(message)
+        status_target = message
     return messages, unknown

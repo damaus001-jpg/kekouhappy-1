@@ -34,10 +34,27 @@ function setup(results){
  assert.equal(tap.checks()[0].expected_text,'Hello');
 
  const enter=setup([ok]);enter.ctl.activity('send-complete');await enter.advance(0);
- assert.equal(enter.applied.length,1);
+ assert.equal(enter.applied.length,2);
+ assert.equal(enter.applied[0].phase,'send_acknowledged');
+ assert.equal(enter.applied[0].receipt.text,'Hello');
+ assert.equal(enter.applied[1].phase,'send_saved');
  const failed=setup([]);failed.ctl.activity('send-complete');await failed.advance(0);
  await failed.advance(300);await failed.advance(300);await failed.advance(500);
- assert.equal(failed.checks().length,3);assert.equal(failed.applied.length,0);
+ assert.equal(failed.checks().length,3);assert.equal(failed.applied.length,1);
+ assert.equal(failed.applied[0].phase,'send_acknowledged','slow verification must not delay the submission bubble');
+
+ const rapid=setup([]);let finish;
+ rapid.ctl.request=body=>body.action==='sent_tail'?new Promise(resolve=>{finish=resolve;}):Promise.resolve({phase:'released'});
+ rapid.ctl.activity('send-start',{id:'key-one'});
+ rapid.ctl.expectSend('+12025550123','Second','paste-two');
+ rapid.ctl.activity('send-complete',{id:'key-one'});
+ assert.equal(rapid.applied[0].receipt.text,'Hello','send acknowledgement uses the Enter-time body snapshot');
+ assert.equal(rapid.ctl.expectedSend.text,'Second','later prepared input is retained');
+ rapid.ctl.activity('send-complete',{id:'key-one'});
+ assert.equal(rapid.applied.length,1,'duplicate Enter receipts cannot append twice');
+ const edited=setup([]);edited.ctl.activity('key',{editing:true});
+ edited.ctl.activity('send-complete');await edited.advance(0);
+ assert.equal(edited.applied.length,0,'phone edits invalidate the known body until re-read');
 
  const scroll=setup([]);scroll.ctl.activity('send-complete');await scroll.advance(0);
  scroll.ctl.activity('scroll');await scroll.advance(500);

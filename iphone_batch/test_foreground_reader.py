@@ -36,6 +36,7 @@ class ForegroundReaderTests(unittest.TestCase):
         self.assertEqual(response['phase'], 'send_saved')
         self.assertTrue(response['after_send'])
         self.assertEqual(native.call_args.args[1], 'auto_sent_tail')
+        self.assertEqual(native.call_args.args[3]['expected_text'], 'Hello')
         self.assertEqual(response['conversations'][0]['messages'][-1]['text'], 'Hello')
         self.assertEqual(self.service.ledger.load('one', NUMBER)['messages'][-1]['side'], 'outgoing')
 

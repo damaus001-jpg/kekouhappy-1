@@ -383,12 +383,12 @@ class WorkspaceService:
         saved = self.ledger.commit(device, contact, keep_history, window, aligned, snapshot, pending,
             baseline_complete=bool((prior or {}).get('baseline_complete')),
             conversation_id=(prior or {}).get('conversation_id'))
-        display_messages = saved['messages'] if aligned else window
-        scope = f'已即时读取当前可见气泡 {len(window)} 条；'
+        display_messages = saved['messages'] if aligned else (current.get('reading_messages') or window)
+        scope = f'本轮已识别并显示 {len(display_messages)} 条；'
         if aligned:
             scope += f'累计保存 {len(display_messages)} 条。'
         else:
-            scope += '与已有历史未能确认衔接，本次气泡单独显示，原历史已保留。'
+            scope += '本次读取已显示，部分字段或历史衔接待核对；原已确认历史保留。'
         scope += '完整历史尚未同步；需要完整历史时，请使用“同步完整历史”。'
         value = {**identity, **current, 'device': device, 'created': datetime.now().isoformat(),
                  'messages': display_messages, 'native_context': window,
