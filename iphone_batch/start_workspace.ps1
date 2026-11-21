@@ -6,6 +6,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 $taskPython = Join-Path $taskRoot '.venv\Scripts\python.exe'
+if (!(Test-Path -LiteralPath $taskPython)) { $taskPython = Join-Path $taskRoot 'runtime\python.exe' }
+if (Test-Path -LiteralPath (Join-Path $taskRoot 'runtime\node.exe')) { $env:PATH = (Join-Path $taskRoot 'runtime') + ';' + $env:PATH }
 $taskDashboard = Join-Path $PSScriptRoot 'dashboard.py'
 $taskLogs = Join-Path $PSScriptRoot '.device-data\logs'
 if (!(Test-Path -LiteralPath $taskPython)) { throw "Missing virtual environment: $taskPython" }

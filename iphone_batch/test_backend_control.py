@@ -98,7 +98,9 @@ class BackendControlTests(unittest.TestCase):
             child = None
             with patch.object(control, 'PROJECT', root), \
                     patch.object(control, 'SCRIPTS', scripts), \
-                    patch.object(control, 'LOGS', root / 'logs'):
+                    patch.object(control, 'LOGS', root / 'logs'), \
+                    patch.object(backend, '_ensure_tunneld'), \
+                    patch.object(backend, '_stop_tunneld'):
                 try:
                     self.assertIn('已启动', backend.start())
                     deadline = time.monotonic() + 5

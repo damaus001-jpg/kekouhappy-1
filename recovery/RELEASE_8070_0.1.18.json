@@ -1,0 +1,17 @@
+{
+  "version": "0.1.18",
+  "source_tag": "v0.1.18",
+  "project": "8070",
+  "platform": "Windows 10/11 x64",
+  "installer": "PhoneWorkbench8070-0.1.18-Setup.exe",
+  "bytes": 329869545,
+  "sha256": "4b00e5b4989907b4f3bb240986a6e3746901999a9cd3145c0daea471ebdfd49f",
+  "payload_files": 17946,
+  "bundled": ["Python 3.13.15", "locked Python packages", "Node 24.19.0", "Electron desktop", "VC143 x64 CRT"],
+  "apple_usb_driver_bundled": false,
+  "installer_code_signed": false,
+  "private_runtime_data_bundled": false,
+  "remote_push": false,
+  "validation_report": "releases/PhoneWorkbench8070-0.1.18-installation-check.json",
+  "physical_second_pc_phone_tested": false
+}

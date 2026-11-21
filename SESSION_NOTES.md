@@ -1,4 +1,9 @@
-# Current recovery point: v0.1.17 (2026-11-20)
+# Current recovery point: v0.1.18 (2026-11-20)
+
+Archive: [SESSION_ARCHIVE_2026-11-20_v0.1.18.md](SESSION_ARCHIVE_2026-11-20_v0.1.18.md).
+Independent 8070 Windows installer bundles Python, Node and an Electron desktop entry with per-computer HMAC access. Relocated-runtime and final EXE installation checks use zero devices. Apple drivers and phone-side trust/developer mode remain external requirements. No remote push. Next recovery version: v0.1.19.
+
+# Historical recovery point: v0.1.17 (2026-11-20)
 
 Archive: [SESSION_ARCHIVE_2026-11-20_v0.1.17.md](SESSION_ARCHIVE_2026-11-20_v0.1.17.md).
 User authorized a local archive and Git commit/tag only; no remote push is authorized for this delivery. Screenshot modes and device 01 reboot/control recovery were exercised; the new-message UI currently saves configuration drafts only. Multi-device scheduling, automatic banner patrol, Windows notifications, and daily statistics remain pending. Detailed evidence and limits are recorded in the archive and recovery/VALIDATION.md. Next archive version: v0.1.18.

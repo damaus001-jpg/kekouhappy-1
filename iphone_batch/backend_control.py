@@ -17,6 +17,8 @@ import psutil
 PROJECT = Path(__file__).resolve().parent.parent
 SCRIPTS = PROJECT / 'iphone_batch'
 PYTHON = PROJECT / '.venv' / 'Scripts' / 'python.exe'
+if not PYTHON.is_file():
+    PYTHON = PROJECT / 'runtime' / 'python.exe'
 LOGS = SCRIPTS / '.device-data' / 'logs'
 ENTRIES = {'dashboard.py', 'controller.py', 'pmd_entry.py',
            'native_workspace.py', 'message_backup.py', 'device_trust.py', 'tunneld_entry.py'}
