@@ -36,7 +36,7 @@ def ignore_deps(folder,names):
     return [name for name in names if name in ('__pycache__','direct_url.json') or name.endswith(('.pyc','.pyo'))]
 
 
-def stage_files(stage,build,electron,version):
+def stage_files(stage,build,electron,version,host_only=False):
     print('Copying isolated Python runtime...',flush=True)
     runtime=stage/'runtime';runtime.mkdir(parents=True)
     base=Path(sys.base_prefix)
@@ -55,12 +55,15 @@ def stage_files(stage,build,electron,version):
         if candidate.is_file():shutil.copy2(candidate,runtime/'NODE-LICENSE.txt');break
     print('Copying 8070 source and web assets; excluding runtime data...',flush=True)
     files=command(['git','-c','safe.directory='+ROOT.as_posix(),'-c','core.quotepath=false','ls-files','iphone_batch']).stdout.splitlines()
+    files=sorted(set(files+['iphone_batch/host_access.py','iphone_batch/host_control.py']))
     for name in files:
         relative=Path(name)
         if '.device-data' in relative.parts or '__pycache__' in relative.parts or relative.name.startswith('test_'):continue
         if relative.suffix.lower() in ('.db','.sqlite','.log','.pyc'):continue
         destination=stage/relative;destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(ROOT/relative,destination)
-    for name in ('VERSION','requirements-windows.lock.txt','README.md','RECOVERY.md','Start.ps1','BackendControl.pyw','BackendControl.cmd'):
+    root_files=['VERSION','requirements-windows.lock.txt','README.md','RECOVERY.md']
+    if not host_only:root_files+=['Start.ps1','BackendControl.pyw','BackendControl.cmd']
+    for name in root_files:
         shutil.copy2(ROOT/name,stage/name)
     (stage/'tools').mkdir(exist_ok=True)
     shutil.copy2(ROOT/'tools/check_8070_install.py',stage/'tools/check_8070_install.py')
@@ -75,6 +78,18 @@ def stage_files(stage,build,electron,version):
         '安装结束不会自动启动，也不会连接或操作手机。已有其他 8070 后台时请先通过对应后台管理关闭，勿重复占用端口。\n'
         '关闭桌面工作台窗口会保留后台；可从菜单“后台管理”彻底关闭本安装目录所属后台。\n'
         '卸载不主动清除运行期间产生的业务数据。\n',encoding='utf-8-sig')
+    if host_only:
+        (stage/'8070-host-policy.json').write_text('{"protocol":1,"mode":"pikachu-only"}',encoding='utf-8')
+        (stage/'使用说明.txt').write_text(
+            '手机工作台8070后台 '+version+'\n\nWindows 10/11 x64。内置Python、Node、项目依赖和C++运行库。\n'
+            '安装后请通过皮卡丘翻译器的“打新增”图标右键菜单启动或彻底关闭后台，页面使用现有苹果入口。\n'
+            '本包没有独立桌面或开始菜单启动入口。安装位置自动登记，无需固定路径。\n'
+            'Apple USB驱动需通过Apple官方软件准备；手机需解锁、信任电脑及开启开发者模式。\n'
+            '首次开发者镜像准备可能联网，共享USB隧道需要Windows管理员授权。\n'
+            '关闭皮卡丘主窗口不等于彻底关闭后台；彻底关闭会断开本后台全部设备连接。\n'
+            '安装结束不自动启动，不包含开发机业务数据或密钥。新建短信仍只保存配置草稿。\n'
+            '卸载不主动清除运行期间产生的业务数据。\n',encoding='utf-8-sig')
+        return
     print('Copying standalone Electron runtime (no other application source or profiles)...',flush=True)
     shutil.copytree(electron,stage/'client',ignore=shutil.ignore_patterns('default_app.asar'))
     (stage/'client/electron.exe').rename(stage/'client/PhoneWorkbench8070Client.exe')
@@ -95,7 +110,10 @@ def finish(stage,build,iscc,version):
                        PATH=str(stage/'runtime')+os.pathsep+str(Path(os.environ.get('SystemRoot','C:/Windows'))/'System32'))
     check=build/'offline-install-check.json'
     print('Checking relocated Python imports, bundled Node and hidden signed desktop with zero devices...',flush=True)
-    command([stage/'PhoneWorkbench8070.exe','--check-install',check],env=environment,timeout=110)
+    host_only=(stage/'8070-host-policy.json').is_file()
+    check_command=([stage/'runtime/python.exe',stage/'tools/check_8070_install.py','--output',check]
+                   if host_only else [stage/'PhoneWorkbench8070.exe','--check-install',check])
+    command(check_command,env=environment,timeout=150)
     result=json.loads(check.read_text(encoding='utf-8'))
     if not result.get('ok'):raise RuntimeError(str(result))
     # Only a new build stage is cleaned; the development runtime is untouched.
@@ -117,11 +135,13 @@ def finish(stage,build,iscc,version):
     (build/'payload-manifest.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
     print('Compiling EXE installer; detailed compiler output: '+str(build/'inno.log'),flush=True)
     source=ROOT/'tools/installer_8070/installer.iss'
-    command([iscc,'/DStageDir='+str(stage),'/DReleaseDir='+str(RELEASE),'/DAppVersion='+version,source],log=build/'inno.log',timeout=900)
+    defines=['/DHostOnly=1'] if host_only else []
+    command([iscc,'/DStageDir='+str(stage),'/DReleaseDir='+str(RELEASE),'/DAppVersion='+version,*defines,source],log=build/'inno.log',timeout=900)
     installer=RELEASE/('PhoneWorkbench8070-'+version+'-Setup.exe')
     digest=hashlib.file_digest(installer.open('rb'),'sha256').hexdigest()
     report={'version':version,'project':'8070','installer':installer.name,'bytes':installer.stat().st_size,'sha256':digest,
-            'platform':'Windows 10/11 x64','runtime_bundled':True,'standalone_signed_access_client':True,
+            'platform':'Windows 10/11 x64','runtime_bundled':True,'standalone_signed_access_client':not host_only,
+            'pikachu_host_only':host_only,'control_protocol':1 if host_only else None,
             'apple_usb_driver_bundled':False,'installer_signed':False,'runtime_data_bundled':False,
             'stage':str(stage),'payload_files':len(manifest),'offline_install_check':result,'remote_push':False}
     (RELEASE/(installer.name+'.sha256')).write_text(digest+'  '+installer.name+'\n',encoding='ascii')
@@ -130,24 +150,26 @@ def finish(stage,build,iscc,version):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--electron',type=Path,required=True);parser.add_argument('--iscc',type=Path)
+    parser=argparse.ArgumentParser();parser.add_argument('--electron',type=Path);parser.add_argument('--iscc',type=Path)
+    parser.add_argument('--host-only',action='store_true')
     parser.add_argument('--repack-stage',type=Path);parser.add_argument('--crt',type=Path);args=parser.parse_args()
     version=(ROOT/'VERSION').read_text(encoding='utf-8-sig').strip()
     if not re.fullmatch(r'\d+\.\d+\.\d+',version):raise RuntimeError('Invalid VERSION')
     if sys.version_info[:2]!=(3,13) or Path(sys.prefix)==Path(sys.base_prefix):raise RuntimeError('Run from the project Python 3.13 venv')
     iscc=args.iscc or ROOT/'iphone_batch/.device-data/build-tools/InnoSetup/ISCC.exe'
     if not iscc.is_file():raise RuntimeError('ISCC compiler not found')
-    if not (args.electron/'electron.exe').is_file():raise RuntimeError('Electron runtime directory required')
+    if not args.host_only and (not args.electron or not (args.electron/'electron.exe').is_file()):raise RuntimeError('Electron runtime directory required')
     RELEASE.mkdir(exist_ok=True);CACHE.mkdir(parents=True,exist_ok=True)
     if args.repack_stage:
         stage=args.repack_stage.resolve()
         if not stage.is_relative_to(CACHE.resolve()):raise RuntimeError('Stage must be inside build cache')
+        if (stage/'8070-host-policy.json').is_file()!=args.host_only:raise RuntimeError('Repack mode must match existing stage')
         build=stage.parent
     else:
         build=CACHE/('8070-'+version+'-'+datetime.now().strftime('%Y%m%d-%H%M%S'));stage=build/'app'
         stage.mkdir(parents=True)
         print('Build directory: '+str(build),flush=True)
-        stage_files(stage,build,args.electron,version)
+        stage_files(stage,build,args.electron,version,args.host_only)
     crt=args.crt
     if not crt:
         redist=Path(os.environ.get('ProgramFiles(x86)','C:/Program Files (x86)'))/'Microsoft Visual Studio/2022/BuildTools/VC/Redist/MSVC'

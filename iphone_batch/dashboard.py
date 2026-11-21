@@ -148,6 +148,8 @@ class FocusManager:
 
 
 def main():
+    from host_access import require_dashboard_launch
+    require_dashboard_launch()
     parser=argparse.ArgumentParser()
     parser.add_argument('--udid',action='append')
     parser.add_argument('--port',type=int,default=8070)

@@ -60,18 +60,33 @@ def main():
     report={'version':version,'relocated_install':False,'uninstalled':False}
     try:
         run([args.installer.resolve(),'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOICONS','/MERGETASKS=!desktopicon','/DIR='+str(target),'/LOG='+str(validation/'install.log')],env)
-        run([target/'PhoneWorkbench8070.exe','--check-install',validation/'runtime.json'],env,120)
+        host_only=(target/'8070-host-policy.json').is_file()
+        if host_only:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,r'Software\PhoneWorkbench8070',0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as registry:
+                registered=Path(winreg.QueryValueEx(registry,'InstallDir')[0])
+                protocol=winreg.QueryValueEx(registry,'ControlProtocol')[0]
+            if registered.resolve()!=target.resolve() or protocol!=1:raise RuntimeError('Invalid installation discovery registry')
+            if (target/'client').exists() or (target/'PhoneWorkbench8070.exe').exists():raise RuntimeError('Standalone entry leaked into host-only installation')
+            command=[target/'runtime/python.exe',target/'tools/check_8070_install.py','--output',validation/'runtime.json']
+        else:command=[target/'PhoneWorkbench8070.exe','--check-install',validation/'runtime.json']
+        run(command,env,150)
         result=json.loads((validation/'runtime.json').read_text(encoding='utf-8'))
         if not result.get('ok'):raise RuntimeError(str(result))
         run([target/'runtime/python.exe','-c',BACKEND_CHECK,validation/'backend-control.json'],env,45)
         backend=json.loads((validation/'backend-control.json').read_text(encoding='utf-8'))
         if not backend.get('ok'):raise RuntimeError('Backend process check failed')
-        report.update(relocated_install=True,runtime=result,backend_control=backend,developer_path_removed=True,unicode_space_path=True)
+        report.update(relocated_install=True,runtime=result,backend_control=backend,developer_path_removed=True,unicode_space_path=True,pikachu_host_only=host_only)
     finally:
         uninstaller=target/'unins000.exe'
         if uninstaller.exists():
             run([uninstaller,'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG='+str(validation/'uninstall.log')],env)
-            report['uninstalled']=not (target/'PhoneWorkbench8070.exe').exists()
+            report['uninstalled']=not (target/'runtime/python.exe').exists() and not (target/'PhoneWorkbench8070.exe').exists()
+            if (target/'8070-host-policy.json').exists():report['uninstalled']=False
+            if report.get('pikachu_host_only'):
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER,r'Software\PhoneWorkbench8070',0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY):
+                        report['uninstalled']=False
+                except FileNotFoundError:pass
         report['ok']=report['relocated_install'] and report['uninstalled']
         output=ROOT/'releases'/('PhoneWorkbench8070-'+version+'-installation-check.json')
         output.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')

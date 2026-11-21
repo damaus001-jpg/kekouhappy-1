@@ -1,0 +1,12 @@
+{
+  "key_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+  "action": "start",
+  "root": "C:\\Program Files\\手机工作台8070",
+  "canonical_root": "c:/program files/手机工作台8070",
+  "proof": {
+    "v": 1,
+    "timestamp": "1700000000",
+    "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "signature": "165ebef969b3e184f9c455b3727106ac6cf0761d9519c6b67adee320fc5999db"
+  }
+}

@@ -1,4 +1,12 @@
-# Current recovery point: v0.1.18 (2026-11-20)
+# Current recovery point: v0.1.19 (2026-11-21)
+
+User requested a local archive and Git recovery point after delivery; keep the same v0.1.19 for this delivery. Archive: [SESSION_ARCHIVE_2026-11-21_v0.1.19.md](SESSION_ARCHIVE_2026-11-21_v0.1.19.md). Local tag v0.1.19; no remote push. Pikachu menu-only companion commit: `f467dc6c66a7cef9a9a7fe518146019b3c300a98`. User will perform real acceptance later. Do not restart applications, the current backend, or phones for archiving. Previous recovery: v0.1.18; next new recovery version: v0.1.20.
+
+## Work record before archiving
+
+User authorized direct collaboration with the new Pikachu session `01a1ff4d-45db-7b82-b017-d38f46a6750c`. Both “打新增” icons share status/start/stop; no open-page menu item. See PIKACHU_8070_CONTROL_PROTOCOL.md. 8070 provides registry-discovered, per-installation signed stdin JSON commands, atomic nonce replay protection and command locking. Host-only installed startup requires a separate serve grant; source development remains available without the installation policy. New installer mode omits Electron/standalone shortcuts; Apple driver/trust/developer mode/UAC remain external. Existing development backend and phones are not used for joint tests. 37 Python regression checks pass, including real process/grant transfer with USB tunnel mocked. Pikachu reports build, cross-language fixture, actual menu interactions and theme tests passing. Existing installed Pikachu and Signal trial were not overwritten/restarted. Current changes are uncommitted; previous recovery point remains v0.1.18. No remote push.
+
+# Historical recovery point: v0.1.18 (2026-11-20)
 
 Archive: [SESSION_ARCHIVE_2026-11-20_v0.1.18.md](SESSION_ARCHIVE_2026-11-20_v0.1.18.md).
 Independent 8070 Windows installer bundles Python, Node and an Electron desktop entry with per-computer HMAC access. Relocated-runtime and final EXE installation checks use zero devices. Apple drivers and phone-side trust/developer mode remain external requirements. No remote push. Next recovery version: v0.1.19.

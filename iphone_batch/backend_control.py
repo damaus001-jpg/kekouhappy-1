@@ -13,6 +13,7 @@ import urllib.request
 import urllib.error
 
 import psutil
+from host_access import host_only, make_proof, require_backend_action
 
 PROJECT = Path(__file__).resolve().parent.parent
 SCRIPTS = PROJECT / 'iphone_batch'
@@ -76,6 +77,7 @@ class Backend:
         return '后台已关闭'
 
     def start(self):
+        require_backend_action('start', PROJECT)
         processes = self.processes()
         if any(entry == 'dashboard.py' for _, entry in processes):
             return '后台已经运行，无需重复启动。'
@@ -88,6 +90,8 @@ class Backend:
         self._ensure_tunneld()
         environment = os.environ.copy()
         node = Path(environment.get('ProgramFiles', r'C:\Program Files')) / 'nodejs'
+        if (PROJECT / 'runtime' / 'node.exe').is_file():
+            node = PROJECT / 'runtime'
         environment['PATH'] = str(node) + os.pathsep + environment.get('PATH', '')
         environment.update(PYTHONIOENCODING='utf-8', PYTHONUTF8='1')
         with (LOGS / 'dashboard-8070.out.log').open('ab') as out, \
@@ -95,7 +99,17 @@ class Backend:
             process = subprocess.Popen(
                 [str(PYTHON), str(SCRIPTS / 'dashboard.py'), '--port', '8070', '--base-port', '8080'],
                 cwd=PROJECT, env=environment, stdout=out, stderr=err,
+                stdin=subprocess.PIPE if host_only(PROJECT) else subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        if host_only(PROJECT):
+            try:
+                process.stdin.write((json.dumps(make_proof('serve', PROJECT)) + '\n').encode('utf-8'))
+                process.stdin.close()
+            except (OSError, ValueError):
+                process.terminate()
+                process.wait(timeout=5)
+                self._stop_tunneld()
+                raise RuntimeError('后台启动授权传递失败') from None
         self.started = process
         time.sleep(2)
         if process.poll() is not None:
@@ -233,6 +247,7 @@ class Backend:
         raise RuntimeError('已请求共享隧道退出，但管理员进程仍在运行；请查看 tunneld.log。')
 
     def stop(self):
+        require_backend_action('stop', PROJECT)
         self._stop_tunneld()
         # Freeze parents before collecting descendants, so watchdogs cannot
         # replace viewers while the tree is being stopped. psutil retains
