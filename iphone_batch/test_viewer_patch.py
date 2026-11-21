@@ -178,6 +178,49 @@ class ClipboardHTTPTests(ViewerHTTPFixture):
         self.assertNotEqual(calls[1].args[0], calls[2].args[0])
         self.assertIsNone(self.instance._batch_contact)
 
+    async def test_two_finger_drag_reports_both_contacts_and_endpoint(self):
+        import struct
+        self.instance._ensure_hid = AsyncMock()
+        reports = AsyncMock()
+        self.instance._uhs = SimpleNamespace(send_report=reports)
+        for kind, y in [('contact', 1000), ('contact', 2000), ('release', 3000)]:
+            code, _ = await self.request('POST', {'type': kind, 'x': 100, 'y': y,
+                'contacts': [{'x': 100, 'y': y}, {'x': 500, 'y': y}]}, path='/manual-touch')
+            self.assertEqual(code, 200)
+        frames = [call.args[1] for call in reports.await_args_list]
+        self.assertEqual(len(frames), 4)  # final position before lift
+        self.assertEqual([frame[1] for frame in frames], [2] * 4)
+        self.assertTrue(all(len(frame) == 58 for frame in frames))
+        for frame, state, y in zip(frames, [0xC2, 0xC2, 0xC2, 2], [1000, 2000, 3000, 3000]):
+            self.assertEqual(struct.unpack_from('<BHH', frame, 3), (state, 100, y))
+            self.assertEqual(struct.unpack_from('<BHH', frame, 8), (state | 1, 500, y))
+        self.assertIsNone(self.instance._batch_contact)
+
+    async def test_two_finger_invalid_coordinates_never_dispatch(self):
+        self.instance._ensure_hid = AsyncMock()
+        for contacts in [None, [], [{'x': 1, 'y': 2}], [None, {}],
+                [{'x': True, 'y': 2}, {'x': 3, 'y': 4}],
+                [{'x': 1, 'y': -1}, {'x': 3, 'y': 4}]]:
+            code, _ = await self.request('POST', {'type': 'contact', 'x': 1, 'y': 2,
+                'contacts': contacts}, path='/manual-touch')
+            self.assertEqual(code, 400)
+        self.instance._ensure_hid.assert_not_awaited()
+
+    async def test_switching_device_lifts_both_fingers(self):
+        self.instance._batch_token = 'manager'
+        self.instance._batch_active = True
+        self.instance._hid_queue = asyncio.Queue()
+        self.instance._kb_service_id = None
+        reports = AsyncMock()
+        self.instance._uhs = SimpleNamespace(send_report=reports)
+        self.instance._batch_contact = {'type': 'contact', 'x': 100, 'y': 200,
+            'contacts': [{'x': 100, 'y': 200}, {'x': 500, 'y': 200}]}
+        code, _ = await self.request('POST', {'active': False}, path='/control-mode', token='manager')
+        self.assertEqual(code, 200)
+        frame = reports.await_args.args[1]
+        self.assertEqual((frame[1], frame[3], frame[8]), (2, 2, 3))
+        self.assertIsNone(self.instance._batch_contact)
+
     async def test_manual_key_waits_for_phone_dispatch_and_never_queues(self):
         self.instance._ensure_hid=AsyncMock()
         self.instance._ensure_keyboard=AsyncMock()
@@ -198,6 +241,38 @@ class ClipboardHTTPTests(ViewerHTTPFixture):
         self.assertEqual(code,200)
         self.assertEqual([call.args for call in keys.await_args_list],
                          [(9,[]),(9,[227]),(9,[227,25]),(9,[227]),(9,[])])
+
+    async def test_native_screenshot_sends_system_chord_and_releases(self):
+        self.instance._ensure_hid=AsyncMock()
+        self.instance._kb_service_id=9
+        keys=AsyncMock()
+        self.instance._uhs=SimpleNamespace(send_keyboard=keys)
+        code,data=await self.request('POST',{},path='/manual-screenshot')
+        self.assertEqual(code,200)
+        self.assertTrue(json.loads(data)['ok'])
+        self.assertEqual([call.args for call in keys.await_args_list],
+                         [(9,[]),(9,[227,225]),(9,[227,225,32]),(9,[])])
+
+    async def test_native_screenshot_failure_releases_without_replaying(self):
+        self.instance._ensure_hid=AsyncMock()
+        self.instance._stop_hid=AsyncMock()
+        self.instance._kb_service_id=9
+        keys=AsyncMock(side_effect=[None,None,ConnectionError('lost acknowledgement'),None])
+        self.instance._uhs=SimpleNamespace(send_keyboard=keys)
+        code,_=await self.request('POST',{},path='/manual-screenshot')
+        self.assertEqual(code,500)
+        self.assertEqual([call.args for call in keys.await_args_list],
+                         [(9,[]),(9,[227,225]),(9,[227,225,32]),(9,[])])
+
+    async def test_native_screenshot_requires_empty_post_and_authorization(self):
+        self.instance._ensure_hid=AsyncMock()
+        code,_=await self.request(path='/manual-screenshot')
+        self.assertEqual(code,405)
+        code,_=await self.request('POST',{'usages':[32]},path='/manual-screenshot')
+        self.assertEqual(code,400)
+        code,_=await self.request('POST',{},path='/manual-screenshot',authorized=False)
+        self.assertEqual(code,403)
+        self.instance._ensure_hid.assert_not_awaited()
 
     async def test_manual_paste_failure_still_releases_and_never_retries(self):
         self.instance._ensure_hid=AsyncMock()
@@ -306,7 +381,7 @@ class ClipboardHTTPTests(ViewerHTTPFixture):
         self.instance._batch_token = 'test-token'
         self.instance._batch_active = False
         self.instance._ensure_hid = AsyncMock()
-        for path, body in [('/manual-touch',{'type':'contact','x':1,'y':2}),('/manual-home',{}),('/manual-paste',{}),('/manual-composer-focus',{})]:
+        for path, body in [('/manual-touch',{'type':'contact','x':1,'y':2}),('/manual-home',{}),('/manual-screenshot',{}),('/manual-paste',{}),('/manual-composer-focus',{})]:
             code, _ = await self.request('POST', body, path=path)
             self.assertEqual(code, 403)
             code, _ = await self.request('POST', body, path=path, origin='https://example.com')

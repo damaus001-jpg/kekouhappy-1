@@ -16,6 +16,25 @@ MAX_TEXT_BYTES = 1024 * 1024
 MAX_CLIPBOARD_IMAGE_BYTES = 16 * 1024 * 1024
 
 
+async def dispatch_touch(instance, data, single_touch):
+    if 'contacts' not in data:
+        return await single_touch(instance, json.dumps(data).encode())
+    # Compose two slots using the pinned dependency's existing single-touch
+    # builder, so clean installs do not require a newer send_multitouch API.
+    from pymobiledevice3.remote.core_device.hid_service import (
+        build_touchscreen_report, DIGITIZER_SURFACE_MAIN_TOUCHSCREEN,
+        TOUCHSCREEN_STATE_CONTACT, TOUCHSCREEN_STATE_RELEASE,
+    )
+    state = TOUCHSCREEN_STATE_CONTACT if data['type'] == 'contact' else TOUCHSCREEN_STATE_RELEASE
+    first, second = data['contacts']
+    report = bytearray(build_touchscreen_report(state, first['x'], first['y']))
+    report[1] = 2
+    # Stable finger identities 2 and 3; each slot is state + UInt16 x/y.
+    report[8:13] = build_touchscreen_report(state | 1, second['x'], second['y'])[3:8]
+    await instance._uhs.send_report(DIGITIZER_SURFACE_MAIN_TOUCHSCREEN, bytes(report))
+    return 200, b'ok'
+
+
 async def capture_device_screenshot(instance):
     from pymobiledevice3.remote.core_device.screen_capture_service import ScreenCaptureService
     async with ScreenCaptureService(instance._rsd) as service:
@@ -206,7 +225,7 @@ def install():
                 logging.getLogger(__name__).warning('Media wake failed: port=%s error=%s', self._http_port, type(error).__name__)
                 await reply(writer, 503, {'error': '视频或控制服务正在准备，请稍后重试'})
                 return False
-        special = path in ('/device-screenshot', '/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-key', '/manual-paste', '/manual-composer-focus', '/input-health', '/input-readiness')
+        special = path in ('/device-screenshot', '/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-screenshot', '/manual-key', '/manual-paste', '/manual-composer-focus', '/input-health', '/input-readiness')
         restricted = device_token and (parts[0] == 'POST' or path.startswith('/clipboard') or path == '/host-clipboard')
         prefix = bytearray(first)
         headers = {}
@@ -235,7 +254,7 @@ def install():
             return await reply(writer, 403, {'error': 'same-origin localhost access required'})
         if not access.verify(parts[0], self._http_port, parts[1], headers.get(HEADER.lower())):
             return await reply(writer, 403, {'error': '请从授权客户端打开短信工作台'})
-        if (parts[0]=='POST' and path in ('/manual-touch','/manual-key','/manual-home',
+        if (parts[0]=='POST' and path in ('/manual-touch','/manual-key','/manual-home', '/manual-screenshot',
                 '/manual-paste','/manual-composer-focus','/input-health','/input-readiness')
                 and not policy_allows_input(self)):
             return await reply(writer,403,{'error':'device input disabled by policy'})
@@ -313,7 +332,7 @@ def install():
                 # only send an idle keyboard report; they never inject input.
                 result = await check_input(self, input_lock(self), lambda: True)
                 return await reply(writer, 200, result)
-            if path in ('/manual-touch', '/manual-home', '/manual-key', '/manual-paste', '/manual-composer-focus'):
+            if path in ('/manual-touch', '/manual-home', '/manual-screenshot', '/manual-key', '/manual-paste', '/manual-composer-focus'):
                 if parts[0] != 'POST':
                     return await reply(writer, 405, {'error': 'POST required'})
                 length = int(headers.get('content-length', '0'))
@@ -322,13 +341,20 @@ def install():
                 data = json.loads(await asyncio.wait_for(reader.readexactly(length), 5))
                 if not isinstance(data, dict):
                     return await reply(writer, 400, {'error': 'invalid request'})
-                if path in ('/manual-paste', '/manual-composer-focus') and data != {}:
+                if path in ('/manual-paste', '/manual-composer-focus', '/manual-screenshot') and data != {}:
                     return await reply(writer, 400, {'error': 'empty request required'})
                 if path == '/manual-touch':
                     if (data.get('type') not in ('contact', 'release')
                             or any(type(data.get(key)) is not int or not 0 <= data[key] <= 65535 for key in ('x', 'y'))
                             or not isinstance(data.get('settle', False), bool)):
                         return await reply(writer, 400, {'error': 'invalid touch'})
+                    if 'contacts' in data:
+                        contacts = data['contacts']
+                        if (not isinstance(contacts, list) or len(contacts) != 2
+                                or any(not isinstance(point, dict) or any(
+                                    type(point.get(key)) is not int or not 0 <= point[key] <= 65535
+                                    for key in ('x', 'y')) for point in contacts)):
+                            return await reply(writer, 400, {'error': 'invalid two-finger touch'})
                 if path == '/manual-key':
                     usages = data.get('usages')
                     if not isinstance(usages, list) or len(usages) > 16 or any(type(key) is not int or not 0 <= key <= 255 for key in usages):
@@ -381,24 +407,39 @@ def install():
                             finally:
                                 await originals['_handle_touch'](self, json.dumps({'type':'release', **coords}).encode())
                             return 200, b'ok'
+                        if path == '/manual-screenshot':
+                            # Keep the entire chord under the input lock; never replay it.
+                            try:
+                                for keys in ([], [227, 225], [227, 225, 32]):
+                                    if not active(self) or generation != getattr(self, '_batch_input_generation', 0):
+                                        return 409, b'input connection changed'
+                                    code, message = await originals['_handle_key'](
+                                        self, json.dumps({'usages': keys}).encode())
+                                    if code != 200:
+                                        return code, message
+                                    await asyncio.sleep(.06)
+                                return 200, b'ok'
+                            finally:
+                                await originals['_handle_key'](self, b'{"usages":[]}')
                         if path == '/manual-home':
                             return await originals['_handle_button'](self, b'{"name":"home","state":"press"}')
                         if path == '/manual-key':
                             return await originals['_handle_key'](self, json.dumps({'usages': usages}).encode())
-                        if data['type'] == 'release' and data.get('settle'):
-                            contact = json.dumps({'type': 'contact', 'x': data['x'], 'y': data['y']}).encode()
-                            code, message = await originals['_handle_touch'](self, contact)
+                        if data['type'] == 'release' and (data.get('settle') or (
+                                'contacts' in data and getattr(self, '_batch_contact', None))):
+                            contact = {**data, 'type': 'contact'}
+                            code, message = await dispatch_touch(self, contact, originals['_handle_touch'])
                             if code != 200:
                                 return code, message
-                            await asyncio.sleep(.08)
-                            await originals['_handle_touch'](self, contact)
-                        payload = json.dumps({key: data[key] for key in ('type', 'x', 'y')}).encode()
-                        return await originals['_handle_touch'](self, payload)
+                            if data.get('settle'):
+                                await asyncio.sleep(.08)
+                                await dispatch_touch(self, contact, originals['_handle_touch'])
+                        return await dispatch_touch(self, data, originals['_handle_touch'])
                     try:
                         code, _ = await asyncio.wait_for(execute(), 12 if path == '/manual-composer-focus' else 4)
                         if code == 200:
-                            kind = {'/manual-touch': '_handle_touch', '/manual-key': '_handle_key', '/manual-home': '_handle_button', '/manual-paste': '_handle_key', '/manual-composer-focus': '_handle_touch'}[path]
-                            record_input(self, kind, {'type':'release'} if path == '/manual-composer-focus' else data)
+                            kind = {'/manual-touch': '_handle_touch', '/manual-key': '_handle_key', '/manual-home': '_handle_button', '/manual-screenshot': '_handle_key', '/manual-paste': '_handle_key', '/manual-composer-focus': '_handle_touch'}[path]
+                            record_input(self, kind, {'type':'release'} if path == '/manual-composer-focus' else {'usages':[]} if path == '/manual-screenshot' else data)
                     except Exception:
                         await clear_input(self)
                         raise
@@ -451,7 +492,7 @@ def install():
                     try:
                         contact = getattr(self, '_batch_contact', None)
                         if contact is not None:
-                            await originals['_handle_touch'](self, json.dumps({**contact, 'type':'release'}).encode())
+                            await dispatch_touch(self, {**contact, 'type':'release'}, originals['_handle_touch'])
                             self._batch_contact = None
                         if self._uhs is not None and self._kb_service_id is not None:
                             await self._uhs.send_keyboard(self._kb_service_id, [])
@@ -518,13 +559,13 @@ def install():
                 await asyncio.to_thread(windows_clipboard, text, write=True)
             return await reply(writer, 200, {'ok': True})
         except asyncio.TimeoutError:
-            if path in ('/manual-touch', '/manual-home', '/manual-key', '/manual-paste', '/manual-composer-focus'):
+            if path in ('/manual-touch', '/manual-home', '/manual-screenshot', '/manual-key', '/manual-paste', '/manual-composer-focus'):
                 return await reply(writer, 503, {'error': '控制请求未完成，请核对手机后重新操作'})
             return await reply(writer, 400, {'error': 'invalid request'})
         except (ValueError, asyncio.IncompleteReadError):
             return await reply(writer, 400, {'error': 'invalid request'})
         except Exception:
-            if path in ('/manual-touch', '/manual-home', '/manual-key', '/manual-paste', '/manual-composer-focus'):
+            if path in ('/manual-touch', '/manual-home', '/manual-screenshot', '/manual-key', '/manual-paste', '/manual-composer-focus'):
                 logging.getLogger(__name__).exception('Manual phone control failed: %s', path)
                 # Never replay an input: a failed release may already have sent.
                 return await reply(writer, 500, {'error': '手机触控服务不可用，请检查连接和开发者服务'})

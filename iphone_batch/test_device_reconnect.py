@@ -196,5 +196,20 @@ class RebuildTrustIntegrationTests(unittest.TestCase):
         state['reset_phone_session'].assert_not_called();state['launch_viewer'].assert_not_called()
         self.assertFalse(lock.locked())
 
+    def test_reboot_replaces_trust_and_session_reset_and_only_targets_one_phone(self):
+        state,target,events,lock=self.fixture()
+        state['require_control']=Mock()
+        def reboot(device,stopping,stage):
+            self.assertIs(device,target);self.assertTrue(lock.locked())
+            self.assertFalse(state['workspace_service'].phone_lock.locked())
+            events.append('reboot');stage('waiting_boot')
+        state['reboot_phone']=Mock(side_effect=reboot)
+        state['rebuild_device'](target,reboot=True)
+        self.assertEqual(events,['stop','reboot','start'])
+        state['repair_phone_trust'].assert_not_called()
+        state['reset_phone_session'].assert_not_called()
+        self.assertEqual(state['manager'].active,'nine')
+        self.assertFalse(lock.locked())
+
 
 if __name__=='__main__':unittest.main()

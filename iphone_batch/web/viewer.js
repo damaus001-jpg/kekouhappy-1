@@ -317,7 +317,8 @@ async function postJson(path, payload) {
     // queues requests differently; we want plain HTTP/1.1 keep-alive
     // (the default) so pointer events stream over one TCP.
     try {
-        if (!controlAvailable()) throw Error('当前手机控制连接尚未就绪，请检查连接后重新操作');
+        const releasingKeys=(path==='/key'||path==='/manual-key')&&Array.isArray(payload.usages)&&payload.usages.length===0;
+        if (!controlAvailable()&&!(batchActive&&releasingKeys)) throw Error('当前手机控制连接尚未就绪，请检查连接后重新操作');
         if (path === '/key') path = '/manual-key';
         if (path === '/touch') path = '/manual-touch';
         if (path === '/button' && payload.name === 'home' && payload.state === 'press') path = '/manual-home';
@@ -337,6 +338,11 @@ async function postJson(path, payload) {
 }
 
 let activePointer = null;
+let activePointerButton = null;
+const twoFingerDrag = new TwoFingerDrag(() => canvas.getBoundingClientRect(), touchCoords);
+function pointerCoords(event) {
+    return activePointerButton === 1 ? twoFingerDrag.position(event) : touchCoords(event);
+}
 let foregroundPointerStart=null,foregroundDragReported=false,foregroundPointerMoved=false,foregroundPointerGesture=null,foregroundTapRevision=0;
 function notifyForegroundActivity(kind,details={}){
     if(kind!=='tap-complete')foregroundTapRevision++;
@@ -345,7 +351,7 @@ function notifyForegroundActivity(kind,details={}){
 }
 let lastCoords = {x: 0, y: 0};
 const pointerInput = new PointerInput(async payload => {
-    if (!controlAvailable()) throw Error('当前手机控制连接尚未就绪');
+    if (!controlAvailable()&&!(batchActive&&payload.type==='release')) throw Error('当前手机控制连接尚未就绪');
     const response = await fetch('/manual-touch', {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload), signal: AbortSignal.timeout(5000)});
     if (!response.ok) throw Error('触摸操作失败，请检查手机连接');
@@ -366,12 +372,13 @@ function releaseActive() {
     wheelInput.stop();
     if (activePointer === null) return;
     activePointer = null;
+    activePointerButton = null;
     foregroundPointerStart=null;
     notifyForegroundActivity('pointer-end');
     pointerInput.end(lastCoords);
 }
 canvas.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;   // primary button only
+    if (e.button !== 0 && e.button !== 1) return;
     if (activePointer !== null) return;
     if (!controlAvailable()) {
         reportManualInputFailure('/manual-touch', Error('当前手机控制连接尚未就绪，请检查连接后重新操作'));
@@ -390,29 +397,31 @@ canvas.addEventListener('pointerdown', (e) => {
     canvas.focus({preventScroll: true});
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
     activePointer = e.pointerId;
-    lastCoords = touchCoords(e);
+    activePointerButton = e.button;
+    lastCoords = pointerCoords(e);
     pointerInput.start(lastCoords);
     foregroundPointerGesture=pointerInput.gesture;
 });
 function onMove(e) {
     if (e.pointerId !== activePointer) return;
+    if (!(e.buttons & (activePointerButton === 1 ? 4 : 1))) { releaseActive(); return; }
     if(foregroundPointerStart&&Math.hypot(e.clientX-foregroundPointerStart.x,e.clientY-foregroundPointerStart.y)>12)foregroundPointerMoved=true;
     if(foregroundPointerStart&&!foregroundDragReported&&Math.abs(e.clientY-foregroundPointerStart.y)>18){
         foregroundDragReported=true;notifyForegroundActivity('scroll');
     }
     e.preventDefault();
-    lastCoords = touchCoords(e);
+    lastCoords = pointerCoords(e);
     pointerInput.move(lastCoords);
 }
 function onUp(e) {
     if (e.pointerId !== activePointer) return;
     const rect=canvas.getBoundingClientRect();
-    const completedTap=e.type==='pointerup'&&foregroundPointerStart!==null&&!foregroundPointerMoved&&
+    const completedTap=activePointerButton===0&&e.type==='pointerup'&&foregroundPointerStart!==null&&!foregroundPointerMoved&&
         Math.hypot(e.clientX-foregroundPointerStart.x,e.clientY-foregroundPointerStart.y)<=12&&
         e.clientX>=rect.left&&e.clientX<=rect.right&&e.clientY>=rect.top&&e.clientY<=rect.bottom;
     const gesture=foregroundPointerGesture;
     e.preventDefault();
-    lastCoords = touchCoords(e);
+    lastCoords = pointerCoords(e);
     releaseActive();
     const tapRevision=foregroundTapRevision, tapEpoch=inputEpoch;
     if(completedTap&&gesture!==null){
@@ -424,6 +433,17 @@ function onUp(e) {
     }
 }
 window.addEventListener('pointermove', onMove);
+// Suppress browser middle-click autoscroll, including its mousedown default.
+canvas.addEventListener('mousedown', e => { if (e.button === 1) e.preventDefault(); });
+canvas.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
+window.addEventListener('mouseup', e => {
+    // Pointerup waits for ALL mouse buttons; lift our fingers when the
+    // initiating button is released even if another button remains held.
+    if (activePointer !== null && e.button === activePointerButton) {
+        lastCoords = pointerCoords(e);
+        releaseActive();
+    }
+});
 canvas.addEventListener('pointerup', onUp);
 window.addEventListener('pointerup', onUp);
 canvas.addEventListener('pointercancel', onUp);
@@ -2112,7 +2132,7 @@ inputMonitor = new InputHealthMonitor({
     changed: state => {
         if (!state.ready && inputReady) inputEpoch++;
         inputReady = state.ready;
-        if (!state.ready) { pressedUsages.clear(); windowsEditKeys.clear(); }
+        if (!state.ready) { releaseActive(); releaseAllKeys(); }
         if (state.state === 'unavailable') log('控制连接不可用；可点击设备列表刷新重试');
         if (state.state === 'ready' && state.recovered) log('控制连接已自动恢复');
         if (batchManaged) parent.postMessage({type: 'input-health-result', ...state},
@@ -2146,6 +2166,35 @@ if (batchManaged) {
         }
         if (event.data?.type === 'input-recover') {
             if (batchActive) inputMonitor.check(true);
+            return;
+        }
+        if (event.data?.type === 'canvas-screenshot') {
+            const id=event.data.id;
+            if(!batchSelected||typeof id!=='string'||id.length>80)return;
+            const respond=result=>parent.postMessage({type:'canvas-screenshot-result',id,...result},event.origin);
+            if((!pendingFrame&&!lastFrame)||!canvas.width||!canvas.height){respond({error:'实时画面尚未就绪，请等待画面显示后重试。'});return;}
+            try{
+                if(pendingFrame){cancelFrameDraw();drawPending(true);}
+                canvas.toBlob(image=>respond(image?{image}:{error:'无法截取实时画面，请重试。'}),'image/png');
+            }catch{respond({error:'无法截取实时画面，请确认画面连接正常。'});}
+            return;
+        }
+        if (event.data?.type === 'native-screenshot') {
+            const id=event.data.id;
+            if(!batchSelected||typeof id!=='string'||id.length>80)return;
+            const respond=result=>parent.postMessage({type:'native-screenshot-result',id,...result},event.origin);
+            if(!controlAvailable()){respond({error:'请先接入当前手机，等待控制连接就绪。'});return;}
+            releaseActive();releaseAllKeys();
+            lastKeyPost.then(()=>pointerInput.idle()).then(()=>{
+                if(!batchSelected||!controlAvailable())throw Error('当前手机已切换或控制连接不可用，请重新操作。');
+                return fetch('/manual-screenshot',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:AbortSignal.timeout(6000)});
+            })
+                .then(async response=>{
+                    const result=await response.json();
+                    if(!response.ok||result.ok!==true)throw Error(result.error||'截屏指令未完成，请先查看手机相册，再决定是否重试。');
+                    respond({ok:true});
+                })
+                .catch(error=>respond({error:error.message||'未收到截屏结果，请先查看手机相册。'}));
             return;
         }
         if (event.data?.type === 'device-screenshot') {

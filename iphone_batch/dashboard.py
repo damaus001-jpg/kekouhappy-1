@@ -197,7 +197,7 @@ def main():
     trust_pending=set()
     trust_lock=threading.Lock()
     from notification_monitor import NotificationMonitor
-    from device_reconnect import DeviceReconnects, reset_phone_session, repair_phone_trust
+    from device_reconnect import DeviceReconnects, reset_phone_session, repair_phone_trust, reboot_phone
     notification_monitor=NotificationMonitor(devices,workspace_service.phone_lock,
         manager.notification_lease,workspace_service.notifications,
         lambda d: control_allowed(d) and not reconnects.pending(d['udid']) and viewer_ready(d),stopping,
@@ -311,6 +311,11 @@ def main():
     def refresh_connected_devices():
         discovered=controller.discover()
         with registry.lock, workspace_service.phone_lock:
+            # Preserve the row/selection while an intentional reboot temporarily
+            # removes the phone from USB discovery. Its worker owns recovery.
+            online={row['udid'] for row in discovered}
+            discovered += [{'udid':d['udid']} for d in devices if d['udid'] not in online
+                and reconnects.pending(d['udid']) and reconnects.snapshot(d['udid'])['reconnect_operation']=='reboot']
             with manager.lock:
                 added,removed=registry.refresh(discovered)
                 if manager.active not in {d['udid'] for d in devices}:manager.active=None
@@ -401,6 +406,9 @@ def main():
             previous=input_readiness.get(udid,{})
             if result.get('state')=='busy':
                 last_success=previous.get('last_success',0)
+                input_age=result.get('input_confirmed_age')
+                if type(input_age) in (int,float) and 0<=input_age<30:
+                    last_success=max(last_success,now-input_age)
                 ready=bool(last_success and now-last_success<30)
             else:
                 ready=result.get('ok') is True and result.get('state')=='ready'
@@ -445,8 +453,9 @@ def main():
                 wait(futures,timeout=7)
             stopping.wait(3)
 
-    def rebuild_device(device):
+    def rebuild_device(device, reboot=False):
         require_connection(device, enabled)
+        if reboot:require_control(device)
         lock=workspace_service.device_lock(device['udid'])
         acquired=False
         try:
@@ -458,6 +467,7 @@ def main():
                 try:
                     acquired=lock.acquire(blocking=False)
                     if not acquired:raise ValueError('该手机正在处理任务，请稍后重试')
+                    if reboot:require_control(device)
                     with manager.lock:
                         startup_queue.cancel(device['udid'])
                         stop_viewer(device)
@@ -466,20 +476,24 @@ def main():
                 finally:workspace_service.phone_lock.release()
             # Only this explicit reconnect repairs trust. Keep the target's
             # lock while other phones remain usable during confirmation.
-            reconnects.stage(device['udid'],'trusting')
-            device['error']='正在检查并修复信任连接；若手机弹出提示，请确认信任'
-            repair_phone_trust(device,stopping=stopping)
+            if reboot:
+                reconnects.stage(device['udid'],'rebooting')
+                device['error']='正在重启手机；开机后请在手机输入密码解锁'
+                reboot_phone(device,stopping,stage=lambda value:reconnects.stage(device['udid'],value))
+            else:
+                reconnects.stage(device['udid'],'trusting')
+                device['error']='正在检查并修复信任连接；若手机弹出提示，请确认信任'
+                repair_phone_trust(device,stopping=stopping)
             if stopping.is_set():raise ValueError('工作台正在关闭，设备恢复已停止')
-            reconnects.stage(device['udid'],'resetting')
-            device['error']='正在清理手机端远程会话…'
             reset_error=None
-            try:
-                reset_phone_session(device,stopping=stopping)
-            except Exception as error:
-                # The cleanup command can fail on a stale USB tunnel even when
-                # a fresh viewer session can still be established. Preserve
-                # the failure for diagnostics, then make that bounded attempt.
-                reset_error=str(error)[:320]
+            if not reboot:
+                reconnects.stage(device['udid'],'resetting')
+                device['error']='正在清理手机端远程会话…'
+                try:
+                    reset_phone_session(device,stopping=stopping)
+                except Exception as error:
+                    # A stale tunnel may reject cleanup; try a fresh viewer.
+                    reset_error=str(error)[:320]
             with registry.lock:
                 if device not in devices:raise ValueError('手机已断开，请重新接入后刷新')
                 if stopping.is_set():raise ValueError('工作台正在关闭，设备恢复已停止')
@@ -653,7 +667,7 @@ def main():
                     return self.respond(400,{'error':str(exc)})
                 except Exception:
                     return self.respond(503,{'error':'遍历开关未完成，请刷新状态后重试'})
-            if self.path=='/api/devices/reconnect':
+            if self.path in ('/api/devices/reconnect','/api/devices/reboot'):
                 try:
                     length=int(self.headers.get('Content-Length','0'))
                     if not 0<length<=1024:raise ValueError('无效请求')
@@ -664,8 +678,13 @@ def main():
                     if device is None:raise ValueError('请选择已连接的手机')
                     require_connection(device, enabled)
                     if device['udid'] in trust_pending:raise ValueError('该手机正在等待信任确认')
-                    identifier=reconnects.begin(device)
-                    return self.respond(202,{'ok':True,'job':identifier,'message':'正在重新连接此设备，请稍候'})
+                    reboot=self.path=='/api/devices/reboot'
+                    if reboot:
+                        require_control(device)
+                        if body.get('confirm')!=device['udid']:raise ValueError('请确认要重启的手机')
+                    identifier=reconnects.begin(device,operation='reboot' if reboot else 'reconnect')
+                    return self.respond(202,{'ok':True,'job':identifier,'message':
+                        '正在重启此手机，开机后请在手机输入密码解锁' if reboot else '正在重新连接此设备，请稍候'})
                 except (ValueError,TypeError) as exc:return self.respond(400,{'error':str(exc)})
             if self.path=='/api/devices/trust':
                 device=None

@@ -72,6 +72,32 @@ def reset_phone_session(device, stopping=None):
         raise ValueError(f'手机端媒体/触控会话清理未确认完成（退出码 {code}）{reason}')
     return result
 
+
+def reboot_phone(device, stopping, stage=lambda value: None, timeout=150):
+    """Send Restart once, then observe this exact USB device go down and return."""
+    import controller
+    command=controller.command_for(device['udid'],['diagnostics','restart'])
+    code,_,_=_run_device_command(device,command,20,
+        '重启指令响应超时，手机可能已经重启；请检查手机，未自动重复发送',stopping)
+    if code:
+        raise ValueError('重启指令未确认成功，请检查手机是否已重启；未自动重复发送')
+    stage('waiting_boot')
+    deadline=time.monotonic()+timeout
+    disconnected=False
+    while not stopping.is_set():
+        if time.monotonic()>=deadline:
+            raise ValueError('等待手机重新接入超时，请检查 USB 并解锁手机；未重复发送重启指令')
+        try:
+            online=any(row['udid']==device['udid'] for row in controller.discover())
+        except (OSError,ValueError,RuntimeError):
+            # A usbmux failure is not evidence that the phone rebooted.
+            stopping.wait(.5)
+            continue
+        if not online:disconnected=True
+        elif disconnected:return
+        stopping.wait(.5)
+    raise ValueError('工作台正在关闭，已停止等待手机开机；未重复发送重启指令')
+
 class DeviceReconnects:
     def __init__(self, rebuild, ready, finish, stopping, timeout=75, queued=lambda device:False):
         self.rebuild,self.ready,self.finish=rebuild,ready,finish
@@ -86,6 +112,7 @@ class DeviceReconnects:
     def snapshot(self, udid):
         with self.lock:job=dict(self.jobs.get(udid,{}))
         return {'reconnecting':job.get('state')=='reconnecting',
+                'reconnect_operation':job.get('operation','reconnect'),
                 'reconnect_state':job.get('state'), 'reconnect_error':job.get('error'), 'reconnect_id':job.get('id'),
                 'reconnect_stage':job.get('stage'),
                 'reconnect_elapsed':round(time.monotonic()-job['started'],1) if job.get('started') is not None and job.get('state')=='reconnecting' else job.get('elapsed')}
@@ -94,22 +121,28 @@ class DeviceReconnects:
         with self.lock:
             if self.jobs.get(udid,{}).get('state')=='reconnecting':self.jobs[udid]['stage']=stage
 
-    def begin(self, device):
+    def begin(self, device, operation='reconnect'):
+        if operation not in ('reconnect','reboot'):raise ValueError('无效的设备操作')
         with self.lock:
             if self.jobs.get(device['udid'],{}).get('state')=='reconnecting':
+                if self.jobs[device['udid']].get('operation','reconnect')!=operation:
+                    raise ValueError('该手机正在处理设备操作，请完成后重试')
                 return self.jobs[device['udid']]['id']
             identifier=uuid.uuid4().hex
-            self.jobs[device['udid']]={'state':'reconnecting','id':identifier,'stage':'stopping','started':time.monotonic()}
+            self.jobs[device['udid']]={'state':'reconnecting','id':identifier,'operation':operation,'stage':'stopping','started':time.monotonic()}
         threading.Thread(target=self._run,args=(device,identifier),daemon=True).start()
         return identifier
 
     def _run(self, device, identifier):
         started=time.monotonic()
         try:
-            self.rebuild(device)
+            with self.lock:operation=self.jobs[device['udid']]['operation']
+            if operation=='reboot':self.rebuild(device,reboot=True)
+            else:self.rebuild(device)
             # Trust confirmation and session cleanup each have their own
             # bounds. Give video readiness its full budget after preparation.
-            deadline=time.monotonic()+self.timeout
+            budget=max(self.timeout,180) if operation=='reboot' else self.timeout
+            deadline=time.monotonic()+budget
             waited_for_startup=False
             while not self.stopping.is_set():
                 if self.queued(device):
@@ -119,10 +152,11 @@ class DeviceReconnects:
                     self.stopping.wait(.25)
                     continue
                 if waited_for_startup:
-                    deadline=time.monotonic()+self.timeout
+                    deadline=time.monotonic()+budget
                     waited_for_startup=False
                 if time.monotonic()>=deadline:
-                    raise ValueError('重新连接超时，请检查 USB、手机解锁及设备状态后重试')
+                    raise ValueError('等待重启后连接恢复超时，请在手机输入密码解锁，再重新连接；未重复重启'
+                        if operation=='reboot' else '重新连接超时，请检查 USB、手机解锁及设备状态后重试')
                 if self.ready(device) and self.finish(device):
                     with self.lock:self.jobs[device['udid']].update(state='ready',stage='ready',elapsed=round(time.monotonic()-started,1))
                     return

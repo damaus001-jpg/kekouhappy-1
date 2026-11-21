@@ -76,7 +76,8 @@ class PointerInput {
             }
             // A lost reply may still have pressed the phone. Release once.
             if (command) {
-                try { await this.send({type: 'release', x: command.x, y: command.y, settle: false}); } catch (_) {}
+                try { await this.send({type: 'release', x: command.x, y: command.y,
+                    ...(command.contacts ? {contacts: command.contacts} : {}), settle: false}); } catch (_) {}
             }
             this.onError(error);
         } finally {
@@ -91,6 +92,23 @@ class PointerInput {
     }
 }
 if (typeof module !== 'undefined') module.exports = PointerInput;
+
+// Keep both fingers inside the image and transform each through the same
+// rotation mapping as single-finger input. Their spacing stays fixed on drag.
+class TwoFingerDrag {
+    constructor(bounds, coords) {
+        this.bounds = bounds;
+        this.coords = coords;
+    }
+    position(event) {
+        const rect = this.bounds();
+        const x = Math.max(rect.left, Math.min(rect.right - rect.width * .1, event.clientX));
+        const first = this.coords({clientX: x, clientY: event.clientY});
+        const second = this.coords({clientX: x + rect.width * .1, clientY: event.clientY});
+        return {...first, contacts: [first, second]};
+    }
+}
+if (typeof module !== 'undefined') module.exports.TwoFingerDrag = TwoFingerDrag;
 
 class WheelInput {
     constructor(pointer, {bounds, coords, enabled = () => true,

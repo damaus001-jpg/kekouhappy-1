@@ -1,5 +1,18 @@
 # 项目环境重建验证
 
+## v0.1.17 本地存档检查 · 2026-11-20
+
+- 本次只建立本地 Git 提交及标签，不推送，不为存档重启后台、点击手机或发送短信。
+- 六个相关 Python 模块合计 94 项通过：test_device_reboot、test_device_reconnect、test_input_readiness、test_input_health、test_viewer_patch、test_native_ui_scan。日志中的连接错误为故障模拟用例的预期日志，最终结果 OK。
+- 六项 Node 回归通过：test_pointer_input.cjs、test_two_finger_input.cjs、test_control_release.cjs、test_input_health.cjs、test_screenshot_ui.cjs、test_device_reboot.cjs。
+- dashboard.js、viewer.js、pointer_input.js 的 node --check 通过。归档的两份诊断脚本通过 Python 编译和 --help 检查，没有执行其真实手机入口。
+- 本会话已完成真实无头 Edge 配置界面检查：795 个号码、50 条文本、20 台模拟设备、定时与独立间隔草稿保存/恢复通过；窗口 1280×720、1366×768、1024×600、1600×900 检查均确认保存按钮在视口内、弹窗和表单无外层滚动，较小两档额外检查任务名称输入框无横向越界。这些是界面模拟，不能作为 20 台手机实际并发验收。
+- 两种截屏保存已获用户验收。设备 1 重启及普通控制恢复已实测。新号码三条实验发送、底部控件识别、持续通知横幅读取属于本会话此前已完成的实机探索，未在存档时重跑。
+- 正式号码任务仍只有配置草稿界面；后台调度、原子领取、Windows 通知、自动横幅巡查及日统计尚未接入。旧 v0.1.16 记录的前台读取测试不一致仍保留，本次没有宣称 Python 全量测试通过。
+- Git 排除 `.tmp`、`.device-data`、号码 TXT、截图、浏览器资料、配对及签名密钥、业务数据库。未复跑全新 Windows 安装或全部手机恢复演练。
+
+下文保留历史环境和旧版本检查结果。
+
 此次仅增加项目层面的安装材料，客户端页面、服务接口及浏览器存储逻辑保持 v0.1.0 原状。
 
 已验证：

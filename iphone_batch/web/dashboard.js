@@ -96,7 +96,9 @@ class GlobalMonitor {
   });
   const signature=[this.selected||'',...entries.map(({device,label})=>device.udid+':'+label.number)].join('|');
   if(signature===this.switcherSignature)return;
-  this.switcherSignature=signature;this.switcher.replaceChildren();this.switcher.hidden=!entries.length;
+  const newSmsButton=document.getElementById('new-sms-task');
+  this.switcherSignature=signature;this.switcher.replaceChildren();this.switcher.hidden=false;
+  if(newSmsButton)this.switcher.append(newSmsButton);
   for(const {device,label} of entries){
    const button=document.createElement('button');button.type='button';button.className='current-display-device';
    button.textContent=label.number;button.title='切换到 '+label.number;button.setAttribute('aria-pressed',String(device.udid===this.selected));
@@ -303,13 +305,43 @@ refreshDevicesButton?.addEventListener('click',refreshDevices);
 const phoneHomeButton=document.getElementById('phone-home');
 const phoneScreenshotButton=document.getElementById('phone-screenshot');
 const screenshotDialog=document.getElementById('phone-screenshot-dialog');
-const screenshotImage=document.getElementById('phone-screenshot-image');
 const screenshotStatus=document.getElementById('phone-screenshot-status');
+const screenshotNative=document.getElementById('screenshot-native');
+const screenshotComputer=document.getElementById('screenshot-computer');
+const screenshotDownload=document.getElementById('screenshot-download');
 let screenshotRequest=null,screenshotTimer=null,screenshotSequence=0;
+let screenshotDownloadUrl=null,screenshotDownloadName='',screenshotUseDownloads=false;
+try{screenshotUseDownloads=localStorage.getItem('screenshot-use-downloads')==='true';}catch{}
+function clearScreenshotDownload(){
+ if(screenshotDownloadUrl)URL.revokeObjectURL(screenshotDownloadUrl);
+ screenshotDownloadUrl=null;screenshotDownloadName='';screenshotDownload.hidden=true;
+}
+function downloadScreenshot(){
+ if(!screenshotDownloadUrl)return;
+ const link=document.createElement('a');link.href=screenshotDownloadUrl;link.download=screenshotDownloadName;
+ document.body.appendChild(link);link.click();link.remove();
+}
+screenshotDownload.addEventListener('click',downloadScreenshot);
+function offerScreenshotDownload(blob,filename,message){
+ clearScreenshotDownload();screenshotDownloadUrl=URL.createObjectURL(blob);screenshotDownloadName=filename;
+ screenshotDownload.hidden=false;downloadScreenshot();screenshotStatus.textContent=message;
+}
+function rememberScreenshotWriteDenied(error){
+ if(!['NotAllowedError','SecurityError','NotSupportedError'].includes(error?.name))return;
+ screenshotUseDownloads=true;
+ try{localStorage.setItem('screenshot-use-downloads','true');}catch{}
+}
+function syncScreenshotActions(){
+ const available=!devicePreview&&latest.some(d=>d.udid===active&&d.ready);
+ phoneScreenshotButton.disabled=!!screenshotRequest||!available;
+ screenshotComputer.disabled=!!screenshotRequest||!available;
+ screenshotNative.disabled=!!screenshotRequest||!available||controlOwner!==active||busy||workspaceBusy||controlPaused;
+ screenshotNative.title=screenshotNative.disabled&&!screenshotRequest?'请先接入当前手机，等待控制连接就绪':'';
+}
 function clearPhoneScreenshot(){
  clearTimeout(screenshotTimer);screenshotTimer=null;screenshotRequest=null;
- screenshotImage.src='';screenshotImage.hidden=true;
- if(phoneScreenshotButton)phoneScreenshotButton.disabled=devicePreview||!latest.some(d=>d.udid===active&&d.ready);
+ clearScreenshotDownload();
+ syncScreenshotActions();
 }
 document.getElementById('phone-screenshot-close').addEventListener('click',()=>screenshotDialog.close());
 screenshotDialog.addEventListener('close',clearPhoneScreenshot);
@@ -318,15 +350,82 @@ phoneScreenshotButton?.addEventListener('click',()=>{
  if(devicePreview||screenshotRequest||!device||!card?.frame)return;
  window.ForegroundSync?.activity('manual');
  clearPhoneScreenshot();
- screenshotRequest={id:'screenshot-'+(++screenshotSequence),udid:active,frame:card.frame,origin:card.origin};
  screenshotDialog.dataset.device=active;
- phoneScreenshotButton.disabled=true;
- document.getElementById('phone-screenshot-title').textContent='设备 '+deviceLabel(device,latest.indexOf(device)).number+' · 手机截图';
- screenshotStatus.textContent='正在获取手机截图…';screenshotDialog.showModal();
- const request=screenshotRequest;
- screenshotTimer=setTimeout(()=>{if(screenshotRequest===request){clearPhoneScreenshot();screenshotStatus.textContent='截图超时，请确认设备连接和截图服务后重试';}},16000);
- card.frame.contentWindow.postMessage({type:'device-screenshot',id:request.id},card.origin);
+ document.getElementById('phone-screenshot-title').textContent='设备 '+deviceLabel(device,latest.indexOf(device)).number+' · 截屏';
+ screenshotStatus.textContent=window.showSaveFilePicker&&!screenshotUseDownloads?'请选择截屏方式。':'当前浏览器使用下载保存；如需选择文件夹，请开启浏览器“下载前询问保存位置”。';
+ screenshotDialog.showModal();
 });
+function requestScreenshot(mode){
+ syncScreenshotActions();
+ if(!screenshotDialog.open||screenshotDialog.dataset.device!==active||
+    (mode==='native'?screenshotNative:screenshotComputer).disabled)return;
+ const card=cards.get(active),device=latest.find(d=>d.udid===active);
+ if(!card?.frame||!device)return;
+ clearScreenshotDownload();
+ window.ForegroundSync?.activity('manual');
+ const stamp=new Date(),z=n=>String(n).padStart(2,'0');
+ const filename='设备'+deviceLabel(device,latest.indexOf(device)).number+'_'+stamp.getFullYear()+z(stamp.getMonth()+1)+z(stamp.getDate())+'_'+z(stamp.getHours())+z(stamp.getMinutes())+z(stamp.getSeconds())+'.png';
+ const request=screenshotRequest={id:'screenshot-'+(++screenshotSequence),udid:active,frame:card.frame,origin:card.origin,mode,filename};
+ syncScreenshotActions();
+ screenshotStatus.textContent=mode==='native'?'正在发送手机截屏指令…':'正在截取实时画面…';
+ // Invoke the picker during the click's user activation. Store a settled result
+ // immediately so cancellation cannot create an unhandled rejection.
+ if(mode==='computer'&&window.showSaveFilePicker&&!screenshotUseDownloads){
+  try{request.file=window.showSaveFilePicker({suggestedName:filename,types:[{description:'PNG 图片',accept:{'image/png':['.png']}}]}).then(handle=>({handle}),error=>({error}));}
+  catch(error){request.file=Promise.resolve({error});}
+ }
+ screenshotTimer=setTimeout(()=>{
+  if(screenshotRequest!==request)return;
+  clearPhoneScreenshot();screenshotStatus.textContent=mode==='native'?'未收到截屏结果，请先查看手机相册，再决定是否重试。':'截屏超时，请确认实时画面连接后重试。';
+ },16000);
+ card.frame.contentWindow.postMessage({type:mode==='native'?'native-screenshot':'canvas-screenshot',id:request.id},card.origin);
+}
+screenshotNative.addEventListener('click',()=>requestScreenshot('native'));
+screenshotComputer.addEventListener('click',()=>requestScreenshot('computer'));
+async function finishScreenshot(event){
+ const request=screenshotRequest;
+ if(!request||event.source!==request.frame.contentWindow||event.origin!==request.origin||event.data.id!==request.id)return;
+ if(event.data.type!==(request.mode==='native'?'native-screenshot-result':'canvas-screenshot-result'))return;
+ if(request.received)return;
+ request.received=true;
+ if(active!==request.udid||cards.get(active)?.frame!==request.frame){screenshotDialog.close();return;}
+ clearTimeout(screenshotTimer);screenshotTimer=null;
+ const current=()=>screenshotRequest===request&&screenshotDialog.open&&active===request.udid;
+ try{
+  if(event.data.error)throw Error(event.data.error);
+  if(request.mode==='native'){
+   if(event.data.ok!==true)throw Error('截屏指令未完成，请检查手机连接。');
+   screenshotStatus.textContent='截屏指令已发送，请在这台手机的“照片”中查看。';return;
+  }
+  const blob=event.data.image;
+  if(!(blob instanceof Blob)||blob.type!=='image/png'||!blob.size||blob.size>24*1024*1024)throw Error('截图数据无效，请重试。');
+  const signature=new Uint8Array(await blob.slice(0,8).arrayBuffer());
+  if(signature.length!==8||![137,80,78,71,13,10,26,10].every((value,index)=>signature[index]===value))throw Error('截图不是有效的 PNG 图片，请重试。');
+  if(!current())return;
+  if(request.file){
+   screenshotStatus.textContent='请选择电脑上的保存位置…';
+   const {handle,error}=await request.file;
+   if(!current())return;
+   if(error?.name==='AbortError')throw error;
+   let writable;
+   try{
+    if(error)throw error;
+    writable=await handle.createWritable();
+    if(!current()){await writable.abort();return;}
+    await writable.write(blob);await writable.close();
+    if(current())screenshotStatus.textContent='已保存到电脑：'+handle.name;
+   }catch(writeError){
+    if(writable)await writable.abort().catch(()=>{});
+    if(!current())return;
+    rememberScreenshotWriteDenied(writeError);
+    offerScreenshotDownload(blob,handle?.name||request.filename,'直接写入失败，已改用浏览器下载完整图片。保存位置以浏览器设置为准；如需选择文件夹，请开启“下载前询问保存位置”。未出现下载时，可点击下方按钮重试。');
+   }
+  }else{
+   offerScreenshotDownload(blob,request.filename,'已交给浏览器下载；保存位置以浏览器设置为准。如需选择文件夹，请开启“下载前询问保存位置”。未出现下载时，可点击下方按钮重试。');
+  }
+ }catch(error){if(current())screenshotStatus.textContent=error.name==='AbortError'?'已取消保存。':(error.message||'截屏失败，请重试。');}
+ finally{if(screenshotRequest===request){screenshotRequest=null;syncScreenshotActions();}}
+}
 phoneHomeButton?.addEventListener('click',()=>{
  if(!active||controlOwner!==active||busy||workspaceBusy||controlPaused||devicePreview)return;
  window.ForegroundSync?.activity('manual');
@@ -335,19 +434,7 @@ phoneHomeButton?.addEventListener('click',()=>{
  card.frame.contentWindow.postMessage({type:'device-home'},card.origin);
 });
 window.addEventListener('message',event=>{
- if(event.data?.type==='device-screenshot-result'){
-  const request=screenshotRequest;
-  if(!request||event.source!==request.frame.contentWindow||event.origin!==request.origin||event.data.id!==request.id)return;
-  if(active!==request.udid||cards.get(active)?.frame!==request.frame){screenshotDialog.close();clearPhoneScreenshot();return;}
-  clearTimeout(screenshotTimer);screenshotTimer=null;screenshotRequest=null;phoneScreenshotButton.disabled=false;
-  const {image,captured_at,error}=event.data;
-  if(error||typeof image!=='string'||image.length>24*1024*1024||!image.startsWith('iVBORw0KGgo')){
-   screenshotStatus.textContent=error||'截图数据无效，请重试';return;
-  }
-  screenshotImage.src='data:image/png;base64,'+image;screenshotImage.hidden=false;
-  screenshotStatus.textContent='截图时间：'+(typeof captured_at==='number'?new Date(captured_at*1000).toLocaleTimeString():'刚刚')+' · 静态截图，关闭后返回实时画面';
-  return;
- }
+ if(event.data?.type==='native-screenshot-result'||event.data?.type==='canvas-screenshot-result'){void finishScreenshot(event);return;}
  if(event.data?.type==='video-dimensions'){
   const {width,height}=event.data;
   if(!Number.isInteger(width)||!Number.isInteger(height)||width<=0||height<=0||width>16384||height>16384)return;
@@ -460,6 +547,10 @@ function showDeviceMenu(event,device,index){
  reconnectButton.disabled=device.enabled===false||devicePreview||device.trust_pending||device.reconnecting||reconnectRequests.has(device.udid)||workspaceBusy||busy;
  reconnectButton.textContent=device.reconnecting?'正在重新连接…':'重新连接此设备';
  reconnectButton.title='按需修复此台信任连接，再恢复画面与操控；手机若出现信任提示，请完成确认。';
+ const rebootButton=document.getElementById('device-context-reboot');
+ rebootButton.disabled=reconnectButton.disabled||device.readonly;
+ rebootButton.textContent=device.reconnecting&&device.reconnect_operation==='reboot'?'正在重启手机…':'重启此手机…';
+ rebootButton.title='重启这台手机，开机后需要在手机输入密码解锁。';
  const followup=deviceLabel(device,index).followup;
  document.getElementById('device-context-followup').setAttribute('aria-checked',String(followup));
  document.getElementById('device-context-none').setAttribute('aria-checked',String(!followup));
@@ -501,6 +592,20 @@ document.getElementById('device-context-reconnect').addEventListener('click',asy
   const result=await response.json();if(!response.ok)throw Error(result.error||'重新连接未完成');
   reconnectNotices.set(device.udid,{job:result.job,label});
  }catch(error){notice('设备 '+label+'：'+error.message);}
+ finally{reconnectRequests.delete(device.udid);refresh();}
+});
+document.getElementById('device-context-reboot').addEventListener('click',async()=>{
+ const target=deviceMenuTarget;closeDeviceMenu();if(!target||devicePreview)return;
+ const device=target.device,label=deviceLabel(device,target.index).number;
+ if(device.enabled===false||device.readonly||device.trust_pending||device.reconnecting||reconnectRequests.has(device.udid)||workspaceBusy||busy)return;
+ if(!window.confirm('确定重启设备 '+label+'（'+device.name+'）吗？\n此手机的画面和操作会暂时断开，开机后请在手机输入密码解锁。'))return;
+ reconnectRequests.add(device.udid);notice('设备 '+label+'：正在发送重启指令…');
+ try{
+  const response=await fetch('/api/devices/reboot',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({device:device.udid,confirm:device.udid}),signal:AbortSignal.timeout(10000)});
+  const result=await response.json();if(!response.ok)throw Error(result.error||'重启请求未完成');
+  reconnectNotices.set(device.udid,{job:result.job,label,operation:'reboot'});
+ }catch(error){notice('设备 '+label+'：重启请求未确认，请检查手机状态；未自动重复发送。'+error.message);}
  finally{reconnectRequests.delete(device.udid);refresh();}
 });
 for(const [id,followup] of [['device-context-followup',true],['device-context-none',false]]){
@@ -738,10 +843,10 @@ function render(rows,selected,controller=controlOwner){
   const row=rows.find(device=>device.udid===udid);
   if(!row){notice('设备 '+job.label+' 已断开，请接入后刷新设备列表');reconnectNotices.delete(udid);}
   else if(row.reconnect_id===job.job&&!row.reconnecting){
-   notice('设备 '+job.label+'：'+(row.reconnect_state==='ready'?'系统会话与连接已重建（'+(row.reconnect_elapsed||0)+'秒），请检查左键操控':row.reconnect_error||'重新连接失败，请重试'));
+   notice('设备 '+job.label+'：'+(row.reconnect_state==='ready'?(job.operation==='reboot'?'手机已重启，画面与操控已恢复':'系统会话与连接已重建')+'（'+(row.reconnect_elapsed||0)+'秒）':row.reconnect_error||'连接恢复未完成，请检查手机状态'));
    reconnectNotices.delete(udid);
   }else if(row.reconnect_id===job.job&&row.reconnecting){
-   const stages={stopping:'停止旧连接',trusting:'检查并修复信任（若手机弹窗，请确认）',resetting:'清理手机端远程会话',starting:'建立新连接',checking:'检查操控通道'};
+   const stages={stopping:'停止旧连接',rebooting:'发送手机重启指令',waiting_boot:'等待手机开机，开机后请在手机输入密码解锁',trusting:'检查并修复信任（若手机弹窗，请确认）',resetting:'清理手机端远程会话',starting:'建立新连接（重启后请先解锁手机）',checking:'检查操控通道'};
    notice('设备 '+job.label+'：正在'+(stages[row.reconnect_stage]||'重新连接')+'，已用时 '+(row.reconnect_elapsed||0)+' 秒…');
   }
  }
@@ -754,11 +859,11 @@ function render(rows,selected,controller=controlOwner){
   if(!connected.has(udid)){card.node.remove();cards.delete(udid);}
  }
  syncDeveloperModeButton();
- if(phoneScreenshotButton)phoneScreenshotButton.disabled=!!screenshotRequest||devicePreview||!rows.some(d=>d.udid===selected&&d.ready);
  if(screenshotDialog.open&&(!rows.some(d=>d.udid===selected&&d.ready)||screenshotDialog.dataset.device!==selected)){
   screenshotDialog.close();clearPhoneScreenshot();
  }
  controlPaused=autoScanEnabled&&rows.some(row=>row.udid===selected&&row.notifications?.state==='scanning');
+ syncScreenshotActions();
  if(phoneHomeButton)phoneHomeButton.disabled=!(controlOwner===selected&&rows.some(row=>row.udid===selected&&row.ready))||busy||workspaceBusy||controlPaused||devicePreview;
  const selectedDevice=rows.find(device=>device.udid===selected);
  if(devicePreview)loadPreviewContacts(selectedDevice);else{loadWorkspace(selected);syncWorkspaceControls();}
@@ -891,6 +996,139 @@ async function refreshCpuUsage(){
 }
 async function refresh(){if(devicePreview){showCpuUsage(null);syncAutoScan(false);render(previewDevices,previewSelection);return;}const revision=selectionRevision,scanVersion=scanRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);if(scanVersion===scanRevision)syncAutoScan(j.scan_enabled);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){notice('管理页面连接中断');}}
 refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInterval(refreshCpuUsage,3000);}
+
+// New-message task editor. Saving here persists configuration only; execution
+// is deliberately separate from choosing a file or reopening a saved draft.
+(() => {
+ const dialog=document.getElementById('new-sms-dialog'),form=document.getElementById('new-sms-form');
+ const get=id=>document.getElementById('new-sms-'+id);
+ const storageKey='iphone-new-sms-task-draft:v1';
+ let imported=null,devices={},fileRevision=0;
+ const status=(message,error=false)=>{get('status').textContent=message;get('status').dataset.error=String(error);};
+ function normalize(value){
+  const clean=value.trim().replace(/[\s()\-]/g,'');
+  if(/^\+\d{7,15}$/.test(clean))return clean;
+  if(/^\d{10}$/.test(clean))return '+1'+clean;
+  if(/^1\d{10}$/.test(clean))return '+'+clean;
+  return null;
+ }
+ function parseNumbers(text){
+  const seen=new Set(),numbers=[],invalid=[];let duplicates=0;
+  text.replace(/^\uFEFF/,'').split(/\r?\n/).forEach((line,index)=>{
+   if(!line.trim())return;
+   const number=normalize(line);
+   if(!number){invalid.push(index+1);return;}
+   if(seen.has(number)){duplicates++;return;}
+   seen.add(number);numbers.push(number);
+  });
+  return {numbers,duplicates,invalid};
+ }
+ const texts=()=>get('texts').value.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
+ function showImport(){
+  const preview=get('number-preview');preview.replaceChildren();preview.hidden=!imported?.numbers?.length;
+  if(!imported){get('file-info').textContent='尚未导入文件';return;}
+  get('file-info').textContent=imported.name+' · '+imported.numbers.length+' 个有效号码'+
+   (imported.duplicates?' · 去重 '+imported.duplicates+' 个':'')+
+   (imported.invalid.length?' · 无效行 '+imported.invalid.slice(0,8).join('、')+(imported.invalid.length>8?'…':''):'');
+  preview.textContent=imported.numbers.slice(0,6).join('　')+(imported.numbers.length>6?'　…':'');
+ }
+ function captureDevices(){
+  for(const row of get('devices').querySelectorAll('[data-device]')){
+   devices[row.dataset.device]={selected:row.querySelector('input[type=checkbox]').checked,
+    min:Number(row.querySelector('[data-min]').value),max:Number(row.querySelector('[data-max]').value)};
+  }
+ }
+ function renderDevices(){
+  const list=get('devices');list.replaceChildren();
+  if(!latest.length){const hint=document.createElement('p');hint.className='new-sms-hint muted';hint.textContent='尚未发现设备，连接手机后重新打开此弹窗。';list.append(hint);return;}
+  latest.map((device,index)=>({device,index,label:deviceLabel(device,index)}))
+   .sort((a,b)=>String(a.label.number).localeCompare(String(b.label.number),undefined,{numeric:true}))
+   .forEach(({device,label})=>{
+    const settings=devices[device.udid]||{selected:device.udid===active,min:15,max:25};
+    const blocked=device.readonly||device.enabled===false;
+    const row=document.createElement('div');row.className='new-sms-device-row';row.dataset.device=device.udid;
+    const title=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.checked=!!settings.selected&&!blocked;check.disabled=!!blocked;
+    const name=document.createElement('span');name.textContent='设备 '+label.number;
+    title.append(check,name);
+    if(blocked||!device.ready){const note=document.createElement('small');note.textContent=blocked?'不可用':'待连接';title.append(note);}
+    row.append(title);
+    for(const field of ['min','max']){
+     const input=document.createElement('input');input.type='number';input.min='1';input.max='86400';input.value=String(Number.isFinite(settings[field])?settings[field]:15);
+     input.setAttribute('data-'+field,'');input.setAttribute('aria-label','设备 '+label.number+(field==='min'?' 最小间隔秒数':' 最大间隔秒数'));input.disabled=!!blocked;row.append(input);
+    }
+    list.append(row);
+   });
+ }
+ const updateTiming=()=>{get('start-at').disabled=form.querySelector('[name=new-sms-start-mode]:checked').value!=='scheduled';};
+ function open(){
+  let draft=null;try{draft=JSON.parse(localStorage.getItem(storageKey)||'null');}catch{}
+  imported=null;devices={};get('texts').value='';get('min').value='15';get('max').value='25';get('concurrency').value='2';
+  const now=new Date(),tomorrow=new Date(now.getFullYear(),now.getMonth(),now.getDate()+1,6),z=n=>String(n).padStart(2,'0');
+  get('name').value='短信任务 '+now.getFullYear()+'-'+z(now.getMonth()+1)+'-'+z(now.getDate());
+  get('start-at').value=tomorrow.getFullYear()+'-'+z(tomorrow.getMonth()+1)+'-'+z(tomorrow.getDate())+'T06:00';
+  form.querySelector('[name=new-sms-start-mode][value=immediate]').checked=true;
+  if(draft?.version===1){
+   if(draft.imported&&Array.isArray(draft.imported.numbers)&&Array.isArray(draft.imported.invalid))imported=draft.imported;
+   if(draft.devices&&typeof draft.devices==='object')devices=draft.devices;
+   get('name').value=draft.name||get('name').value;
+   get('texts').value=Array.isArray(draft.texts)?draft.texts.join('\n'):'';
+   get('concurrency').value=String(draft.concurrency||2);
+   if(draft.startMode==='scheduled')form.querySelector('[name=new-sms-start-mode][value=scheduled]').checked=true;
+   if(draft.startLocal)get('start-at').value=draft.startLocal;
+  }
+  fileRevision++;get('file').value='';showImport();renderDevices();updateTiming();
+  get('text-count').textContent=texts().length+' 条';
+  get('timezone').textContent='本地时区：'+Intl.DateTimeFormat().resolvedOptions().timeZone;
+  status(draft?'已加载保存的配置草稿，尚未开始发送。':'导入号码并设置参与设备后，可保存配置草稿。');
+  dialog.showModal();
+ }
+ document.getElementById('new-sms-task').addEventListener('click',open);
+ get('close').addEventListener('click',()=>dialog.close());
+ dialog.addEventListener('close',()=>{fileRevision++;});
+ form.querySelectorAll('[name=new-sms-start-mode]').forEach(input=>input.addEventListener('change',updateTiming));
+ form.querySelector('.new-sms-file-button').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();get('file').click();}});
+ get('texts').addEventListener('input',()=>{get('text-count').textContent=texts().length+' 条';});
+ get('select-all').addEventListener('click',()=>get('devices').querySelectorAll('input[type=checkbox]:not(:disabled)').forEach(input=>{input.checked=true;}));
+ get('select-none').addEventListener('click',()=>get('devices').querySelectorAll('input[type=checkbox]').forEach(input=>{input.checked=false;}));
+ get('apply-interval').addEventListener('click',()=>{
+  const min=Number(get('min').value),max=Number(get('max').value);
+  if(!Number.isInteger(min)||!Number.isInteger(max)||min<1||max<min||max>86400){status('请输入有效间隔：1–86400 秒，最大值不能小于最小值。',true);return;}
+  for(const row of get('devices').querySelectorAll('[data-device]'))if(row.querySelector('input[type=checkbox]').checked){row.querySelector('[data-min]').value=String(min);row.querySelector('[data-max]').value=String(max);}
+  status('已应用到勾选设备，各台仍可单独修改。');
+ });
+ get('file').addEventListener('change',async()=>{
+  const file=get('file').files[0],revision=++fileRevision;if(!file)return;
+  if(!/\.txt$/i.test(file.name)||file.size>2*1024*1024){status('请选择不超过 2 MB 的 TXT 文件。',true);return;}
+  try{
+   const bytes=new Uint8Array(await file.arrayBuffer());let text;
+   if(bytes[0]===255&&bytes[1]===254)text=new TextDecoder('utf-16le').decode(bytes);
+   else if(bytes[0]===254&&bytes[1]===255)text=new TextDecoder('utf-16be').decode(bytes);
+   else{try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{text=new TextDecoder('gb18030',{fatal:true}).decode(bytes);}}
+   const parsed=parseNumbers(text);
+   if(revision!==fileRevision||!dialog.open)return;
+   imported={name:file.name,importedAt:new Date().toISOString(),...parsed};showImport();
+   status(parsed.numbers.length?'号码已导入配置草稿，原 TXT 不变。':'未找到有效号码，请检查文件内容。',!parsed.numbers.length);
+  }catch{if(revision===fileRevision)status('文件读取失败，请检查文件编码或重新选择。',true);}
+ });
+ form.addEventListener('submit',event=>{
+  event.preventDefault();captureDevices();
+  const available=new Set(latest.filter(device=>!device.readonly&&device.enabled!==false).map(device=>device.udid));
+  const selected=Object.entries(devices).filter(([id,value])=>value.selected&&available.has(id));
+  if(!imported?.numbers.length){status('请先导入有效号码 TXT。',true);return;}
+  if(imported.invalid.length){status('TXT 存在无效行，请修正后重新导入；尚未保存。',true);return;}
+  const library=texts();if(!library.length||library.some(text=>text.length>6000)){status('文本库至少需要一条正文，每条不超过 6000 字。',true);return;}
+  if(!selected.length){status('请至少勾选一台参与设备。',true);return;}
+  if(selected.some(([,value])=>!Number.isInteger(value.min)||!Number.isInteger(value.max)||value.min<1||value.max<value.min||value.max>86400)){status('请检查勾选设备的间隔：1–86400 秒，最大值不能小于最小值。',true);return;}
+  const concurrency=Number(get('concurrency').value);if(!Number.isInteger(concurrency)||concurrency<1||concurrency>20){status('同时操作设备数须为 1–20。',true);return;}
+  const startMode=form.querySelector('[name=new-sms-start-mode]:checked').value,startLocal=get('start-at').value;
+  if(startMode==='scheduled'&&(!startLocal||!Number.isFinite(new Date(startLocal).getTime())||new Date(startLocal).getTime()<=Date.now())){status('请选择未来的定时开始日期和时间。',true);return;}
+  const currentDevices=Object.fromEntries(Object.entries(devices).filter(([id])=>latest.some(device=>device.udid===id)));
+  const draft={version:1,name:get('name').value.trim(),imported,texts:library,devices:currentDevices,concurrency,startMode,startLocal,
+   timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,startAt:startMode==='scheduled'?new Date(startLocal).toISOString():null,savedAt:new Date().toISOString(),status:'draft'};
+  try{localStorage.setItem(storageKey,JSON.stringify(draft));status('草稿已保存：'+imported.numbers.length+' 个号码 · '+library.length+' 条文本 · '+selected.length+' 台设备。尚未开始发送。');}
+  catch{status('草稿保存失败，可能是浏览器存储空间不足。请保留当前配置后重试。',true);}
+ });
+})();
 
 
 

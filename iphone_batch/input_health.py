@@ -74,19 +74,30 @@ def record_input(instance, kind, data):
         instance._batch_keys_down = bool(data.get('usages'))
 
 
+def busy_input_state(instance):
+    # Real input is recorded only after successful dispatch to this phone.
+    result = {'ok': False, 'state': 'busy'}
+    last_input = getattr(instance, '_batch_last_input', 0)
+    if last_input:
+        result['input_confirmed_age'] = max(0, time.monotonic() - last_input)
+    return result
+
+
 async def _check_input(instance, lock, is_active):
     """Caller holds no input lock. A repair invalidates already queued input."""
     if not is_active():
         return {'ok': False, 'state': 'inactive'}
     if lock.locked():
-        return {'ok': False, 'state': 'busy'}
+        return busy_input_state(instance)
     async with lock:
         if not is_active():
             return {'ok': False, 'state': 'inactive'}
         if (getattr(instance, '_batch_contact', None)
                 or getattr(instance, '_batch_keys_down', False)
                 or time.monotonic() - getattr(instance, '_batch_last_input', 0) < 2):
-            return {'ok': False, 'state': 'busy'}
+            # Successful real input proves liveness even while an idle probe
+            # must wait. Do not let continuous dragging expire readiness.
+            return busy_input_state(instance)
 
         stage = None
         async def probe():

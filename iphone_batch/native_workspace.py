@@ -13,6 +13,7 @@ from pymobiledevice3 import common
 from pymobiledevice3.services.accessibilityaudit import AccessibilityAudit
 from native_conversation import NativeConversation, phone_key
 from native_ui_scan import scan, ScanResult
+from native_message_page import read_message_footer
 from sms_collect import parse_records
 from send_policy import validate_send_text
 from fixed_coordinates import load_profile, check_layout, tap
@@ -214,6 +215,18 @@ async def raw_page(service, full=False, settle=0):
     return records
 
 
+async def compose_toolbar(service):
+    """Recognize the Messages list using its fixed footer only."""
+    footer = await read_message_footer(service)
+    if footer['page_type'] != 'message_list' or not footer['compose_available']:
+        return None
+    records = ScanResult(footer['raw_elements'])
+    records.complete = False
+    records.reason = 'compose_toolbar_verified'
+    records.elapsed = footer['scan_seconds']
+    return records
+
+
 async def verified_list(service, initial):
     """Two matching full traversals; limited/silent scans are never called complete."""
     first = initial if initial.complete else await raw_page(service, full=True)
@@ -358,7 +371,7 @@ async def open_phone_conversation(service, phone, number):
     if not key:
         raise ValueError('需要完整联系人号码')
     # Check the current page and preserve drafts before navigating away.
-    await list_page(service, phone)
+    await list_page(service, phone, toolbar_only=True)
     await phone.chord(0x11)
     await asyncio.sleep(.3)
     captions = [r['caption'] for r in await raw_page(service)]
@@ -379,7 +392,11 @@ async def open_phone_conversation(service, phone, number):
     return current
 
 
-async def list_page(service, phone):
+async def list_page(service, phone, toolbar_only=False):
+    if toolbar_only:
+        toolbar = await compose_toolbar(service)
+        if toolbar is not None:
+            return toolbar
     records = await raw_page(service)
     if any(', Show Conversation Details, Button' in r['caption'] for r in records):
         # Returning to the list is intentional, but never discard an existing draft.
@@ -396,6 +413,10 @@ async def list_page(service, phone):
         finally:
             phone.request(phone.base,'/touch',{'type':'release','x':round(.78*65535),'y':32768})
         await asyncio.sleep(.4)
+        if toolbar_only:
+            toolbar = await compose_toolbar(service)
+            if toolbar is not None:
+                return toolbar
         records = await raw_page(service)
     try:
         unread_records(records)
@@ -414,6 +435,8 @@ async def run(args):
     lockdown = await open_paired_usb(args.device, ROOT)
     try:
         async with AccessibilityAudit(lockdown) as service:
+            if args.action == 'page':
+                return {'device': args.device, **await read_message_footer(service)}
             if args.action in ('auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail'):
                 from native_foreground import run_foreground
                 record_path = Path(args.record).resolve()
@@ -539,7 +562,7 @@ async def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', required=True)
-    parser.add_argument('--action', choices=['auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail', 'capture', 'latest', 'identify', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification'], required=True)
+    parser.add_argument('--action', choices=['page', 'auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail', 'capture', 'latest', 'identify', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification'], required=True)
     parser.add_argument('--base'); parser.add_argument('--record')
     parser.add_argument('--phone')
     args = parser.parse_args()

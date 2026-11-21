@@ -1,3 +1,8 @@
+# Current recovery point: v0.1.17 (2026-11-20)
+
+Archive: [SESSION_ARCHIVE_2026-11-20_v0.1.17.md](SESSION_ARCHIVE_2026-11-20_v0.1.17.md).
+User authorized a local archive and Git commit/tag only; no remote push is authorized for this delivery. Screenshot modes and device 01 reboot/control recovery were exercised; the new-message UI currently saves configuration drafts only. Multi-device scheduling, automatic banner patrol, Windows notifications, and daily statistics remain pending. Detailed evidence and limits are recorded in the archive and recovery/VALIDATION.md. Next archive version: v0.1.18.
+
 # Current recovery point: v0.1.16 (2026-11-19)
 
 Archive: [SESSION_ARCHIVE_2026-11-19_v0.1.16.md](SESSION_ARCHIVE_2026-11-19_v0.1.16.md).

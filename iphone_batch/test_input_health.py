@@ -80,6 +80,32 @@ class InputHealthTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await check_input(item, lock, lambda: True))['state'], 'busy')
         item._ensure_hid.assert_not_awaited()
 
+    async def test_busy_gesture_reports_age_of_confirmed_input_without_probing(self):
+        item=self.instance()
+        item._batch_contact={'type':'contact','x':1,'y':2}
+        item._batch_last_input=time.monotonic()-.5
+        result=await check_input(item,asyncio.Lock(),lambda:True)
+        self.assertEqual(result['state'],'busy')
+        self.assertGreaterEqual(result['input_confirmed_age'],.5)
+        self.assertLess(result['input_confirmed_age'],2)
+        item._uhs.send_keyboard.assert_not_awaited()
+
+    async def test_orphan_contact_does_not_claim_recent_confirmed_input(self):
+        item=self.instance()
+        item._batch_contact={'type':'contact','x':1,'y':2}
+        result=await check_input(item,asyncio.Lock(),lambda:True)
+        self.assertNotIn('input_confirmed_age',result)
+
+    async def test_busy_dispatch_lock_reports_previous_success_without_sending_input(self):
+        item=self.instance()
+        item._batch_last_input=time.monotonic()-.2
+        lock=asyncio.Lock()
+        async with lock:
+            result=await check_input(item,lock,lambda:True)
+        self.assertEqual(result['state'],'busy')
+        self.assertLess(result['input_confirmed_age'],2)
+        item._ensure_hid.assert_not_awaited()
+
     async def test_switching_away_during_failed_probe_does_not_reconnect(self):
         item = self.instance()
         enabled = True
