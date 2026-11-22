@@ -688,20 +688,7 @@ function followupTextSelected(node){
  return !!(selection&&!selection.isCollapsed&&(node.contains(selection.anchorNode)||node.contains(selection.focusNode)));
 }
 function bindFollowupContact(row,device,number){
- let start=null,dragged=false;
- row.onpointerdown=event=>{
-  if(event.button!==0)return;
-  start={x:event.clientX,y:event.clientY};dragged=false;row.followupSelecting=true;
-  const finish=()=>{row.followupSelecting=false;document.removeEventListener('pointerup',finish,true);document.removeEventListener('pointercancel',finish,true);};
-  document.addEventListener('pointerup',finish,{capture:true,once:true});
-  document.addEventListener('pointercancel',finish,{capture:true,once:true});
- };
- row.onpointermove=event=>{if(start&&(event.buttons&1)&&Math.hypot(event.clientX-start.x,event.clientY-start.y)>4)dragged=true;};
- const activate=()=>{if(row.getAttribute('aria-disabled')!=='true')openFollowupContact(device,number);};
- row.onclick=event=>{if(dragged||followupTextSelected(row)){event.preventDefault();return;}activate();};
- row.onkeydown=event=>{
-  if(['Enter',' '].includes(event.key)&&!event.ctrlKey&&!event.metaKey&&!event.altKey){event.preventDefault();activate();}
- };
+ row.querySelector('.followup-open').onclick=()=>openFollowupContact(device,number);
 }
 function renderFollowupContacts(){
  const list=document.getElementById('followup-contact-list');
@@ -717,17 +704,24 @@ function renderFollowupContacts(){
   const number=key.startsWith('phone:')?'+'+key.slice(6):null;
   const rowKey=device.udid+':'+key;
   const button=existing.get(rowKey)||document.createElement('div');button.className='followup-contact';
-  button.dataset.followupKey=rowKey;button.setAttribute('role','button');button.tabIndex=0;
-  button.setAttribute('aria-disabled',String(workspaceBusy||!number));
-  if(!existing.has(rowKey))button.textContent=number||value?.contact||key.slice(8);
-  button.title=number?'单击打开 '+number+'；可拖选文字后复制':'可拖选文字后复制；没有完整号码，请先手动进入会话读取';
+  button.dataset.followupKey=rowKey;
+  button.removeAttribute('role');button.removeAttribute('tabindex');button.removeAttribute('aria-disabled');
+  if(!existing.has(rowKey)){
+   const open=document.createElement('button');open.type='button';open.className='followup-open';open.textContent='打开';
+   const label=document.createElement('span');label.className='followup-copy-text';label.textContent=number||value?.contact||key.slice(8);
+   button.append(open,label);
+  }
+  const open=button.querySelector('.followup-open');open.disabled=workspaceBusy||!number;
+  open.setAttribute('aria-label',number?'打开 '+number:'没有完整号码，无法打开');
+  button.querySelector('.followup-copy-text').title='拖选文字后复制';
   bindFollowupContact(button,device.udid,number);rows.push(button);
   if(number)followupProfile(device.udid,number).then(fields=>{
    if(renderRevision!==followupRenderRevision||!button.isConnected||button.followupSelecting||followupTextSelected(button))return;
    const summary=['日期','姓名','年龄','工作','地区','婚否','爱好'].map(name=>
     String(fields[name]||'').replace(/\s+/g,' ').trim()).filter(Boolean).join(' ');
    const text=summary?number+' '+summary:number;
-   if(button.textContent!==text){button.textContent=text;positionReadingCards();}
+   const label=button.querySelector('.followup-copy-text');
+   if(label.textContent!==text){label.textContent=text;positionReadingCards();}
   });
  }
  let cursor=list.firstChild;
@@ -1035,9 +1029,9 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
   latest.map((device,index)=>({device,index,label:deviceLabel(device,index)}))
    .sort((a,b)=>String(a.label.number).localeCompare(String(b.label.number),undefined,{numeric:true}))
    .forEach(({device,label})=>{
-    const settings=devices[device.udid]||{selected:device.udid===active,min:15,max:25};
+    const settings=devices[device.udid]||{selected:device.udid===active&&device.ready===true,min:15,max:25};
     const blocked=device.readonly||device.enabled===false;
-    const row=document.createElement('div');row.className='new-sms-device-row';row.dataset.device=device.udid;
+    const row=document.createElement('div');row.className='new-sms-device-row';row.dataset.device=device.udid;row.dataset.ready=String(device.ready===true);
     const title=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.checked=!!settings.selected&&!blocked;check.disabled=!!blocked;
     const name=document.createElement('span');name.textContent='设备 '+label.number;
     title.append(check,name);
@@ -1101,7 +1095,7 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
  form.querySelectorAll('[name=new-sms-start-mode]').forEach(input=>input.addEventListener('change',updateTiming));
  form.querySelector('.new-sms-file-button').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();get('file').click();}});
  get('texts').addEventListener('input',()=>{get('text-count').textContent=texts().length+' 条';});
- get('select-all').addEventListener('click',()=>{get('devices').querySelectorAll('input[type=checkbox]:not(:disabled)').forEach(input=>{input.checked=true;});scheduleLocalDraftSave();});
+ get('select-all').addEventListener('click',()=>{for(const row of get('devices').querySelectorAll('[data-device]')){const input=row.querySelector('input[type=checkbox]');input.checked=row.dataset.ready==='true'&&!input.disabled;}scheduleLocalDraftSave();});
  get('select-none').addEventListener('click',()=>{get('devices').querySelectorAll('input[type=checkbox]').forEach(input=>{input.checked=false;});scheduleLocalDraftSave();});
  get('apply-interval').addEventListener('click',()=>{
   const min=Number(get('min').value),max=Number(get('max').value);

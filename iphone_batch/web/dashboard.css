@@ -249,6 +249,9 @@ body{background-image:radial-gradient(ellipse at 8% 0%,var(--workspace-accent-a0
 .followup-controls .followup-contact-list,.reading-floating-card.followup-contact-list{width:max-content;flex-wrap:nowrap;align-items:flex-start}
 .followup-contact-list .followup-contact{width:max-content;max-width:none;white-space:nowrap;overflow-wrap:normal;user-select:text;-webkit-user-select:text;cursor:text;border-radius:8px;font-weight:600}
 .followup-contact[aria-disabled="true"]{opacity:.6}
+.followup-contact-list .followup-contact{display:flex;align-items:center;gap:8px;cursor:default;user-select:none;-webkit-user-select:none}
+.followup-contact .followup-copy-text{user-select:text;-webkit-user-select:text;cursor:text}
+.followup-contact .followup-open{flex:none;padding:4px 8px;font-size:12px;line-height:1.4;cursor:pointer;user-select:none;-webkit-user-select:none}
 .phone-panel{display:grid;grid-template-columns:64px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);gap:8px}
 .phone-panel>.section-title{grid-column:1/-1;grid-row:1;min-width:0}
 #current-display-devices{grid-column:1;grid-row:2;display:flex;flex-direction:column;align-items:stretch;gap:4px;min-width:48px;max-width:100px;min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 2px 0 0}

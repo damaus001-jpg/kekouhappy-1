@@ -1,6 +1,7 @@
 """Native conversation capture and verified one-shot sending."""
 import argparse
 import asyncio
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -22,7 +23,6 @@ from visual_composer import input_point, send_point
 ROOT = Path(__file__).resolve().parent / '.device-data'
 common._HOMEFOLDER = ROOT
 from pairing_patch import open_paired_usb
-
 
 def digest(messages):
     data = [(m['side'], m['text'], m.get('time'), m.get('kind')) for m in messages]
@@ -366,11 +366,12 @@ def owns_failed_preparation(current, record, record_path):
     return bool(previous and previous['english'] == record['english'])
 
 
-async def open_phone_conversation(service, phone, number):
+async def enter_compose_recipient(service, phone, number, *, verify_selection=False):
     key = phone_key(number or '')
     if not key:
         raise ValueError('需要完整联系人号码')
-    # Check the current page and preserve drafts before navigating away.
+    # Match the smooth local follow-up-number path: normalize the current page
+    # and preserve drafts before opening a fresh compose sheet.
     await list_page(service, phone, toolbar_only=True)
     await phone.chord(0x11)
     await asyncio.sleep(.3)
@@ -386,6 +387,21 @@ async def open_phone_conversation(service, phone, number):
     await phone.keys([0x28])
     await phone.keys([])
     await asyncio.sleep(.5)
+    if not verify_selection:
+        return None
+    selected = await raw_page(service)
+    if not task_recipient_confirmed(selected, key):
+        raise ValueError('选择后的完整收件号码未确认，未输入正文')
+    if not composer_is_empty([row['caption'] for row in selected]):
+        raise ValueError('收件会话中存在草稿，已保留原内容')
+    return selected
+
+
+async def open_phone_conversation(service, phone, number):
+    key = phone_key(number or '')
+    if not key:
+        raise ValueError('需要完整联系人号码')
+    await enter_compose_recipient(service, phone, key)
     current = await read(service)
     if current['phone_number'] != key:
         raise ValueError('打开后的会话号码未确认')
@@ -466,36 +482,26 @@ async def send_task_unit(service, args, record_path):
         raise ValueError('短信任务号码无效')
     phone = NativeConversation(); phone.base = args.base
 
-    # Do not replace or send any text already present in the current composer.
-    before = await raw_page(service)
-    if any(row['caption'].startswith('Send, Button') for row in before):
-        raise ValueError('手机存在未发送草稿，请先处理；任务未发送')
-    await phone.chord(0x11)
-    await asyncio.sleep(.35)
-    compose = await raw_page(service)
-    captions = [row['caption'] for row in compose]
-    if (not any(c.startswith('New Message, Show Conversation Details, Button') for c in captions)
-            or 'To:' not in captions or not composer_is_empty(captions)):
-        raise ValueError('未确认空白新短信页面；任务未发送')
-    await phone.paste(number)
-    await asyncio.sleep(.4)
-    entered = await raw_page(service)
-    entered_captions = [row['caption'] for row in entered]
-    if not any(c.startswith('To:, ') and phone_key(c[5:]) == number for c in entered_captions):
-        raise ValueError('输入的收件号码未确认；任务未发送')
-    await phone.keys([0x28]); await phone.keys([]); await asyncio.sleep(.5)
-    selected = await raw_page(service)
-    selected_captions = [row['caption'] for row in selected]
-    if not task_recipient_confirmed(selected, number):
-        raise ValueError('手机未确认选择了完全匹配的收件号码；任务未发送')
+    # Follow the same normalized page-opening route as a click on the local
+    # follow-up number list. A brand-new recipient has no history to read yet,
+    # so the verified recipient chip and empty composer are enough to proceed.
+    selected_elements = await enter_compose_recipient(
+        service, phone, number, verify_selection=True)
+    try:
+        selected = await read(service)
+    except ValueError as exc:
+        if str(exc) != '当前会话未读到可确认的消息，未发送':
+            raise
+        selected = {'phone_number': number, 'messages': [],
+                    'raw_elements': selected_elements}
+    selected_captions = [row['caption'] for row in selected.get('raw_elements', [])]
+    if (selected.get('phone_number') != number or
+            not task_recipient_confirmed(selected.get('raw_elements', []), number)):
+        raise ValueError('手机未确认完全匹配的收件号码；任务未发送')
     if not composer_is_empty(selected_captions):
         raise ValueError('新短信输入框非空，已保留手机草稿；任务未发送')
-    try:
-        prior = context(selected)
-        before_count = sum(m.get('side') == 'outgoing' and m.get('text') == text
-                           for m in prior.get('messages', []))
-    except ValueError:
-        before_count = 0
+    before_count = sum(m.get('side') == 'outgoing' and m.get('text') == text
+                       for m in selected.get('messages', []))
 
     point = await asyncio.to_thread(input_point, phone)
     await tap(phone, point)

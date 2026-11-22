@@ -60,6 +60,28 @@ class SmsTaskRunnerTests(unittest.TestCase):
                                  self.stopping, max_workers=2)
         self.assertEqual(restored.snapshot(task["id"])["status"], "scheduled")
 
+    def test_scheduled_task_runs_once_when_due(self):
+        from datetime import datetime, timedelta, timezone
+        import time
+        future = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        task = self.runner.create(self.body(
+            numbers=["+15550000001"], texts=["Scheduled"],
+            devices={"phone-a": {"min": 1, "max": 1}}, concurrency=1,
+            startMode="scheduled", startAt=future))
+        worker = threading.Thread(target=self.runner.run, daemon=True)
+        worker.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if self.runner.snapshot(task["id"])["status"] == "completed":
+                break
+            time.sleep(.05)
+        self.stopping.set()
+        worker.join(timeout=2)
+        result = self.runner.snapshot(task["id"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["counts"], {"sent_verified": 1})
+        self.assertEqual(self.deliveries, [("phone-a", "+15550000001", "Scheduled")])
+
     def test_duplicate_number_and_unzoned_schedule_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "重复"):
             self.runner.create(self.body(numbers=["+15550000001", "+15550000001"]))
