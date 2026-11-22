@@ -919,7 +919,7 @@ function render(rows,selected,controller=controlOwner){
    card={node,button,connectionButton,waiting,frame:null,origin:'http://127.0.0.1:'+d.port};cards.set(d.udid,card);
   }
   if(!d.ready)card.waiting.textContent=d.error||'正在启动投屏…';
-  card.controlReady=d.control_ready===true&&!d.readonly&&d.enabled!==false;
+  card.controlReady=d.control_ready===true&&!d.readonly&&d.enabled!==false&&!d.sms_task_busy;
   card.connectionButton.textContent=d.enabled===false?'接入此台':'断开此台';
   card.connectionButton.disabled=busy||workspaceBusy||accessRequests.has(d.udid)||d.reconnecting||d.trust_pending;
   if(d.ready&&!card.frame){
@@ -977,14 +977,16 @@ async function refreshCpuUsage(){
 async function refresh(){if(devicePreview){showCpuUsage(null);render(previewDevices,previewSelection);return;}const revision=selectionRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){notice('管理页面连接中断');}}
 refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInterval(refreshCpuUsage,3000);}
 
-// New-message task editor. Saving here persists configuration only; execution
-// is deliberately separate from choosing a file or reopening a saved draft.
+// New-message tasks: browser storage restores unfinished form input; submission
+// creates a durable backend task, which sends now or at the selected local time.
 (() => {
  const dialog=document.getElementById('new-sms-dialog'),form=document.getElementById('new-sms-form');
  const get=id=>document.getElementById('new-sms-'+id);
  const storageKey='iphone-new-sms-task-draft:v1';
- let imported=null,devices={},fileRevision=0;
+ const lastTaskKey='iphone-new-sms-last-task:v1';
+ let imported=null,devices={},fileRevision=0,inflight=false,lastTaskId=null,pollTimer=0,saveTimer=0;
  const status=(message,error=false)=>{get('status').textContent=message;get('status').dataset.error=String(error);};
+ const taskStatus=(message,error=false)=>{get('task-status').textContent=message;get('task-status').dataset.error=String(error);};
  function normalize(value){
   const clean=value.trim().replace(/[\s()\-]/g,'');
   if(/^\+\d{7,15}$/.test(clean))return clean;
@@ -1018,6 +1020,15 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
     min:Number(row.querySelector('[data-min]').value),max:Number(row.querySelector('[data-max]').value)};
   }
  }
+ function saveLocalDraft(){
+  captureDevices();
+  const currentDevices=Object.fromEntries(Object.entries(devices).filter(([id])=>latest.some(device=>device.udid===id)));
+  const draft={version:1,name:get('name').value,imported,texts:texts(),devices:currentDevices,
+   concurrency:Number(get('concurrency').value),startMode:form.querySelector('[name=new-sms-start-mode]:checked').value,
+   startLocal:get('start-at').value,savedAt:new Date().toISOString(),status:'draft'};
+  try{localStorage.setItem(storageKey,JSON.stringify(draft));}catch{}
+ }
+ function scheduleLocalDraftSave(){clearTimeout(saveTimer);saveTimer=setTimeout(saveLocalDraft,250);}
  function renderDevices(){
   const list=get('devices');list.replaceChildren();
   if(!latest.length){const hint=document.createElement('p');hint.className='new-sms-hint muted';hint.textContent='尚未发现设备，连接手机后重新打开此弹窗。';list.append(hint);return;}
@@ -1039,7 +1050,24 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
     list.append(row);
    });
  }
- const updateTiming=()=>{get('start-at').disabled=form.querySelector('[name=new-sms-start-mode]:checked').value!=='scheduled';};
+ const updateTiming=()=>{const scheduled=form.querySelector('[name=new-sms-start-mode]:checked').value==='scheduled';get('start-at').disabled=!scheduled;get('submit').textContent=scheduled?'保存定时发送':'立即发送';};
+ const terminal=new Set(['completed','completed_with_errors','failed','uncertain','cancelled']);
+ function taskLabel(task){
+  const labels={scheduled:'已定时',queued:'等待开始',waiting_for_device:'等待设备恢复',running:'正在执行',completed:'全部发送完成',completed_with_errors:'部分完成',failed:'发送失败',uncertain:'发送结果待核对',cancelled:'已取消'};
+  const sent=task.counts?.sent_verified||0,total=task.total||0;
+  return `${task.name||'短信任务'}：${labels[task.status]||task.status} · 已确认发送 ${sent}/${total}`+(task.error?' · '+task.error:'');
+ }
+ async function refreshTask(id){
+  if(!id||!dialog.open)return;
+  try{
+   const task=await deviceRequest('/api/sms-tasks?id='+encodeURIComponent(id),{cache:'no-store'},8000);
+   if(id!==lastTaskId)return;
+   taskStatus(taskLabel(task),['failed','uncertain','completed_with_errors'].includes(task.status));
+   get('cancel').hidden=terminal.has(task.status);get('cancel').dataset.taskId=id;
+   if(terminal.has(task.status)){clearInterval(pollTimer);pollTimer=0;}
+  }catch(error){taskStatus('任务状态暂时无法读取：'+error.message,true);}
+ }
+ function watchTask(id){clearInterval(pollTimer);if(!id)return;void refreshTask(id);pollTimer=setInterval(()=>void refreshTask(id),2000);}
  function open(){
   let draft=null;try{draft=JSON.parse(localStorage.getItem(storageKey)||'null');}catch{}
   imported=null;devices={};get('texts').value='';get('min').value='15';get('max').value='25';get('concurrency').value='2';
@@ -1059,22 +1087,28 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
   fileRevision++;get('file').value='';showImport();renderDevices();updateTiming();
   get('text-count').textContent=texts().length+' 条';
   get('timezone').textContent='本地时区：'+Intl.DateTimeFormat().resolvedOptions().timeZone;
-  status(draft?'已加载保存的配置草稿，尚未开始发送。':'导入号码并设置参与设备后，可保存配置草稿。');
+  status(draft?'已恢复上次未提交的配置。':'导入号码、填写正文并选择设备。');
+  try{lastTaskId=localStorage.getItem(lastTaskKey)||null;}catch{lastTaskId=null;}
+  taskStatus('');get('cancel').hidden=true;get('submit').disabled=false;inflight=false;
   dialog.showModal();
+  watchTask(lastTaskId);
  }
  document.getElementById('new-sms-task').addEventListener('click',open);
  get('close').addEventListener('click',()=>dialog.close());
- dialog.addEventListener('close',()=>{fileRevision++;});
+ dialog.addEventListener('close',()=>{fileRevision++;clearInterval(pollTimer);pollTimer=0;clearTimeout(saveTimer);});
+ form.addEventListener('input',scheduleLocalDraftSave);
+ form.addEventListener('change',scheduleLocalDraftSave);
  form.querySelectorAll('[name=new-sms-start-mode]').forEach(input=>input.addEventListener('change',updateTiming));
  form.querySelector('.new-sms-file-button').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();get('file').click();}});
  get('texts').addEventListener('input',()=>{get('text-count').textContent=texts().length+' 条';});
- get('select-all').addEventListener('click',()=>get('devices').querySelectorAll('input[type=checkbox]:not(:disabled)').forEach(input=>{input.checked=true;}));
- get('select-none').addEventListener('click',()=>get('devices').querySelectorAll('input[type=checkbox]').forEach(input=>{input.checked=false;}));
+ get('select-all').addEventListener('click',()=>{get('devices').querySelectorAll('input[type=checkbox]:not(:disabled)').forEach(input=>{input.checked=true;});scheduleLocalDraftSave();});
+ get('select-none').addEventListener('click',()=>{get('devices').querySelectorAll('input[type=checkbox]').forEach(input=>{input.checked=false;});scheduleLocalDraftSave();});
  get('apply-interval').addEventListener('click',()=>{
   const min=Number(get('min').value),max=Number(get('max').value);
   if(!Number.isInteger(min)||!Number.isInteger(max)||min<1||max<min||max>86400){status('请输入有效间隔：1–86400 秒，最大值不能小于最小值。',true);return;}
   for(const row of get('devices').querySelectorAll('[data-device]'))if(row.querySelector('input[type=checkbox]').checked){row.querySelector('[data-min]').value=String(min);row.querySelector('[data-max]').value=String(max);}
   status('已应用到勾选设备，各台仍可单独修改。');
+  scheduleLocalDraftSave();
  });
  get('file').addEventListener('change',async()=>{
   const file=get('file').files[0],revision=++fileRevision;if(!file)return;
@@ -1087,26 +1121,44 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
    const parsed=parseNumbers(text);
    if(revision!==fileRevision||!dialog.open)return;
    imported={name:file.name,importedAt:new Date().toISOString(),...parsed};showImport();
-   status(parsed.numbers.length?'号码已导入配置草稿，原 TXT 不变。':'未找到有效号码，请检查文件内容。',!parsed.numbers.length);
+   status(parsed.numbers.length?'号码已导入，原 TXT 不变。':'未找到有效号码，请检查文件内容。',!parsed.numbers.length);scheduleLocalDraftSave();
   }catch{if(revision===fileRevision)status('文件读取失败，请检查文件编码或重新选择。',true);}
  });
- form.addEventListener('submit',event=>{
+ get('cancel').addEventListener('click',async()=>{
+  const id=get('cancel').dataset.taskId;if(!id)return;
+  get('cancel').disabled=true;
+  try{await deviceRequest('/api/sms-tasks/'+encodeURIComponent(id)+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'},8000);taskStatus('已请求取消；正在发送的单条短信会先完成，不会自动重发。');void refreshTask(id);}
+  catch(error){taskStatus('取消失败：'+error.message,true);}
+  finally{get('cancel').disabled=false;}
+ });
+ form.addEventListener('submit',async event=>{
   event.preventDefault();captureDevices();
+  if(inflight)return;
+  if(devicePreview){status('预览模式不能创建或发送短信任务。',true);return;}
   const available=new Set(latest.filter(device=>!device.readonly&&device.enabled!==false).map(device=>device.udid));
+  const ready=new Set(latest.filter(device=>device.ready&&!device.readonly&&device.enabled!==false).map(device=>device.udid));
   const selected=Object.entries(devices).filter(([id,value])=>value.selected&&available.has(id));
   if(!imported?.numbers.length){status('请先导入有效号码 TXT。',true);return;}
-  if(imported.invalid.length){status('TXT 存在无效行，请修正后重新导入；尚未保存。',true);return;}
+  if(imported.invalid.length){status('TXT 存在无效行，请修正后重新导入；任务未创建。',true);return;}
   const library=texts();if(!library.length||library.some(text=>text.length>6000)){status('文本库至少需要一条正文，每条不超过 6000 字。',true);return;}
   if(!selected.length){status('请至少勾选一台参与设备。',true);return;}
   if(selected.some(([,value])=>!Number.isInteger(value.min)||!Number.isInteger(value.max)||value.min<1||value.max<value.min||value.max>86400)){status('请检查勾选设备的间隔：1–86400 秒，最大值不能小于最小值。',true);return;}
-  const concurrency=Number(get('concurrency').value);if(!Number.isInteger(concurrency)||concurrency<1||concurrency>20){status('同时操作设备数须为 1–20。',true);return;}
+  const concurrency=Number(get('concurrency').value);if(!Number.isInteger(concurrency)||concurrency<1||concurrency>20||concurrency>selected.length){status('同时操作设备数须为 1–20，且不能超过所选设备数。',true);return;}
   const startMode=form.querySelector('[name=new-sms-start-mode]:checked').value,startLocal=get('start-at').value;
   if(startMode==='scheduled'&&(!startLocal||!Number.isFinite(new Date(startLocal).getTime())||new Date(startLocal).getTime()<=Date.now())){status('请选择未来的定时开始日期和时间。',true);return;}
-  const currentDevices=Object.fromEntries(Object.entries(devices).filter(([id])=>latest.some(device=>device.udid===id)));
-  const draft={version:1,name:get('name').value.trim(),imported,texts:library,devices:currentDevices,concurrency,startMode,startLocal,
-   timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,startAt:startMode==='scheduled'?new Date(startLocal).toISOString():null,savedAt:new Date().toISOString(),status:'draft'};
-  try{localStorage.setItem(storageKey,JSON.stringify(draft));status('草稿已保存：'+imported.numbers.length+' 个号码 · '+library.length+' 条文本 · '+selected.length+' 台设备。尚未开始发送。');}
-  catch{status('草稿保存失败，可能是浏览器存储空间不足。请保留当前配置后重试。',true);}
+  if(startMode==='immediate'&&selected.some(([id])=>!ready.has(id))){status('立即发送所选设备必须已就绪；设备恢复画面后重试，或改为定时发送。',true);return;}
+  const taskDevices=Object.fromEntries(selected.map(([id,value])=>[id,{min:value.min,max:value.max}]));
+  const payload={name:get('name').value.trim(),numbers:imported.numbers,texts:library,devices:taskDevices,concurrency,startMode,
+   startAt:startMode==='scheduled'?new Date(startLocal).toISOString():null,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone};
+  inflight=true;get('submit').disabled=true;get('submit').setAttribute('aria-busy','true');status(startMode==='scheduled'?'正在保存定时发送任务…':'正在创建立即发送任务…');
+  try{
+   const task=await deviceRequest('/api/sms-tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)},20000);
+   lastTaskId=task.id;try{localStorage.setItem(lastTaskKey,lastTaskId);}catch{}
+   status(startMode==='scheduled'?'定时发送任务已保存；到时会自动执行。':'立即发送任务已创建，后台开始执行。');
+   taskStatus(taskLabel(task));get('cancel').dataset.taskId=task.id;get('cancel').hidden=false;
+   watchTask(task.id);
+  }catch(error){status('任务未创建：'+error.message,true);}
+  finally{inflight=false;get('submit').disabled=false;get('submit').removeAttribute('aria-busy');}
  });
 })();
 

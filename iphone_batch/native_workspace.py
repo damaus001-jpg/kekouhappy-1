@@ -431,6 +431,98 @@ async def list_page(service, phone, toolbar_only=False):
     return records
 
 
+def task_recipient_confirmed(records, number):
+    key = phone_key(number)
+    return bool(key and any(
+        ', Button' in (row.get('caption') or '') and
+        any(phone_key(part) == key for part in row['caption'].split(', '))
+        for row in records))
+
+
+def write_task_unit(path, value, status, *, error=None, sent_at=None):
+    from sms_tasks import SmsTaskRunner
+    SmsTaskRunner.write_unit_status(path, value, status, error=error, sent_at=sent_at)
+
+
+async def send_task_unit(service, args, record_path):
+    """Send one persisted task unit only after exact recipient/body checks."""
+    task_root = (ROOT/'workspace'/'sms-tasks').resolve()
+    try:
+        relative = record_path.relative_to(task_root)
+    except ValueError:
+        raise ValueError('短信任务记录路径无效') from None
+    if (len(relative.parts) != 3 or relative.parts[1] != 'items' or
+            not re.fullmatch(r'[a-f0-9]{32}', relative.parts[0]) or
+            not re.fullmatch(r'\d{5}\.json', relative.parts[2])):
+        raise ValueError('短信任务记录路径无效')
+    record = json.loads(record_path.read_text(encoding='utf-8'))
+    task_id = relative.parts[0]
+    if (record.get('version') != 1 or record.get('task_id') != task_id or
+            record.get('device') != args.device or record.get('status') != 'ready'):
+        raise ValueError('短信任务记录状态或设备不匹配')
+    number = record.get('number')
+    text = validate_send_text(record.get('text'))
+    if not re.fullmatch(r'\+[1-9][0-9]{6,14}', str(number or '')):
+        raise ValueError('短信任务号码无效')
+    phone = NativeConversation(); phone.base = args.base
+
+    # Do not replace or send any text already present in the current composer.
+    before = await raw_page(service)
+    if any(row['caption'].startswith('Send, Button') for row in before):
+        raise ValueError('手机存在未发送草稿，请先处理；任务未发送')
+    await phone.chord(0x11)
+    await asyncio.sleep(.35)
+    compose = await raw_page(service)
+    captions = [row['caption'] for row in compose]
+    if (not any(c.startswith('New Message, Show Conversation Details, Button') for c in captions)
+            or 'To:' not in captions or not composer_is_empty(captions)):
+        raise ValueError('未确认空白新短信页面；任务未发送')
+    await phone.paste(number)
+    await asyncio.sleep(.4)
+    entered = await raw_page(service)
+    entered_captions = [row['caption'] for row in entered]
+    if not any(c.startswith('To:, ') and phone_key(c[5:]) == number for c in entered_captions):
+        raise ValueError('输入的收件号码未确认；任务未发送')
+    await phone.keys([0x28]); await phone.keys([]); await asyncio.sleep(.5)
+    selected = await raw_page(service)
+    selected_captions = [row['caption'] for row in selected]
+    if not task_recipient_confirmed(selected, number):
+        raise ValueError('手机未确认选择了完全匹配的收件号码；任务未发送')
+    if not composer_is_empty(selected_captions):
+        raise ValueError('新短信输入框非空，已保留手机草稿；任务未发送')
+    try:
+        prior = context(selected)
+        before_count = sum(m.get('side') == 'outgoing' and m.get('text') == text
+                           for m in prior.get('messages', []))
+    except ValueError:
+        before_count = 0
+
+    point = await asyncio.to_thread(input_point, phone)
+    await tap(phone, point)
+    await phone.paste(text)
+    await asyncio.sleep(.5)
+    prepared = await raw_page(service)
+    prepared_send_control({'phone_number': number, 'raw_elements': prepared}, number, text)
+    send_location = await asyncio.to_thread(send_point, phone)
+
+    # This durable marker is written before the irreversible tap. A restart after
+    # this point is treated as uncertain and the task runner will never retry it.
+    record.update(status='send_requested', send_requested_at=datetime.now().astimezone().isoformat())
+    write_task_unit(record_path, record, 'send_requested')
+    await tap(phone, send_location)
+    await asyncio.sleep(1)
+    after = await read(service)
+    after_count = sum(m.get('side') == 'outgoing' and m.get('text') == text
+                      for m in after.get('messages', []))
+    if after.get('phone_number') != number or after_count <= before_count or any(
+            row.get('caption') == 'Message, ' + text for row in after.get('raw_elements', [])):
+        raise RuntimeError('发送结果未确认；请核对手机，系统不会自动重发')
+    sent_at = datetime.now().astimezone().isoformat()
+    write_task_unit(record_path, record, 'sent_verified', sent_at=sent_at)
+    return {'status': 'sent_verified', 'device': args.device, 'phone_number': number,
+            'sent_at': sent_at}
+
+
 async def run(args):
     lockdown = await open_paired_usb(args.device, ROOT)
     try:
@@ -462,6 +554,10 @@ async def run(args):
             if args.action == 'open':
                 phone = NativeConversation(); phone.base = args.base
                 return {'device':args.device, **await open_phone_conversation(service, phone, args.phone)}
+            if args.action == 'campaign_send':
+                if not args.record:
+                    raise ValueError('短信任务记录缺失')
+                return await send_task_unit(service, args, Path(args.record).resolve())
             if args.action == 'unread':
                 phone = NativeConversation(); phone.base = args.base
                 records = await list_page(service, phone)
@@ -565,7 +661,7 @@ async def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', required=True)
-    parser.add_argument('--action', choices=['page', 'auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail', 'capture', 'latest', 'identify', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification', 'banner'], required=True)
+    parser.add_argument('--action', choices=['page', 'auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail', 'capture', 'latest', 'identify', 'history', 'send', 'campaign_send', 'unread', 'open', 'notifications', 'open_notification', 'banner'], required=True)
     parser.add_argument('--base'); parser.add_argument('--record')
     parser.add_argument('--phone')
     args = parser.parse_args()

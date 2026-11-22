@@ -34,7 +34,7 @@ class NativeSendTests(unittest.IsolatedAsyncioTestCase):
             if point==self.send:
                 self.assertEqual(json.loads(self.path.read_text())['status'],'send_requested')
         with patch('native_workspace.ROOT',self.root), \
-             patch('native_workspace.create_using_usbmux',new=AsyncMock(return_value=AsyncMock())), \
+             patch('native_workspace.open_paired_usb',new=AsyncMock(return_value=AsyncMock())), \
              patch('native_workspace.AccessibilityAudit',return_value=audit), \
              patch('native_workspace.NativeConversation',return_value=self.phone), \
              patch('native_workspace.load_profile',return_value=None), \

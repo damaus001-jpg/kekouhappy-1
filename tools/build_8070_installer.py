@@ -55,7 +55,7 @@ def stage_files(stage,build,electron,version,host_only=False):
         if candidate.is_file():shutil.copy2(candidate,runtime/'NODE-LICENSE.txt');break
     print('Copying 8070 source and web assets; excluding runtime data...',flush=True)
     files=command(['git','-c','safe.directory='+ROOT.as_posix(),'-c','core.quotepath=false','ls-files','iphone_batch']).stdout.splitlines()
-    files=sorted(set(files+['iphone_batch/host_access.py','iphone_batch/host_control.py','iphone_batch/web/workspace_theme.js','iphone_batch/message_banner.py']))
+    files=sorted(set(files+['iphone_batch/host_access.py','iphone_batch/host_control.py','iphone_batch/web/workspace_theme.js','iphone_batch/message_banner.py','iphone_batch/sms_tasks.py']))
     for name in files:
         relative=Path(name)
         if '.device-data' in relative.parts or '__pycache__' in relative.parts or relative.name.startswith('test_'):continue
@@ -72,7 +72,7 @@ def stage_files(stage,build,electron,version,host_only=False):
         '首次使用：\n1. 安装 Apple Mobile Device USB 驱动与服务（可通过 Apple 官方 iTunes 安装）。\n'
         '2. 解锁手机、连接 USB，确认信任电脑并开启开发者模式。首次准备开发者镜像可能需要联网。\n'
         '3. 打开“皮卡丘手机工作台”，点击“启动并打开工作台”，允许 USB 隧道所需的管理员授权。\n'
-        '4. 新建短信当前为配置草稿界面，保存草稿不会自动开始任务。\n\n'
+        '4. 新建短信可立即发送或按本机时区定时发送；任务会在工作台后台运行，发送结果不明时不会自动重发。\n\n'
         '本安装包不包含开发机的号码、短信、配对、密钥、账号或浏览器登录。\n'
         '新电脑使用自己的本机访问凭据，不需要安装另一个授权客户端。\n'
         '安装结束不会自动启动，也不会连接或操作手机。已有其他手机工作台后台时请先通过对应后台管理关闭。\n'
@@ -87,7 +87,7 @@ def stage_files(stage,build,electron,version,host_only=False):
             'Apple USB驱动需通过Apple官方软件准备；手机需解锁、信任电脑及开启开发者模式。\n'
             '首次开发者镜像准备可能联网，共享USB隧道需要Windows管理员授权。\n'
             '关闭皮卡丘主窗口不等于彻底关闭后台；彻底关闭会断开本后台全部设备连接。\n'
-            '安装结束不自动启动，不包含开发机业务数据或密钥。新建短信仍只保存配置草稿。\n'
+            '安装结束不自动启动，不包含开发机业务数据或密钥。新建短信支持立即发送和定时发送任务。\n'
             '卸载不主动清除运行期间产生的业务数据。\n',encoding='utf-8-sig')
         return
     print('Copying standalone Electron runtime (no other application source or profiles)...',flush=True)

@@ -513,6 +513,29 @@ def main():
     reconnects=DeviceReconnects(rebuild_device,viewer_video_ready,finish_reconnect,stopping,
         queued=lambda device:startup_queue.pending(device['udid']))
 
+    from sms_tasks import SmsTaskRunner, SmsTaskWait
+    sms_task_busy=set()
+    sms_task_busy_lock=threading.Lock()
+    def sms_device_busy(udid):
+        with sms_task_busy_lock:return udid in sms_task_busy
+    def set_sms_device_busy(udid,busy):
+        with sms_task_busy_lock:
+            if busy:sms_task_busy.add(udid)
+            else:sms_task_busy.discard(udid)
+    def sms_task_devices():
+        return {row['udid']: row for row in devices}
+    def deliver_sms_task_unit(udid, job, item, unit_path):
+        target=next((row for row in devices if row['udid']==udid),None)
+        if target is None or not control_allowed(target):raise SmsTaskWait('等待所选手机重新接入并允许操作')
+        if reconnects.pending(udid) or not viewer_ready(target) or udid in trust_pending:
+            raise SmsTaskWait('等待所选手机画面与操控恢复')
+        with workspace_service.device_lock(udid):
+            with manager.notification_lease(udid):
+                return workspace_service.send_campaign_unit(
+                    udid,f"http://127.0.0.1:{target['port']}",unit_path)
+    sms_task_runner=SmsTaskRunner(ROOT/'.device-data',sms_task_devices,
+                                  deliver_sms_task_unit,stopping,device_activity=set_sms_device_busy)
+
     cpu_usage = CpuUsage()
     from foreground_reader import ForegroundReader
     foreground_reader = ForegroundReader(workspace_service, lambda udid:
@@ -556,6 +579,15 @@ def main():
                     return self.respond(200, path.read_bytes(), assets[self.path])
                 return self.respond(404, {'error': 'asset not found'})
             parsed = urlsplit(self.path)
+            if parsed.path == '/api/sms-tasks':
+                query=parse_qs(parsed.query)
+                identifier=query.get('id',[''])[0]
+                try:
+                    if identifier:return self.respond(200,sms_task_runner.snapshot(identifier))
+                    limit=int(query.get('limit',['20'])[0])
+                    return self.respond(200,{'tasks':sms_task_runner.list(limit)})
+                except (ValueError,TypeError):
+                    return self.respond(404,{'error':'短信任务不存在或查询参数无效'})
             if parsed.path == '/api/cpu':
                 return self.respond(200, {'cpu_percent': cpu_usage.snapshot()})
             if parsed.path == '/api/contact-profile':
@@ -588,6 +620,7 @@ def main():
                 rows.append({**device,'ready':ready and not reconnects.pending(device['udid']),'active':manager.active==device['udid'],
                              'enabled':connection_allowed(device, enabled),
                              'readonly':device['udid'] in readonly,
+                             'sms_task_busy':sms_device_busy(device['udid']),
                              **reconnects.snapshot(device['udid']),
                              **input_readiness_snapshot(device['udid']), 'trust_pending':device['udid'] in trust_pending,
                              'notifications':notifications})
@@ -596,6 +629,34 @@ def main():
         def do_POST(self):
             if not self.allowed():
                 return self.respond(403,{'error':'请从授权客户端打开短信工作台'})
+            if self.path == '/api/sms-tasks':
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=4*1024*1024:raise ValueError('短信任务请求为空或过大')
+                    self.connection.settimeout(20)
+                    body=json.loads(self.rfile.read(length))
+                    if not isinstance(body,dict):raise ValueError('短信任务格式无效')
+                    selected=body.get('devices')
+                    if not isinstance(selected,dict):raise ValueError('设备设置无效')
+                    for udid in selected:
+                        target=next((row for row in devices if row['udid']==udid),None)
+                        if target is None:raise ValueError('所选设备已不存在，请刷新后重试')
+                        require_control(target)
+                        if body.get('startMode')=='immediate' and (
+                                reconnects.pending(udid) or not viewer_ready(target)):
+                            raise ValueError('立即发送所选设备尚未就绪，请恢复画面后重试')
+                    result=sms_task_runner.create(body)
+                    return self.respond(202,result)
+                except (ValueError,TypeError,KeyError) as exc:
+                    return self.respond(400,{'error':str(exc)})
+                except Exception:
+                    return self.respond(503,{'error':'短信任务未创建，请刷新设备状态后重试；没有发送短信'})
+            if self.path.startswith('/api/sms-tasks/') and self.path.endswith('/cancel'):
+                try:
+                    identifier=self.path.removeprefix('/api/sms-tasks/').removesuffix('/cancel')
+                    return self.respond(200,sms_task_runner.cancel(identifier))
+                except ValueError as exc:
+                    return self.respond(400,{'error':str(exc)})
             if self.path == '/api/foreground':
                 try:
                     length = int(self.headers.get('Content-Length', '0'))
@@ -857,6 +918,7 @@ def main():
         threading.Thread(target=watch_viewers,daemon=True).start()
         threading.Thread(target=watch_input_readiness,daemon=True).start()
         threading.Thread(target=notification_monitor.run,daemon=True).start()
+        threading.Thread(target=sms_task_runner.run,name='sms-task-scheduler',daemon=True).start()
         controller.emit({'status':'dashboard_ready','url':f'http://127.0.0.1:{args.port}/','devices':devices})
         server.serve_forever(poll_interval=0.25)
     finally:

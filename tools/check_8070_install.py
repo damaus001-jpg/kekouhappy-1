@@ -77,7 +77,7 @@ def check(output):
     modules={}
     for name in ('tkinter','av','cv2','numpy','psutil','win32api','win32clipboard',
                  'cryptography','PIL','onnxruntime','rapidocr','pymobiledevice3',
-                 'dashboard','backend_control','viewer_patch','native_workspace','native_message_page'):
+                 'dashboard','backend_control','viewer_patch','native_workspace','native_message_page','sms_tasks'):
         module=importlib.import_module(name)
         filename=getattr(module,'__file__',None)
         if filename and not Path(filename).resolve().is_relative_to(ROOT):

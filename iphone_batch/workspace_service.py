@@ -539,6 +539,13 @@ class WorkspaceService:
                 result['reading_error'] = str(exc)
             return result
 
+    def send_campaign_unit(self, device, base, record_path):
+        """Send one task unit through the native, exact-recipient send verifier."""
+        result = self.native(device, 'campaign_send', base, record=Path(record_path))
+        if result.get('status') != 'sent_verified' or result.get('device') != device:
+            raise ValueError('手机未确认此号码的发送结果')
+        return result.get('status')
+
     def save_sent_conversation(self, device, record, result):
         previous = self.conversation(device, record['conversation_id'])
         contact = record['phone_number']
