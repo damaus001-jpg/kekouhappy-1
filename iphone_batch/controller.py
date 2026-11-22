@@ -347,6 +347,29 @@ async def screen_service_command(udid, args, timeout):
             await process.wait()
 
 
+def ensure_usb_tunnel(udid):
+    """Rebuild only this phone's tunnel; a listed entry may be stale after disconnect."""
+    from urllib.parse import urlencode
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    base = 'http://127.0.0.1:49151'
+    try:
+        with opener.open(base+'/', timeout=5) as response:
+            tunnels = json.load(response)
+        if isinstance(tunnels, dict) and tunnels.get(udid):
+            emit({'status':'refreshing_usb_tunnel','udid':udid})
+            cancel = base+'/cancel?'+urlencode({'udid':udid})
+            with opener.open(cancel, timeout=15) as response:
+                response.read()
+        emit({'status':'preparing_usb_tunnel','udid':udid})
+        target = base+'/start-tunnel?'+urlencode({'udid':udid,'connection_type':'usbmux'})
+        with opener.open(target, timeout=30) as response:
+            result = json.load(response)
+        if not isinstance(result, dict) or not result.get('address') or not result.get('port'):
+            raise ValueError('隧道服务未返回有效连接')
+    except (OSError, ValueError) as error:
+        raise RuntimeError('此手机的 USB 隧道尚未就绪，请保持解锁并完成信任后重新连接；未关闭其他手机隧道') from error
+
+
 async def ensure_screen_services(udid):
     code, mode, error = await screen_service_command(udid, ['mounter', 'query-developer-mode-status'], 25)
     if code:
@@ -355,6 +378,7 @@ async def ensure_screen_services(udid):
         raise RuntimeError('无法建立手机可信连接，请解锁手机并确认信任此电脑')
     if mode.lower() != 'true':
         raise RuntimeError('开发者模式未开启，请在手机“设置 → 隐私与安全性”开启，重启后确认')
+    await asyncio.to_thread(ensure_usb_tunnel, udid)
     media = ['developer', 'core-device', 'display', 'get-media-support-info']
     code, _, _ = await screen_service_command(udid, media, 30)
     if not code:

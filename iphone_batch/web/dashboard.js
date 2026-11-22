@@ -240,26 +240,6 @@ if(globalMonitor){
 function showGlobalMonitor(){
  closeDeviceMenu();globalMonitor?.scrollToTop();
 }
-const autoScanSwitch=document.getElementById('auto-scan');
-let autoScanEnabled=true,autoScanUpdating=false,scanRevision=0;
-function syncAutoScan(enabled){
- if(typeof enabled!=='boolean'||autoScanUpdating)return;
- autoScanEnabled=enabled;
- if(autoScanSwitch){autoScanSwitch.checked=enabled;autoScanSwitch.disabled=devicePreview;}
-}
-autoScanSwitch?.addEventListener('change',async()=>{
- if(autoScanUpdating||devicePreview)return;
- const enabled=autoScanSwitch.checked;
- autoScanUpdating=true;scanRevision++;autoScanSwitch.disabled=true;
- try{
-  const response=await fetch('/api/notification-scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
-  const result=await response.json();
-  if(!response.ok||typeof result.enabled!=='boolean')throw Error(result.error||'遍历开关未完成，请重试');
-  autoScanEnabled=result.enabled;render(latest,active);
-  notice(result.enabled?'自动遍历已开启':'自动遍历已关闭，可以测试投屏操作速度。');
- }catch(error){notice(error.message);}
- finally{autoScanUpdating=false;scanRevision++;syncAutoScan(autoScanEnabled);refresh();}
-});
 let refreshingDevices=false,deviceRefreshQueued=false;
 const refreshDevicesButton=document.getElementById('refresh-devices');
 function syncDeviceRefreshControls(){
@@ -862,7 +842,7 @@ function render(rows,selected,controller=controlOwner){
  if(screenshotDialog.open&&(!rows.some(d=>d.udid===selected&&d.ready)||screenshotDialog.dataset.device!==selected)){
   screenshotDialog.close();clearPhoneScreenshot();
  }
- controlPaused=autoScanEnabled&&rows.some(row=>row.udid===selected&&row.notifications?.state==='scanning');
+ controlPaused=false;
  syncScreenshotActions();
  if(phoneHomeButton)phoneHomeButton.disabled=!(controlOwner===selected&&rows.some(row=>row.udid===selected&&row.ready))||busy||workspaceBusy||controlPaused||devicePreview;
  const selectedDevice=rows.find(device=>device.udid===selected);
@@ -899,10 +879,10 @@ function render(rows,selected,controller=controlOwner){
   }
   const setupError=String(d.error||'');
   const setupState=d.enabled===false?'已手动断开':setupError.includes('开发者模式未开启')?'开发者模式关闭':setupError.includes('信任')?'需解锁并信任':setupError.includes('镜像准备失败')?'投屏准备失败':'正在准备投屏';
-  detail.textContent=devicePreview?'':!d.ready?setupState:d.readonly?'仅监看':notification?.manual_control?'当前控制':!autoScanEnabled?'遍历已关闭':notification?.protected?'草稿保护':
-   notification?.state==='scanning'?'检查中':notification?.state==='paused'?'检查暂停':
-   notification?.last_checked?(count?'有新通知':'暂无通知'):'待检查';
-  entry.title='设备 '+number+' · '+remark.textContent+' · '+d.name+' · '+d.udid.slice(-8)+' · '+detail.textContent+' · '+count+' 张短信通知卡片'+
+  detail.textContent=devicePreview?'':!d.ready?setupState:d.readonly?'仅监看':notification?.manual_control?'当前控制':notification?.protected?'草稿保护':
+   notification?.state==='scanning'?'读取横幅':notification?.state==='paused'?'检查暂停':
+   notification?.last_checked?(count?'有新消息提示':'暂未发现横幅'):'待检查';
+  entry.title='设备 '+number+' · '+remark.textContent+' · '+d.name+' · '+d.udid.slice(-8)+' · '+detail.textContent+' · '+count+' 条已发现的短信横幅提示（非完整未读数）'+
    (d.error?' · '+d.error:notification?.error?' · '+notification.error:notification?.last_checked?' · 最近检查：'+new Date(notification.last_checked).toLocaleString():'');
   entry.setAttribute('aria-label',entry.title);
   entry.append(phone,name,remark);if(detail.textContent)entry.append(detail);entry.onclick=()=>select(d.udid);
@@ -994,7 +974,7 @@ async function refreshCpuUsage(){
  catch{showCpuUsage(null);}
  finally{cpuRefreshing=false;}
 }
-async function refresh(){if(devicePreview){showCpuUsage(null);syncAutoScan(false);render(previewDevices,previewSelection);return;}const revision=selectionRevision,scanVersion=scanRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);if(scanVersion===scanRevision)syncAutoScan(j.scan_enabled);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){notice('管理页面连接中断');}}
+async function refresh(){if(devicePreview){showCpuUsage(null);render(previewDevices,previewSelection);return;}const revision=selectionRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){notice('管理页面连接中断');}}
 refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInterval(refreshCpuUsage,3000);}
 
 // New-message task editor. Saving here persists configuration only; execution

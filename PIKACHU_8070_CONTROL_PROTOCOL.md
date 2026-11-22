@@ -45,6 +45,14 @@ state 为 `running`、`stopped`、`residual`、`unknown`；`residual` 表示主�
 
 退出码：0 成功，1 操作失败，2 安装文件缺失，3 授权失败，4 其他启停操作进行中。code 分别为 `OPERATION_FAILED`、`MISSING_FILES`、`AUTH_REQUIRED`、`BUSY`。宿主不能把非零退出码或不合法 JSON 当成功。
 
+## 页面主题联动（独立于后台启停）
+
+工作台在样式表加载前提供 `window.pikachuWorkspaceTheme.apply({version:1, theme})`，返回布尔值。主题仅接受 `pink`、`blackGold`、`murongPurple`、`clearWaterBlue`；非法请求返回 false，不更改显示或存储。粉色强调色为 `#FF70B6`，紫色 `#B48EAD`，蓝色 `#4AADE8`。金色撤销全部主题覆盖，精确沿用原配色。仅调整装饰性强调色，深色底和错误、资源警告等语义色保留。
+
+皮卡丘通过已有 Apple webview 的 executeJavaScript 桥发送主题；仅在 `http://127.0.0.1:8070` 顶层页面调用，主题切换时广播全部已挂载的 Apple 页面，并在 dom-ready/did-finish-load 后补发。工作台以 `pikachu-workspace-theme-v1` 为 localStorage 键记忆主题，同源窗口通过 storage 事件同步。首次无记录默认金色；存储不可用不阻断即时换色。独立浏览器没有额外跨客户端通信服务。安装器固定黑底加 `#FF70B6`，不跟随主题，不提供主题切换。
+
+验证：`node tools/test-workspace-theme.cjs`；隔离浏览器验证使用 `<Electron.exe> tools/test-workspace-theme-electron.cjs <皮卡丘项目目录>`，通过内存 HTTP 协议处理器加载实际工作台样式和双方桥接脚本，不连接真实后台或手机。
+
 ## 启动约束与交付边界
 
 新安装包移除独立 Electron 客户端、桌面及开始菜单启停入口，部署上述策略文件。安装模式下 Backend.start/stop 与 dashboard.main 均检查授权；后台子进程使用独立短期启动凭据，直接运行 dashboard.py 在发现设备前拒绝。普通浏览器仍受原有网页签名校验。

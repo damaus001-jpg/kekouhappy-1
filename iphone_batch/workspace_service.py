@@ -44,7 +44,7 @@ class WorkspaceService:
         if record: command += ['--record', str(record)]
         if phone: command += ['--phone', phone]
         flags = 0x08000000 if sys.platform=='win32' else 0
-        if action == 'notifications':
+        if action in ('notifications', 'banner'):
             process = self.notification_runner.run(device, command, timeout=130,
                 encoding='utf-8', creationflags=flags)
         else:
@@ -493,6 +493,20 @@ class WorkspaceService:
                 self.write(path,row)
                 pending.append(row)
             result['items'] = pending
+            return result
+
+    def banner_notifications(self, device, base):
+        with self.device_lock(device):
+            result = self.native(device, 'banner', base)
+            if result.get('source') != 'banner':
+                raise ValueError('横幅来源未核验')
+            for row in result.get('items', []):
+                if row.get('device') != device or row.get('app') != 'Messages':
+                    raise ValueError('横幅设备或来源不匹配')
+                path = self.notification_path(row['id'])
+                previous = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+                self.write(path, {**previous, **row, 'status':previous.get('status','pending'),
+                                 'discovered_at':previous.get('discovered_at',datetime.now().isoformat())})
             return result
 
     def send(self, device, identifier, base, confirm):

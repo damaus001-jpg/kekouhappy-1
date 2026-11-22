@@ -53,13 +53,16 @@ class GatewayTests(unittest.TestCase):
         except urllib.error.HTTPError as error:return error.code,error.read()
 
     def test_browser_and_spoofed_browser_cannot_open_pages_assets_or_api(self):
-        for path in ['/','/dashboard.js','/workspace.js','/api/state','/api/messages?device=13']:
+        for path in ['/','/dashboard.js','/workspace.js','/workspace_theme.js','/api/state','/api/messages?device=13']:
             self.assertEqual(self.request(path)[0],403,path)
         self.assertEqual(self.request('/api/devices/trust','POST')[0],403)
 
     def test_signed_app_can_open_page_assets_and_state(self):
         self.assertEqual(self.request(auth=True)[0],200)
         self.assertEqual(self.request('/dashboard.js',auth=True)[0],200)
+        theme_status,theme_source=self.request('/workspace_theme.js',auth=True)
+        self.assertEqual(theme_status,200)
+        self.assertIn(b'pikachuWorkspaceTheme',theme_source)
         status,data=self.request('/api/state',auth=True)
         self.assertEqual(status,200)
         self.assertEqual(json.loads(data)['devices'],[])

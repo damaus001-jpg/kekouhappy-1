@@ -64,12 +64,20 @@ class NotificationMonitor:
 
     def record(self, device, result):
         with self.lock:
-            previous={row.get('id') for row in self.states[device]['items']}
+            old_items=self.states[device]['items']
+            previous={row.get('id') for row in old_items}
+            if result.get('source') == 'banner':
+                # A disappeared banner is not evidence that a message was read.
+                merged={row['id']:row for row in old_items}
+                merged.update({row['id']:row for row in result['items']})
+                result={**result,'items':list(merged.values())[-200:]}
             new_cards=any(row.get('id') not in previous for row in result['items'])
             self.states[device].update(state='checked',last_checked=datetime.now(timezone.utc).isoformat(),
                 items=result['items'],error=None,failures=0,
                 pending_contacts=len({r.get('phone_number') or r.get('sender') for r in result['items']}),
                 next_due=time.monotonic()+self.interval)
+            if result.get('source') == 'banner':
+                self.states[device].update(source='banner', scope='observed_previews', complete=False)
         if new_cards and self.on_new_cards:
             try:
                 self.on_new_cards(device)

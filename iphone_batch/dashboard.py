@@ -12,7 +12,7 @@ import time
 import urllib.request
 from urllib.parse import urlsplit, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor, wait
 import controller
 from workspace_access import AccessVerifier, HEADER, signed_opener
@@ -201,30 +201,13 @@ def main():
     from notification_monitor import NotificationMonitor
     from device_reconnect import DeviceReconnects, reset_phone_session, repair_phone_trust, reboot_phone
     notification_monitor=NotificationMonitor(devices,workspace_service.phone_lock,
-        manager.notification_lease,workspace_service.notifications,
+        lambda device: nullcontext(),workspace_service.banner_notifications,
         lambda d: control_allowed(d) and not reconnects.pending(d['udid']) and viewer_ready(d),stopping,
-        lock_for=workspace_service.device_lock,manual_device=lambda: manager.active,
+        interval=2,lock_for=workspace_service.device_lock,manual_device=lambda: manager.active,
         on_new_cards=play_notification_sound)
-    scan_policy_path=ROOT/'.device-data'/'workspace'/'scan-policy.json'
-    scan_policy_lock=threading.Lock()
-    try:
-        scan_enabled=json.loads(scan_policy_path.read_text(encoding='utf-8')).get('enabled',True)
-        if not isinstance(scan_enabled,bool):scan_enabled=True
-    except (OSError,ValueError,AttributeError):scan_enabled=True
-    workspace_service.notification_runner.set_enabled(scan_enabled)
-    notification_monitor.set_enabled(scan_enabled)
-
-    def set_scan_enabled(enabled):
-        with scan_policy_lock:
-            workspace_service.write(scan_policy_path,{'enabled':enabled})
-            if enabled:
-                workspace_service.notification_runner.set_enabled(True)
-                notification_monitor.set_enabled(True)
-                cancelled=0
-            else:
-                notification_monitor.set_enabled(False)
-                cancelled=workspace_service.notification_runner.set_enabled(False)
-            return {'enabled':notification_monitor.enabled,'cancelled':cancelled}
+    # Banner discovery has no legacy scan-policy or gesture-control lease.
+    workspace_service.notification_runner.set_enabled(True)
+    notification_monitor.set_enabled(True)
 
     def start_viewer_now(device):
         if not connection_allowed(device, enabled):
@@ -565,6 +548,7 @@ def main():
                 return self.respond(200,(ROOT/'web/workspace.html').read_bytes(),'text/html; charset=utf-8')
             assets = {'/dashboard.css': 'text/css; charset=utf-8', '/dashboard.js': 'text/javascript; charset=utf-8',
                       '/foreground.js': 'text/javascript; charset=utf-8',
+                      '/workspace_theme.js': 'text/javascript; charset=utf-8',
                       '/workspace.js': 'text/javascript; charset=utf-8', '/gpt_export.js': 'text/javascript; charset=utf-8', '/contact_profile.js': 'text/javascript; charset=utf-8', '/electric-doodles.svg':'image/svg+xml', '/brand-logo.jpg': 'image/jpeg'}
             if self.path in assets:
                 path = ROOT/'web'/self.path.lstrip('/')
@@ -658,17 +642,7 @@ def main():
                 except (ValueError,TypeError) as error:return self.respond(400,{'error':str(error)})
                 except Exception:return self.respond(503,{'error':'设备开关未完成，请检查状态；没有发送短信'})
             if self.path=='/api/notification-scan':
-                try:
-                    length=int(self.headers.get('Content-Length','0'))
-                    if not 0<length<=1024:raise ValueError('无效请求')
-                    self.connection.settimeout(10)
-                    body=json.loads(self.rfile.read(length))
-                    if not isinstance(body,dict) or not isinstance(body.get('enabled'),bool):raise ValueError('无效的遍历开关状态')
-                    return self.respond(200,set_scan_enabled(body['enabled']))
-                except (ValueError,TypeError) as exc:
-                    return self.respond(400,{'error':str(exc)})
-                except Exception:
-                    return self.respond(503,{'error':'遍历开关未完成，请刷新状态后重试'})
+                return self.respond(410,{'error':'旧通知中心遍历已移除，现使用通知横幅发现'})
             if self.path in ('/api/devices/reconnect','/api/devices/reboot'):
                 try:
                     length=int(self.headers.get('Content-Length','0'))

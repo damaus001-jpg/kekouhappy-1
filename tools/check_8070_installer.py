@@ -42,7 +42,9 @@ def run(args,env=None,timeout=900):
     subprocess.run([str(x) for x in args],env=env,check=True,timeout=timeout,creationflags=0x08000000)
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('installer',type=Path);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('installer',type=Path)
+    parser.add_argument('--language', choices=('chinesesimp','english'), default='chinesesimp')
+    args=parser.parse_args()
     for hive in (winreg.HKEY_CURRENT_USER,winreg.HKEY_LOCAL_MACHINE):
         for view in (winreg.KEY_WOW64_32KEY,winreg.KEY_WOW64_64KEY):
             try:
@@ -57,9 +59,16 @@ def main():
     env=os.environ.copy()
     for key in ('PYTHONHOME','PYTHONPATH','ELECTRON_RUN_AS_NODE'):env.pop(key,None)
     env.update(PATH=str(Path(os.environ['SystemRoot'])/'System32'),LOCALAPPDATA=str(validation/'fresh-user'),PYTHONUTF8='1')
-    report={'version':version,'relocated_install':False,'uninstalled':False}
+    report={'version':version,'language':args.language,'relocated_install':False,'uninstalled':False}
     try:
-        run([args.installer.resolve(),'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOICONS','/MERGETASKS=!desktopicon','/DIR='+str(target),'/LOG='+str(validation/'install.log')],env)
+        run([args.installer.resolve(),'/LANG='+args.language,'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOICONS','/MERGETASKS=!desktopicon','/DIR='+str(target),'/LOG='+str(validation/'install.log')],env)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,KEY,0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as uninstall_registry:
+            display_name=winreg.QueryValueEx(uninstall_registry,'DisplayName')[0]
+        expected_name='皮卡丘手机工作台' if args.language=='chinesesimp' else 'Pikachu Phone Workbench'
+        if expected_name not in display_name or '8070' in display_name:
+            raise RuntimeError('Incorrect localized installation name: '+display_name)
+        if not (target/'workbench.ico').is_file():raise RuntimeError('Missing brand icon')
+        report['display_name']=display_name
         host_only=(target/'8070-host-policy.json').is_file()
         if host_only:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER,r'Software\PhoneWorkbench8070',0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as registry:
@@ -88,7 +97,7 @@ def main():
                         report['uninstalled']=False
                 except FileNotFoundError:pass
         report['ok']=report['relocated_install'] and report['uninstalled']
-        output=ROOT/'releases'/('PhoneWorkbench8070-'+version+'-installation-check.json')
+        output=ROOT/'releases'/(args.installer.stem+'-'+args.language+'-installation-check.json')
         output.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     if not report['ok']:raise RuntimeError('Installer validation failed')
     print(json.dumps({'ok':True,'report':str(output)},ensure_ascii=False))

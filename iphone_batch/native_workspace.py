@@ -435,6 +435,9 @@ async def run(args):
     lockdown = await open_paired_usb(args.device, ROOT)
     try:
         async with AccessibilityAudit(lockdown) as service:
+            if args.action == 'banner':
+                from message_banner import observe
+                return await observe(service, lockdown, args.device)
             if args.action == 'page':
                 return {'device': args.device, **await read_message_footer(service)}
             if args.action in ('auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail'):
@@ -562,7 +565,7 @@ async def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', required=True)
-    parser.add_argument('--action', choices=['page', 'auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail', 'capture', 'latest', 'identify', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification'], required=True)
+    parser.add_argument('--action', choices=['page', 'auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail', 'capture', 'latest', 'identify', 'history', 'send', 'unread', 'open', 'notifications', 'open_notification', 'banner'], required=True)
     parser.add_argument('--base'); parser.add_argument('--record')
     parser.add_argument('--phone')
     args = parser.parse_args()

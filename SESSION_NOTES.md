@@ -1,6 +1,23 @@
-# Current recovery point: v0.1.19 (2026-11-21)
+# Current recovery point: v0.1.20 (2026-11-21)
 
-User requested a local archive and Git recovery point after delivery; keep the same v0.1.19 for this delivery. Archive: [SESSION_ARCHIVE_2026-11-21_v0.1.19.md](SESSION_ARCHIVE_2026-11-21_v0.1.19.md). Local tag v0.1.19; no remote push. Pikachu menu-only companion commit: `f467dc6c66a7cef9a9a7fe518146019b3c300a98`. User will perform real acceptance later. Do not restart applications, the current backend, or phones for archiving. Previous recovery: v0.1.18; next new recovery version: v0.1.20.
+Archive: [SESSION_ARCHIVE_2026-11-21_v0.1.20.md](SESSION_ARCHIVE_2026-11-21_v0.1.20.md). Local commit/tag only; no remote push. Next recovery point: v0.1.21.
+
+## Current runtime and release status
+
+- User requested save+Git before completing the new installer. C development backend is currently running through the normal `Backend.start()` control path; D installed v0.1.19 backend was stopped to release port 8070. User reports devices 01–10 have recovered frames and is checking 11–18. Do not interrupt that check or restart/stop either environment until the user finishes.
+- Starting the development dashboard directly with `Start.ps1` bypasses the shared USB tunneld and is not a valid reproduction of the normal development setup. The normal backend controller calls `_ensure_tunneld()` first. After switching to that exact control path, video health showed active RTP and decoded frames, and the user confirmed 01–10 restored.
+- `controller.ensure_usb_tunnel()` now cancels/recreates only the target UDID tunnel before a new screen session. Old entries can remain listed after a phone disconnect and must not be trusted as live. New v0.1.20 installer has not been built or installed; D remains on v0.1.19. Package only after the user's device 11–18 check is complete and the C/D runtime path has been validated.
+- New SMS UI still stores local drafts only. Saving does not enqueue a job; immediate start and scheduled execution are not wired. For future automation, retry only idempotent read/navigation after control recovery and full recipient/conversation/body revalidation; an uncertain send click must pause for status reconciliation and never auto-resend.
+- Touch loss during automation must not blindly replay the last action. Revalidate control readiness and the target conversation/body after reconnect; pause if state is ambiguous. No automation implementation was added in this recovery.
+- Security packaging requirement remains pending: compiled/protected backend and controlled updates; plaintext Python cannot be called tamper-proof. No direct installed-script replacement is the formal update path.
+
+## Pending release security requirement (user, 2026-11-21)
+
+Formal releases must reduce source exposure and prevent ordinary-user replacement of backend code, using compiled backend distribution, protected installation permissions, signature/integrity verification and controlled updates. The current plaintext Python distribution does not meet this requirement; wrapping scripts in an EXE alone is insufficient, and local administrator access cannot be represented as absolutely tamper-proof. Direct replacement of installed scripts was used for this diagnosis (controller.py USB-tunnel recovery), but must not be the formal update mechanism. Security packaging work is deferred until the current video/connection timeouts are resolved. No new commit, tag, archive or version increment is created by this note.
+
+# Historical recovery point: v0.1.19 (2026-11-21)
+
+Archive: [SESSION_ARCHIVE_2026-11-21_v0.1.19.md](SESSION_ARCHIVE_2026-11-21_v0.1.19.md). Local tag v0.1.19; no remote push. Pikachu menu-only companion commit: `f467dc6c66a7cef9a9a7fe518146019b3c300a98`. Previous recovery: v0.1.18; next recovery was v0.1.20.
 
 ## Work record before archiving
 

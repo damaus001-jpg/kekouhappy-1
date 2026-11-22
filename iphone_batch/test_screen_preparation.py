@@ -4,16 +4,23 @@ from controller import ensure_screen_services
 
 
 class ScreenPreparationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tunnel_patch=patch('controller.ensure_usb_tunnel')
+        self.tunnel=tunnel_patch.start()
+        self.addCleanup(tunnel_patch.stop)
+
     async def test_disabled_mode_never_mounts_or_starts_video(self):
         with patch('controller.screen_service_command',AsyncMock(return_value=(0,'false',''))) as command:
             with self.assertRaisesRegex(RuntimeError,'开发者模式未开启'):
                 await ensure_screen_services('phone')
             self.assertEqual(command.await_count,1)
+            self.tunnel.assert_not_called()
 
     async def test_ready_phone_does_not_mount_again(self):
         with patch('controller.screen_service_command',AsyncMock(side_effect=[(0,'true',''),(0,'media','')])) as command:
             await ensure_screen_services('phone')
             self.assertEqual(command.await_count,2)
+            self.tunnel.assert_called_once_with('phone')
 
     async def test_missing_media_services_mount_then_verify(self):
         results=[(0,'true',''),(1,'','missing display service'),(0,'',''),(0,'media','')]

@@ -55,7 +55,7 @@ def stage_files(stage,build,electron,version,host_only=False):
         if candidate.is_file():shutil.copy2(candidate,runtime/'NODE-LICENSE.txt');break
     print('Copying 8070 source and web assets; excluding runtime data...',flush=True)
     files=command(['git','-c','safe.directory='+ROOT.as_posix(),'-c','core.quotepath=false','ls-files','iphone_batch']).stdout.splitlines()
-    files=sorted(set(files+['iphone_batch/host_access.py','iphone_batch/host_control.py']))
+    files=sorted(set(files+['iphone_batch/host_access.py','iphone_batch/host_control.py','iphone_batch/web/workspace_theme.js','iphone_batch/message_banner.py']))
     for name in files:
         relative=Path(name)
         if '.device-data' in relative.parts or '__pycache__' in relative.parts or relative.name.startswith('test_'):continue
@@ -68,20 +68,20 @@ def stage_files(stage,build,electron,version,host_only=False):
     (stage/'tools').mkdir(exist_ok=True)
     shutil.copy2(ROOT/'tools/check_8070_install.py',stage/'tools/check_8070_install.py')
     (stage/'使用说明.txt').write_text(
-        '手机工作台 8070 '+version+'\n\nWindows 10/11 x64。包含独立桌面入口、Python、Node 和项目依赖，无需预装开发环境。\n'
+        '皮卡丘手机工作台 '+version+'\n\nWindows 10/11 x64。包含独立桌面入口、Python、Node 和项目依赖，无需预装开发环境。\n'
         '首次使用：\n1. 安装 Apple Mobile Device USB 驱动与服务（可通过 Apple 官方 iTunes 安装）。\n'
         '2. 解锁手机、连接 USB，确认信任电脑并开启开发者模式。首次准备开发者镜像可能需要联网。\n'
-        '3. 打开“手机工作台 8070”，点击“启动并打开工作台”，允许 USB 隧道所需的管理员授权。\n'
+        '3. 打开“皮卡丘手机工作台”，点击“启动并打开工作台”，允许 USB 隧道所需的管理员授权。\n'
         '4. 新建短信当前为配置草稿界面，保存草稿不会自动开始任务。\n\n'
         '本安装包不包含开发机的号码、短信、配对、密钥、账号或浏览器登录。\n'
         '新电脑使用自己的本机访问凭据，不需要安装另一个授权客户端。\n'
-        '安装结束不会自动启动，也不会连接或操作手机。已有其他 8070 后台时请先通过对应后台管理关闭，勿重复占用端口。\n'
+        '安装结束不会自动启动，也不会连接或操作手机。已有其他手机工作台后台时请先通过对应后台管理关闭。\n'
         '关闭桌面工作台窗口会保留后台；可从菜单“后台管理”彻底关闭本安装目录所属后台。\n'
         '卸载不主动清除运行期间产生的业务数据。\n',encoding='utf-8-sig')
     if host_only:
         (stage/'8070-host-policy.json').write_text('{"protocol":1,"mode":"pikachu-only"}',encoding='utf-8')
         (stage/'使用说明.txt').write_text(
-            '手机工作台8070后台 '+version+'\n\nWindows 10/11 x64。内置Python、Node、项目依赖和C++运行库。\n'
+            '皮卡丘手机工作台 '+version+'\n\nWindows 10/11 x64。\n'
             '安装后请通过皮卡丘翻译器的“打新增”图标右键菜单启动或彻底关闭后台，页面使用现有苹果入口。\n'
             '本包没有独立桌面或开始菜单启动入口。安装位置自动登记，无需固定路径。\n'
             'Apple USB驱动需通过Apple官方软件准备；手机需解锁、信任电脑及开启开发者模式。\n'
@@ -137,15 +137,15 @@ def finish(stage,build,iscc,version):
     source=ROOT/'tools/installer_8070/installer.iss'
     defines=['/DHostOnly=1'] if host_only else []
     command([iscc,'/DStageDir='+str(stage),'/DReleaseDir='+str(RELEASE),'/DAppVersion='+version,*defines,source],log=build/'inno.log',timeout=900)
-    installer=RELEASE/('PhoneWorkbench8070-'+version+'-Setup.exe')
+    installer=RELEASE/('皮卡丘手机工作台-'+version+'-安装.exe')
     digest=hashlib.file_digest(installer.open('rb'),'sha256').hexdigest()
     report={'version':version,'project':'8070','installer':installer.name,'bytes':installer.stat().st_size,'sha256':digest,
             'platform':'Windows 10/11 x64','runtime_bundled':True,'standalone_signed_access_client':not host_only,
             'pikachu_host_only':host_only,'control_protocol':1 if host_only else None,
             'apple_usb_driver_bundled':False,'installer_signed':False,'runtime_data_bundled':False,
             'stage':str(stage),'payload_files':len(manifest),'offline_install_check':result,'remote_push':False}
-    (RELEASE/(installer.name+'.sha256')).write_text(digest+'  '+installer.name+'\n',encoding='ascii')
-    (RELEASE/('PhoneWorkbench8070-'+version+'-Setup.json')).write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+    (RELEASE/(installer.name+'.sha256')).write_text(digest+'  '+installer.name+'\n',encoding='utf-8')
+    (RELEASE/(installer.stem+'.json')).write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps({'ok':True,'installer':str(installer),'bytes':report['bytes'],'sha256':digest}),flush=True)
 
 
