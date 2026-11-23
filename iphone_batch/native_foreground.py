@@ -59,6 +59,8 @@ async def probe_title(service, *, recover_first=False):
     try:
         async with asyncio.timeout(.8):
             monitoring = True
+            if hasattr(service, 'set_show_visuals'):
+                await service.set_show_visuals(False)
             await service.set_app_monitoring_enabled(True)
             await service.set_monitored_event_type()
             while not service._event_queue.empty():

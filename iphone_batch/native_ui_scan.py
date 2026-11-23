@@ -17,6 +17,8 @@ async def scan(s,limit=90,seconds=22,settle=.15,start_from_last=True,stop_when=N
     async def advance():
         if reverse:await s.move_focus(Direction.Previous)
         else:await s.move_focus_next()
+    if hasattr(s, 'set_show_visuals'):
+        await s.set_show_visuals(False)
     await s.set_app_monitoring_enabled(True);await s.set_monitored_event_type()
     await asyncio.sleep(.1)
     while not s._event_queue.empty():s._event_queue.get_nowait()

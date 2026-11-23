@@ -16,6 +16,8 @@ from reading_progress import ReadingProgress, visible_messages
 
 async def capture_conversation(service, options=None):
     options = options or {}
+    if hasattr(service, 'set_show_visuals'):
+        await service.set_show_visuals(False)
     began = time.monotonic()
     deadline = began + 60
     serial = 0

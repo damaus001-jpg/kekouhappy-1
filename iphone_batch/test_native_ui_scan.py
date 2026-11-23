@@ -95,7 +95,8 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         phone=SimpleNamespace(chord=AsyncMock(),paste=AsyncMock(),keys=AsyncMock())
         number='+12025550191'
         pages=[page(['New Message, Show Conversation Details, Button','To:','Message']),
-               page(['To:, '+number])]
+               page(['To:, '+number]), page([number+', Button','Message']),
+               page([number+', Button','Message'])]
         with patch('native_workspace.list_page',new_callable=AsyncMock) as navigation, \
                 patch('native_workspace.raw_page',new=AsyncMock(side_effect=pages)), \
                 patch('native_workspace.read',new=AsyncMock(return_value={'phone_number':number})), \
@@ -104,6 +105,19 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         navigation.assert_awaited_once_with(None,phone,toolbar_only=True)
         phone.paste.assert_awaited_once_with(number)
         phone.chord.assert_awaited_once_with(0x11)
+        self.assertEqual([c.args[0] for c in phone.keys.await_args_list], [[0x28], [], [0x28], []])
+
+    async def test_followup_without_history_leaves_empty_body_for_user(self):
+        number = '+12025550191'
+        phone = SimpleNamespace(chord=AsyncMock(), paste=AsyncMock(), keys=AsyncMock())
+        selected = page([number + ', Button', 'Message'])
+        with patch('native_workspace.enter_compose_recipient', new=AsyncMock(return_value=selected)), \
+                patch('native_workspace.read', new=AsyncMock(side_effect=ValueError('当前会话未读到可确认的消息，未发送'))):
+            result = await open_phone_conversation(None, phone, number)
+        self.assertEqual(result['phone_number'], number)
+        self.assertEqual(result['messages'], [])
+        phone.paste.assert_not_awaited()
+        phone.keys.assert_not_awaited()
 
     async def test_fast_navigation_still_preserves_existing_phone_draft(self):
         phone=SimpleNamespace(request=Mock())
@@ -114,6 +128,18 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError,'草稿'):
                 await list_page(None,phone,toolbar_only=True)
         phone.request.assert_not_called()
+
+    async def test_empty_conversation_can_return_without_message_history(self):
+        phone=SimpleNamespace(request=Mock(),base='http://device')
+        empty=page(['Back, Button','+12025550191, Show Conversation Details, Button','Message, iMessage'])
+        toolbar=page(['Search, Search Field','Compose, Button'])
+        with patch('native_workspace.compose_toolbar',new=AsyncMock(side_effect=[None,toolbar])), \
+                patch('native_workspace.raw_page',new=AsyncMock(return_value=empty)), \
+                patch('native_workspace.context',side_effect=ValueError('no history')) as history, \
+                patch('native_workspace.asyncio.sleep',new=AsyncMock()):
+            self.assertEqual(await list_page(None,phone,toolbar_only=True),toolbar)
+        history.assert_not_called()
+        self.assertEqual(phone.request.call_args_list[-1].args[2]['type'],'release')
 
     async def test_header_identity_can_stop_before_blocked_image_without_claiming_history(self):
         items=[SimpleNamespace(platform_identifier=str(i),caption=c) for i,c in enumerate(

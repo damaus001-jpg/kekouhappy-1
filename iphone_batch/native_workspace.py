@@ -256,6 +256,53 @@ def composer_is_empty(captions):
             and not any(c.startswith('Send, Button') for c in captions))
 
 
+def composer_has_draft(captions):
+    placeholders = ('Message', 'Message, iMessage', 'Message, Text Message', 'Message, Text Message, SMS')
+    return (any(c.startswith('Message, ') and c not in placeholders for c in captions)
+            or any(c.startswith('Send, Button') for c in captions))
+
+
+async def wait_compose_page(service, predicate, error, *, attempts=4, seconds=6, progress=None, stage=None):
+    """Retry observations only; never repeat a paste, Enter or send action."""
+    deadline = time.monotonic() + seconds
+    for attempt in range(attempts):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            records = await asyncio.wait_for(raw_page(service), remaining)
+        except asyncio.TimeoutError:
+            break
+        if progress:
+            captions = [row['caption'] for row in records]
+            progress(stage, {'attempt': attempt + 1, 'elements': len(records),
+                'has_to': any(c.startswith('To:') for c in captions),
+                'has_composer': any(c == 'Message' or c.startswith('Message, ') for c in captions),
+                'draft_observed': composer_has_draft(captions),
+                'scan_reason': getattr(records, 'reason', 'observed')})
+        if predicate(records):
+            return records
+        if attempt + 1 < attempts:
+            await asyncio.sleep(.2)
+    raise ValueError(error)
+
+
+def typed_recipient_confirmed(records, number):
+    key = phone_key(number)
+    chips = recipient_button_numbers(records)
+    if chips and chips != {key}:
+        return False
+    for row in records:
+        caption = row.get('caption') or ''
+        if caption.startswith('To:, '):
+            text = caption[5:].strip()
+            if text.startswith('To:'):
+                text = text[3:]
+            if phone_key(text.replace('\ufffc', '').strip()) == key:
+                return True
+    return task_recipient_confirmed(records, number)
+
+
 async def reopen_reply_recipient(service, phone, record):
     key = record['phone_number']
     await phone.chord(0x11)
@@ -366,7 +413,7 @@ def owns_failed_preparation(current, record, record_path):
     return bool(previous and previous['english'] == record['english'])
 
 
-async def enter_compose_recipient(service, phone, number, *, verify_selection=False):
+async def enter_compose_recipient(service, phone, number, *, verify_selection=False, progress=None):
     key = phone_key(number or '')
     if not key:
         raise ValueError('需要完整联系人号码')
@@ -375,34 +422,50 @@ async def enter_compose_recipient(service, phone, number, *, verify_selection=Fa
     await list_page(service, phone, toolbar_only=True)
     await phone.chord(0x11)
     await asyncio.sleep(.3)
-    captions = [r['caption'] for r in await raw_page(service)]
-    if ('To:' not in captions or 'Message' not in captions or not any(
-            c.startswith('New Message, Show Conversation Details') for c in captions)):
-        raise ValueError('未确认空白收件人输入栏，已停止')
+    def blank(records):
+        captions = [r['caption'] for r in records]
+        return ('To:' in captions and composer_is_empty(captions) and any(
+            c.startswith(title + ', Show Conversation Details')
+            for c in captions for title in ('New Message', 'New iMessage', 'New Text Message')))
+    await wait_compose_page(service, blank, '未确认空白收件人输入栏，已停止',
+                            progress=progress, stage='blank_compose')
     await phone.paste(key)
     await asyncio.sleep(.3)
-    captions = [r['caption'] for r in await raw_page(service)]
-    if not any(c.startswith('To:, ') and phone_key(c[5:]) == key for c in captions):
-        raise ValueError('输入的完整号码未确认，未打开会话')
-    await phone.keys([0x28])
-    await phone.keys([])
-    await asyncio.sleep(.5)
+    await wait_compose_page(service, lambda rows: typed_recipient_confirmed(rows, key),
+        '输入的完整号码未确认，未打开会话', progress=progress, stage='recipient_input')
+    # The accepted flow is two complete Enter presses after the typed number.
+    # Do not inspect body/draft controls between them: iMessage can expose only
+    # its recipient subtree until the second Enter transfers keyboard focus.
+    for index in range(2):
+        try:
+            await phone.keys([0x28])
+        finally:
+            await phone.keys([])
+        if progress:
+            progress('recipient_enter_' + str(index + 1), {'enter_completed': index + 1})
+    await asyncio.sleep(.3)
     if not verify_selection:
         return None
-    selected = await raw_page(service)
-    if not task_recipient_confirmed(selected, key):
-        raise ValueError('选择后的完整收件号码未确认，未输入正文')
-    if not composer_is_empty([row['caption'] for row in selected]):
-        raise ValueError('收件会话中存在草稿，已保留原内容')
-    return selected
+    focused = await wait_compose_page(service, lambda rows: task_recipient_confirmed(rows, key)
+        and composer_is_empty([row['caption'] for row in rows]),
+        '进入正文后收件号码或空输入框未确认，已停止', progress=progress, stage='body_focus')
+    return focused
 
 
 async def open_phone_conversation(service, phone, number):
     key = phone_key(number or '')
     if not key:
         raise ValueError('需要完整联系人号码')
-    await enter_compose_recipient(service, phone, key)
-    current = await read(service)
+    selected = await enter_compose_recipient(service, phone, key, verify_selection=True)
+    try:
+        current = await read(service)
+    except ValueError as error:
+        if str(error) != '当前会话未读到可确认的消息，未发送':
+            raise
+        current = {'contact': key, 'phone_number': key, 'messages': [],
+                   'context_fingerprint': digest([]), 'raw_elements': selected,
+                   'unclassified': [], 'source': 'native-current',
+                   'scope': '号码已确认，已进入正文输入框，等待用户自行输入'}
     if current['phone_number'] != key:
         raise ValueError('打开后的会话号码未确认')
     return current
@@ -417,7 +480,6 @@ async def list_page(service, phone, toolbar_only=False):
     if any(', Show Conversation Details, Button' in r['caption'] for r in records):
         # Returning to the list is intentional, but never discard an existing draft.
         captions = [r['caption'] for r in records]
-        context(records)
         if not composer_is_empty(captions):
             raise ValueError('手机有未发送草稿，请先处理草稿；没有切换会话')
         # Standard edge-back gesture requested by the user, independent of screenshots.
@@ -447,12 +509,25 @@ async def list_page(service, phone, toolbar_only=False):
     return records
 
 
+def recipient_button_numbers(records):
+    to_index = next((i for i, row in enumerate(records) if (row.get('caption') or '').startswith('To:')), None)
+    if to_index is not None:
+        chips = []
+        for row in records[to_index + 1:]:
+            caption = row.get('caption') or ''
+            if caption == 'Add Contact, Button' or caption == 'Message' or caption.startswith('Message, '):
+                break
+            chips.append(row)
+    else:
+        headers = [row for row in records if ', Show Conversation Details, Button' in (row.get('caption') or '')]
+        chips = headers or records
+    return {phone_key(part) for row in chips if ', Button' in (row.get('caption') or '')
+            for part in row['caption'].split(', ') if phone_key(part)}
+
+
 def task_recipient_confirmed(records, number):
     key = phone_key(number)
-    return bool(key and any(
-        ', Button' in (row.get('caption') or '') and
-        any(phone_key(part) == key for part in row['caption'].split(', '))
-        for row in records))
+    return bool(key and recipient_button_numbers(records) == {key})
 
 
 def write_task_unit(path, value, status, *, error=None, sent_at=None):
@@ -485,8 +560,11 @@ async def send_task_unit(service, args, record_path):
     # Follow the same normalized page-opening route as a click on the local
     # follow-up number list. A brand-new recipient has no history to read yet,
     # so the verified recipient chip and empty composer are enough to proceed.
+    def preparation_progress(stage, evidence):
+        record.update(preparation_stage=stage, preparation_evidence=evidence)
+        write_task_unit(record_path, record, 'ready')
     selected_elements = await enter_compose_recipient(
-        service, phone, number, verify_selection=True)
+        service, phone, number, verify_selection=True, progress=preparation_progress)
     try:
         selected = await read(service)
     except ValueError as exc:
@@ -502,20 +580,29 @@ async def send_task_unit(service, args, record_path):
         raise ValueError('新短信输入框非空，已保留手机草稿；任务未发送')
     before_count = sum(m.get('side') == 'outgoing' and m.get('text') == text
                        for m in selected.get('messages', []))
+    record['had_existing_conversation'] = bool(selected.get('messages'))
 
-    point = await asyncio.to_thread(input_point, phone)
-    await tap(phone, point)
     await phone.paste(text)
     await asyncio.sleep(.5)
-    prepared = await raw_page(service)
-    prepared_send_control({'phone_number': number, 'raw_elements': prepared}, number, text)
-    send_location = await asyncio.to_thread(send_point, phone)
+    def body_ready(rows):
+        if not task_recipient_confirmed(rows, number):
+            return False
+        try:
+            prepared_send_control({'phone_number': number, 'raw_elements': rows}, number, text)
+        except ValueError:
+            return False
+        return True
+    await wait_compose_page(service, body_ready, '正文和收件号码未确认，未执行发送',
+                            progress=preparation_progress, stage='body_text')
 
-    # This durable marker is written before the irreversible tap. A restart after
+    # This durable marker is written before the irreversible Enter. A restart after
     # this point is treated as uncertain and the task runner will never retry it.
     record.update(status='send_requested', send_requested_at=datetime.now().astimezone().isoformat())
     write_task_unit(record_path, record, 'send_requested')
-    await tap(phone, send_location)
+    try:
+        await phone.keys([0x28])
+    finally:
+        await phone.keys([])
     await asyncio.sleep(1)
     after = await read(service)
     after_count = sum(m.get('side') == 'outgoing' and m.get('text') == text
@@ -525,6 +612,9 @@ async def send_task_unit(service, args, record_path):
         raise RuntimeError('发送结果未确认；请核对手机，系统不会自动重发')
     sent_at = datetime.now().astimezone().isoformat()
     write_task_unit(record_path, record, 'sent_verified', sent_at=sent_at)
+    # A sender keeps its in-flight slot through returning to the list.
+    # A later navigation error must never turn this known send into a retry.
+    await list_page(service, phone, toolbar_only=True)
     return {'status': 'sent_verified', 'device': args.device, 'phone_number': number,
             'sent_at': sent_at}
 
@@ -535,6 +625,9 @@ async def run(args):
         async with AccessibilityAudit(lockdown) as service:
             if args.action == 'banner':
                 from message_banner import observe
+                return await observe(service, lockdown, args.device)
+            if args.action == 'badge':
+                from message_icon_badge import observe
                 return await observe(service, lockdown, args.device)
             if args.action == 'page':
                 return {'device': args.device, **await read_message_footer(service)}
@@ -667,11 +760,18 @@ async def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', required=True)
-    parser.add_argument('--action', choices=['page', 'auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail', 'capture', 'latest', 'identify', 'history', 'send', 'campaign_send', 'unread', 'open', 'notifications', 'open_notification', 'banner'], required=True)
+    parser.add_argument('--action', choices=['page', 'auto_probe', 'auto_tail', 'auto_read', 'auto_sent_tail', 'capture', 'latest', 'identify', 'history', 'send', 'campaign_send', 'unread', 'open', 'notifications', 'open_notification', 'banner', 'badge'], required=True)
     parser.add_argument('--base'); parser.add_argument('--record')
     parser.add_argument('--phone')
+    parser.add_argument('--banner-worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if sys.platform == 'win32': asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    if args.banner_worker:
+        if args.action not in ('banner','badge'):
+            parser.error('--banner-worker is only available for read-only notification reads')
+        from notification_worker import serve_banner
+        serve_banner(args, run)
+        sys.exit(0)
     try:
         result = asyncio.run(run(args))
         print(json.dumps(result, ensure_ascii=True), flush=True)

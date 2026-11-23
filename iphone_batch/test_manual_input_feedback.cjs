@@ -18,7 +18,7 @@ function setup({available = true, status = 200, statuses, networkError = null, m
         addEventListener(type, callback) { this.listeners[type] = callback; }});
     const regular = button('home'), bezel = button('lock');
     const context = {
-        URLSearchParams, AbortSignal, batchManaged: managed,
+        URLSearchParams, AbortSignal, batchManaged: managed, batchActive: available, activePointer: null,
         location: {search: '?batch=1&manager=http%3A%2F%2F127.0.0.1%3A8070'},
         parent: {postMessage(data, origin) { if (feedbackError) throw Error('invalid origin'); feedback.push({data, origin}); }},
         controlAvailable() { return available; }, log(message) { logs.push(message); },

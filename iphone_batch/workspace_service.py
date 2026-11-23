@@ -44,7 +44,7 @@ class WorkspaceService:
         if record: command += ['--record', str(record)]
         if phone: command += ['--phone', phone]
         flags = 0x08000000 if sys.platform=='win32' else 0
-        if action in ('notifications', 'banner'):
+        if action in ('notifications', 'banner', 'badge'):
             process = self.notification_runner.run(device, command, timeout=130,
                 encoding='utf-8', creationflags=flags)
         else:
@@ -174,6 +174,31 @@ class WorkspaceService:
     def reply_path(self, identifier):
         if not isinstance(identifier,str) or not re.fullmatch('[a-f0-9]{32}',identifier): raise ValueError('回复记录无效')
         return self.root/'workspace'/'replies'/(identifier+'.json')
+
+    def open_followup(self, device, base, phone):
+        """Open and focus only; history reconciliation must not navigate the phone."""
+        with self.phone_lock:
+            observed = self.native(device, 'open', base, phone=phone)
+            if observed.get('phone_number') != phone:
+                raise ValueError('打开后的会话号码不一致')
+            prior = self.ledger.load(device, phone) or {}
+            history = prior.get('messages', [])
+            window = observed.get('messages', [])
+            messages, aligned = append_window(history, window) if window else (history, False)
+            # Keep local history without a new phone read, scroll or backup.
+            if not aligned and window:
+                messages = history or window
+            scope = '已确认号码并进入正文输入框，请自行输入和发送；显示当前读取或本地已保存的记录'
+            value = {**observed, 'device': device, 'contact': phone, 'messages': messages,
+                     'native_context': window, 'history_complete': False,
+                     'created': datetime.now().isoformat(), 'scope': scope}
+            if not window:
+                value['source'] = 'native-open'
+            path = self.root/'diagnostics'/('sms-open-'+device[-8:]+'-'+uuid.uuid4().hex+'.json')
+            self.write(path, value)
+            archived = self.translator(path)
+            return {'conversation_id': Path(archived['output']).stem, 'contact': phone,
+                    'phone_number': phone, 'message_count': len(messages), 'scope': scope}
 
     def capture(self, device, base, phone=None, notification=None):
         with self.phone_lock:
@@ -509,6 +534,9 @@ class WorkspaceService:
                                  'discovered_at':previous.get('discovered_at',datetime.now().isoformat())})
             return result
 
+    def unread_icon_badge(self, device, base):
+        return self.native(device,'badge',base)
+
     def send(self, device, identifier, base, confirm):
         if confirm is not True: raise ValueError('需要确认发送')
         path = self.reply_path(identifier)
@@ -607,6 +635,6 @@ class WorkspaceService:
         if action=='open':
             phone = body.get('phone_number')
             if not isinstance(phone,str) or not re.fullmatch(r'\+[0-9]{7,15}',phone): raise ValueError('需要完整国际号码')
-            return self.capture(device,base,phone)
+            return self.open_followup(device,base,phone)
         if action=='send': return self.send(device,body.get('id'),base,body.get('confirm'))
         raise ValueError('未知工作台操作')

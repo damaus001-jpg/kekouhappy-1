@@ -7,10 +7,12 @@ import os
 import hmac
 import logging
 import time
+import uuid
 from pathlib import Path
 from workspace_access import AccessVerifier, HEADER
 from input_health import check_input, clear_input, record_input, ensure_input_services
 from video_idle import ensure_idle_monitor, stream_until_disconnect, touch_media, wake_media
+from touch_diagnostics import enabled as touch_trace_enabled, trace_for, record as trace_record, input_metadata
 
 MAX_TEXT_BYTES = 1024 * 1024
 MAX_CLIPBOARD_IMAGE_BYTES = 16 * 1024 * 1024
@@ -53,7 +55,9 @@ def policy_allows_input(instance):
 
 
 def viewer_script(folder):
-    return b'\n'.join((folder / name).read_bytes() for name in ('pointer_input.js', 'input_health.js', 'viewer.js'))
+    flag = b'window.__devTouchTrace = ' + (b'true' if touch_trace_enabled() else b'false') + b';'
+    return b'\n'.join([flag] + [(folder / name).read_bytes() for name in (
+        'pointer_input.js', 'input_health.js', 'touch_diagnostics.js', 'viewer.js')])
 
 
 class ReplayReader:
@@ -127,8 +131,13 @@ def windows_clipboard(text=None, *, write=False, include_image=False):
 
 
 async def reply(writer, code, data):
+    context = getattr(writer, '_touch_trace_context', None)
+    if context:
+        instance, request_id, started, path = context
+        trace_record(instance, 'http-response', request_id=request_id, path=path,
+                     code=code, elapsed_ms=round(1000 * (time.monotonic() - started)))
     payload = json.dumps(data, ensure_ascii=False).encode('utf-8')
-    reason = {200: 'OK', 400: 'Bad Request', 403: 'Forbidden', 405: 'Method Not Allowed',
+    reason = {200: 'OK', 400: 'Bad Request', 403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed',
               409: 'Conflict', 413: 'Payload Too Large', 500: 'Internal Server Error', 503: 'Service Unavailable'}[code]
     writer.write((f'HTTP/1.1 {code} {reason}\r\nContent-Type: application/json; charset=utf-8\r\n'
                   f'Cache-Control: no-store\r\nContent-Length: {len(payload)}\r\nConnection: close\r\n\r\n').encode() + payload)
@@ -163,6 +172,15 @@ def install():
     install_idle_video(screen_stream.ScreenStreamServer, input_lock)
     from video_health import install as install_video_health
     install_video_health(screen_stream.ScreenStreamServer)
+    original_serve = screen_stream.ScreenStreamServer.serve
+    async def serve_with_trace(instance):
+        try:
+            return await original_serve(instance)
+        finally:
+            trace = getattr(instance, '_batch_touch_trace', None)
+            if trace:
+                await trace.close()
+    screen_stream.ScreenStreamServer.serve = serve_with_trace
     for name, original_action in originals.items():
         def wrap_action(action, kind):
             async def guarded(instance, body):
@@ -225,7 +243,7 @@ def install():
                 logging.getLogger(__name__).warning('Media wake failed: port=%s error=%s', self._http_port, type(error).__name__)
                 await reply(writer, 503, {'error': '视频或控制服务正在准备，请稍后重试'})
                 return False
-        special = path in ('/device-screenshot', '/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-screenshot', '/manual-key', '/manual-paste', '/manual-composer-focus', '/input-health', '/input-readiness')
+        special = path in ('/touch-diagnostics', '/device-screenshot', '/host-clipboard', '/device-clipboard-info', '/control-mode', '/translation', '/jpeg.bin', '/manual-touch', '/manual-home', '/manual-screenshot', '/manual-key', '/manual-paste', '/manual-composer-focus', '/input-health', '/input-readiness')
         restricted = device_token and (parts[0] == 'POST' or path.startswith('/clipboard') or path == '/host-clipboard')
         prefix = bytearray(first)
         headers = {}
@@ -254,6 +272,18 @@ def install():
             return await reply(writer, 403, {'error': 'same-origin localhost access required'})
         if not access.verify(parts[0], self._http_port, parts[1], headers.get(HEADER.lower())):
             return await reply(writer, 403, {'error': '请从授权客户端打开短信工作台'})
+        input_paths = ('/manual-touch', '/manual-home', '/manual-screenshot', '/manual-key', '/manual-paste', '/manual-composer-focus')
+        if parts[0] == 'POST' and path in input_paths:
+            request_id = uuid.uuid4().hex[:16]
+            writer._touch_trace_context = (self, request_id, time.monotonic(), path)
+            trace_record(self, 'http-request', request_id=request_id, path=path)
+        if path in ('/input-health', '/input-readiness'):
+            trace = trace_for(self)
+            if trace:
+                trace.set_active(active(self))
+        if path == '/touch-diagnostics':
+            from touch_diagnostics import diagnostic_request
+            return await diagnostic_request(self, reader, writer, parts[0], headers, reply)
         if (parts[0]=='POST' and path in ('/manual-touch','/manual-key','/manual-home', '/manual-screenshot',
                 '/manual-paste','/manual-composer-focus','/input-health','/input-readiness')
                 and not policy_allows_input(self)):
@@ -313,6 +343,7 @@ def install():
                 if not await prepare_media():
                     return
                 result = await check_input(self, input_lock(self), lambda: active(self))
+                trace_record(self, 'health-result', result=result, probe_scope='keyboard-only')
                 return await reply(writer, 200, result)
             if path == '/input-readiness':
                 if not policy_allows_input(self):
@@ -341,6 +372,8 @@ def install():
                 data = json.loads(await asyncio.wait_for(reader.readexactly(length), 5))
                 if not isinstance(data, dict):
                     return await reply(writer, 400, {'error': 'invalid request'})
+                # Record content-free metadata even if ownership/media checks reject it.
+                trace_record(self, 'input-decoded', request_id=request_id, **input_metadata(path, data))
                 if path in ('/manual-paste', '/manual-composer-focus', '/manual-screenshot') and data != {}:
                     return await reply(writer, 400, {'error': 'empty request required'})
                 if path == '/manual-touch':
@@ -366,7 +399,9 @@ def install():
                     return await reply(writer, 403, {'error': 'device is read-only'})
                 if not await prepare_media():
                     return
+                trace_record(self, 'input-wait-lock', request_id=request_id, locked=input_lock(self).locked())
                 async with input_lock(self):
+                    trace_record(self, 'input-lock-acquired', request_id=request_id)
                     if not active(self):
                         return await reply(writer, 403, {'error': 'device is read-only'})
                     if generation != getattr(self, '_batch_input_generation', 0):
@@ -436,11 +471,15 @@ def install():
                                 await dispatch_touch(self, contact, originals['_handle_touch'])
                         return await dispatch_touch(self, data, originals['_handle_touch'])
                     try:
+                        trace_record(self, 'hid-dispatch', request_id=request_id, path=path)
                         code, _ = await asyncio.wait_for(execute(), 12 if path == '/manual-composer-focus' else 4)
+                        trace_record(self, 'hid-return', request_id=request_id, code=code,
+                                     meaning='transport-ack-only')
                         if code == 200:
                             kind = {'/manual-touch': '_handle_touch', '/manual-key': '_handle_key', '/manual-home': '_handle_button', '/manual-screenshot': '_handle_key', '/manual-paste': '_handle_key', '/manual-composer-focus': '_handle_touch'}[path]
                             record_input(self, kind, {'type':'release'} if path == '/manual-composer-focus' else {'usages':[]} if path == '/manual-screenshot' else data)
-                    except Exception:
+                    except Exception as error:
+                        trace_record(self, 'hid-error', request_id=request_id, error=type(error).__name__)
                         await clear_input(self)
                         raise
                 return await reply(writer, code, {'ok': code == 200})
@@ -500,6 +539,10 @@ def install():
                     except Exception:
                         await clear_input(self)
                     self._batch_active = body['active']
+                trace_record(self, 'control-mode', on=active(self))
+                trace = trace_for(self)
+                if trace:
+                    trace.set_active(active(self))
                 return await reply(writer, 200, {'active': active(self)})
             if restricted and not active(self):
                 return await reply(writer, 403, {'error': 'device is read-only'})

@@ -5,6 +5,8 @@ class GlobalMonitor {
   this.grid=document.getElementById('monitor-grid');
   this.section=document.getElementById('global-monitor');
   this.switcher=document.getElementById('current-display-devices');this.switcherSignature='';this.displayOrder=[];
+  const taskListButton=document.getElementById('sms-task-list-open');
+  if(taskListButton)taskListButton.replaceChildren(document.createTextNode('任务'),document.createElement('br'),document.createTextNode('列表'));
   this.layoutButton=document.getElementById('monitor-layout');
   this.sizeSlider=document.getElementById('monitor-size');this.sizeLabel=document.getElementById('monitor-size-value');
   this.sizes={};for(const mode of ['single','double'])try{const n=Number(localStorage.getItem('monitor-size-'+mode));if(n>=50&&n<=480)this.sizes[mode]=n;}catch{}
@@ -97,8 +99,10 @@ class GlobalMonitor {
   const signature=[this.selected||'',...entries.map(({device,label})=>device.udid+':'+label.number)].join('|');
   if(signature===this.switcherSignature)return;
   const newSmsButton=document.getElementById('new-sms-task');
+  const taskListButton=document.getElementById('sms-task-list-open');
   this.switcherSignature=signature;this.switcher.replaceChildren();this.switcher.hidden=false;
   if(newSmsButton)this.switcher.append(newSmsButton);
+  if(taskListButton)this.switcher.append(taskListButton);
   for(const {device,label} of entries){
    const button=document.createElement('button');button.type='button';button.className='current-display-device';
    button.textContent=label.number;button.title='切换到 '+label.number;button.setAttribute('aria-pressed',String(device.udid===this.selected));
@@ -738,12 +742,12 @@ async function openFollowupContact(device,number){
   notice('预览：已选择 '+number+'；真实设备会输入此号码打开会话。');return;
  }
  const revision=workspaceRevision;
- await operation('正在手机打开 '+number+'，核验号码并读取短信…',async()=>{
+ await operation('正在手机打开 '+number+'，核验号码并进入正文输入框…',async()=>{
   const result=await workspaceRequest('open',{phone_number:number},device);
   if(revision!==workspaceRevision||active!==device)return;
   if(result.phone_number!==number)throw Error('打开后的号码不一致，请核对手机。');
   await loadWorkspace(device,true,result.conversation_id);
-  notice('手机已打开 '+number+'；'+(result.scope||'已读取会话原文'));
+  notice('手机已打开 '+number+'；'+(result.scope||'请自行输入短信内容'));
  });
 }
 async function showDeviceFollowups(device){
@@ -859,7 +863,11 @@ function render(rows,selected,controller=controlOwner){
   const entry=document.createElement('button');entry.type='button';entry.className='device-entry'+(selected===d.udid?' current':'');entry.disabled=busy||workspaceBusy||refreshingDevices;entry.setAttribute('aria-pressed',String(selected===d.udid));
   entry.dataset.udid=d.udid;
   const number=label.number;
-  const name=document.createElement('strong');name.textContent='设备 '+number;
+  const nameWrap=document.createElement('span');nameWrap.className='device-number-wrap';
+  const name=document.createElement('strong');name.textContent='设备 '+number;nameWrap.append(name);
+  const badge=d.unread_badge;
+  if(badge?.state==='read'&&badge.count>0){const unread=document.createElement('span');unread.className='unread-count-badge';unread.textContent=String(badge.count);unread.title='主屏幕信息 App 未读数';nameWrap.append(unread);}
+  else if(badge?.state==='unavailable')nameWrap.title='未读角标暂不可读：'+(badge.error||'');
   const remark=document.createElement('span');remark.className='device-remark'+(followupCount||label.followup?' followup':'');remark.textContent=followupCount||label.followup?'待跟进 '+followupCount:'无';
   remark.title='阅读区已勾选 '+followupCount+' 位联系人';
   remark.addEventListener('click',event=>{event.stopPropagation();showDeviceFollowups(d.udid);});
@@ -867,10 +875,6 @@ function render(rows,selected,controller=controlOwner){
   const phone=document.createElement('span');phone.className='device-phone';phone.setAttribute('aria-hidden','true');
   const notification=d.notifications;
   const count=notification?.card_count??notification?.items?.length??0;
-  if(count){
-   const badge=document.createElement('span');badge.className='notification-badge';badge.textContent=String(count);
-   phone.append(badge);
-  }
   const setupError=String(d.error||'');
   const setupState=d.enabled===false?'已手动断开':setupError.includes('开发者模式未开启')?'开发者模式关闭':setupError.includes('信任')?'需解锁并信任':setupError.includes('镜像准备失败')?'投屏准备失败':'正在准备投屏';
   detail.textContent=devicePreview?'':!d.ready?setupState:d.readonly?'仅监看':notification?.manual_control?'当前控制':notification?.protected?'草稿保护':
@@ -879,7 +883,7 @@ function render(rows,selected,controller=controlOwner){
   entry.title='设备 '+number+' · '+remark.textContent+' · '+d.name+' · '+d.udid.slice(-8)+' · '+detail.textContent+' · '+count+' 条已发现的短信横幅提示（非完整未读数）'+
    (d.error?' · '+d.error:notification?.error?' · '+notification.error:notification?.last_checked?' · 最近检查：'+new Date(notification.last_checked).toLocaleString():'');
   entry.setAttribute('aria-label',entry.title);
-  entry.append(phone,name,remark);if(detail.textContent)entry.append(detail);entry.onclick=()=>select(d.udid);
+  entry.append(phone,nameWrap,remark);if(detail.textContent)entry.append(detail);entry.onclick=()=>select(d.udid);
   const tile=document.createElement('div');tile.className='device-tile';
   tile.addEventListener('contextmenu',event=>showDeviceMenu(event,d,index));
   entry.setAttribute('aria-haspopup','menu');
@@ -978,7 +982,7 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
  const get=id=>document.getElementById('new-sms-'+id);
  const storageKey='iphone-new-sms-task-draft:v1';
  const lastTaskKey='iphone-new-sms-last-task:v1';
- let imported=null,devices={},fileRevision=0,inflight=false,lastTaskId=null,pollTimer=0,saveTimer=0;
+ let imported=null,devices={},fileRevision=0,inflight=false,lastTaskId=null,pollTimer=0,saveTimer=0,inlineTaskTimer=0;
  const status=(message,error=false)=>{get('status').textContent=message;get('status').dataset.error=String(error);};
  const taskStatus=(message,error=false)=>{get('task-status').textContent=message;get('task-status').dataset.error=String(error);};
  function normalize(value){
@@ -1046,18 +1050,69 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
  }
  const updateTiming=()=>{const scheduled=form.querySelector('[name=new-sms-start-mode]:checked').value==='scheduled';get('start-at').disabled=!scheduled;get('submit').textContent=scheduled?'保存定时发送':'立即发送';};
  const terminal=new Set(['completed','completed_with_errors','failed','uncertain','cancelled']);
+ const taskListDialog=document.getElementById('sms-task-list-dialog');
+ document.getElementById('sms-task-list-open').addEventListener('click',async()=>{taskListDialog.showModal();await refreshTaskList();});
+ document.getElementById('sms-task-list-close').addEventListener('click',()=>taskListDialog.close());
+ async function refreshTaskList(){
+  const body=document.getElementById('sms-task-list-body'),empty=document.getElementById('sms-task-list-empty');body.replaceChildren();
+  try{
+   const result=await deviceRequest('/api/sms-tasks/daily',{cache:'no-store'},10000);
+   const active=new Set(['running','waiting_for_device','queued','scheduled']);
+   for(const task of result.tasks){
+    const row=document.createElement('tr');row.dataset.active=String(active.has(task.status));
+    const date=document.createElement('td');date.textContent=task.date;row.append(date);
+    const status=document.createElement('td');status.textContent=task.name+' · '+({running:'正在发送',waiting_for_device:'等待设备',queued:'即将进行',scheduled:'即将进行',completed:'已完成',failed:'失败',uncertain:'待核对',cancelled:'已取消'}[task.status]||task.status)+(task.status==='scheduled'?' · '+new Date(task.due_at*1000).toLocaleTimeString():'');row.append(status);
+    for(const key of ['sent','failed']){const cell=document.createElement('td');cell.textContent=String(task[key]);row.append(cell);}
+    const exp=document.createElement('td');
+    if(task.failed_numbers.length){const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent='失败手机号';button.addEventListener('click',()=>exportFailedNumbers(task));exp.append(button);}else exp.textContent='—';row.append(exp);body.append(row);
+   }
+   empty.hidden=result.tasks.length>0;
+  }catch(error){empty.hidden=false;empty.textContent='任务列表暂不可用：'+error.message;}
+ }
+ function exportFailedNumbers(task){
+  const numbers=task.failed_numbers.map(item=>item.number).filter(Boolean).join('\r\n')+'\r\n';
+  const url=URL.createObjectURL(new Blob(['\ufeff',numbers],{type:'text/plain;charset=utf-8'})),link=document.createElement('a');link.href=url;link.download=`失败手机号_${task.date}_${task.id.slice(0,8)}.txt`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+ }
  function taskLabel(task){
   const labels={scheduled:'已定时',queued:'等待开始',waiting_for_device:'等待设备恢复',running:'正在执行',completed:'全部发送完成',completed_with_errors:'部分完成',failed:'发送失败',uncertain:'发送结果待核对',cancelled:'已取消'};
   const sent=task.counts?.sent_verified||0,total=task.total||0;
-  return `${task.name||'短信任务'}：${labels[task.status]||task.status} · 已确认发送 ${sent}/${total}`+(task.error?' · '+task.error:'');
+  return `${task.name||'短信任务'}：${labels[task.status]||task.status} · 已确认发送 ${sent}/${total}`+
+   (task.status==='running'?` · 在途 ${task.in_flight||0} 台 · 等待下一次新建 ${task.waiting_next_compose||0} 台`:'')+(task.error?' · '+task.error:'');
+ }
+ function updateInlineTask(task){
+  const node=document.getElementById('sms-task-status-inline');
+  if(!node)return;
+  if(!task||!task.total){node.hidden=true;node.textContent='';return;}
+  if(task.status==='scheduled'){
+   const seconds=Math.max(0,Math.floor(Number(task.due_at||0)-Date.now()/1000));
+   const hours=Math.floor(seconds/3600),minutes=Math.floor((seconds%3600)/60),remainder=seconds%60;
+   node.textContent=`距离定时发送还有 ${hours} 小时 ${minutes} 分钟 ${remainder} 秒 · ${task.total} 条`;
+   node.title=task.name||'定时发送';node.dataset.state=task.status;node.hidden=false;return;
+  }
+  const sent=task.counts?.sent_verified||0,remaining=Math.max(0,task.total-sent);
+  const states={running:'正在发送',queued:'等待开始',scheduled:'已定时',waiting_for_device:'等待设备恢复',completed:'发送完成',failed:'发送失败',uncertain:'发送结果待核对',cancelled:'已取消'};
+  const failures=(task.device_progress||[]).filter(device=>device.failed);
+  const deviceNames=new Map(latest.map((device,index)=>[device.udid,deviceLabel(device,index).number]));
+  const failedText=failures.map(device=>`设备${deviceNames.get(device.udid)||device.udid.slice(-4)}故障${device.failed}条`).join('，');
+  node.textContent=`${states[task.status]||task.status} · 剩余 ${remaining} 条（${sent}/${task.total} 已确认）${failedText?' · '+failedText:''}`;
+  const perDevice=(task.device_progress||[]).map(device=>`设备${deviceNames.get(device.udid)||device.udid.slice(-4)}：${device.sent}/${device.total} 已发，剩余 ${device.remaining}${device.failure?'；故障：'+device.failure:''}`).join('\n');
+  node.title=[perDevice,task.status==='running'?`在途 ${task.in_flight||0} 台 · 等待下一次新建 ${task.waiting_next_compose||0} 台`:null,task.error].filter(Boolean).join('\n');
+  node.dataset.state=task.status;node.hidden=false;
+ }
+ async function refreshInlineTask(){
+  if(!lastTaskId){updateInlineTask(null);return;}
+  try{updateInlineTask(await deviceRequest('/api/sms-tasks?id='+encodeURIComponent(lastTaskId),{cache:'no-store'},8000));}
+  catch{const node=document.getElementById('sms-task-status-inline');if(node){node.hidden=false;node.textContent='短信任务状态暂不可用';}}
  }
  async function refreshTask(id){
   if(!id||!dialog.open)return;
   try{
    const task=await deviceRequest('/api/sms-tasks?id='+encodeURIComponent(id),{cache:'no-store'},8000);
    if(id!==lastTaskId)return;
+   updateInlineTask(task);
    taskStatus(taskLabel(task),['failed','uncertain','completed_with_errors'].includes(task.status));
    get('cancel').hidden=terminal.has(task.status);get('cancel').dataset.taskId=id;
+   get('resume').hidden=task.status!=='failed';get('resume').dataset.taskId=id;
    if(terminal.has(task.status)){clearInterval(pollTimer);pollTimer=0;}
   }catch(error){taskStatus('任务状态暂时无法读取：'+error.message,true);}
  }
@@ -1066,7 +1121,7 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
   let draft=null;try{draft=JSON.parse(localStorage.getItem(storageKey)||'null');}catch{}
   imported=null;devices={};get('texts').value='';get('min').value='15';get('max').value='25';get('concurrency').value='2';
   const now=new Date(),tomorrow=new Date(now.getFullYear(),now.getMonth(),now.getDate()+1,6),z=n=>String(n).padStart(2,'0');
-  get('name').value='短信任务 '+now.getFullYear()+'-'+z(now.getMonth()+1)+'-'+z(now.getDate());
+  get('name').value='短信任务 '+now.getFullYear()+'-'+z(now.getMonth()+1)+'-'+z(now.getDate())+'-'+z(now.getHours())+'-'+z(now.getMinutes());
   get('start-at').value=tomorrow.getFullYear()+'-'+z(tomorrow.getMonth()+1)+'-'+z(tomorrow.getDate())+'T06:00';
   form.querySelector('[name=new-sms-start-mode][value=immediate]').checked=true;
   if(draft?.version===1){
@@ -1074,7 +1129,7 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
    if(draft.devices&&typeof draft.devices==='object')devices=draft.devices;
    get('name').value=draft.name||get('name').value;
    get('texts').value=Array.isArray(draft.texts)?draft.texts.join('\n'):'';
-   get('concurrency').value=String(draft.concurrency||2);
+   get('concurrency').value=String(Math.min(3,draft.concurrency||2));
    if(draft.startMode==='scheduled')form.querySelector('[name=new-sms-start-mode][value=scheduled]').checked=true;
    if(draft.startLocal)get('start-at').value=draft.startLocal;
   }
@@ -1083,7 +1138,8 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
   get('timezone').textContent='本地时区：'+Intl.DateTimeFormat().resolvedOptions().timeZone;
   status(draft?'已恢复上次未提交的配置。':'导入号码、填写正文并选择设备。');
   try{lastTaskId=localStorage.getItem(lastTaskKey)||null;}catch{lastTaskId=null;}
-  taskStatus('');get('cancel').hidden=true;get('submit').disabled=false;inflight=false;
+  void refreshInlineTask();clearInterval(inlineTaskTimer);inlineTaskTimer=setInterval(()=>void refreshInlineTask(),5000);
+  taskStatus('');get('cancel').hidden=true;get('resume').hidden=true;get('submit').disabled=false;inflight=false;
   dialog.showModal();
   watchTask(lastTaskId);
  }
@@ -1118,6 +1174,15 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
    status(parsed.numbers.length?'号码已导入，原 TXT 不变。':'未找到有效号码，请检查文件内容。',!parsed.numbers.length);scheduleLocalDraftSave();
   }catch{if(revision===fileRevision)status('文件读取失败，请检查文件编码或重新选择。',true);}
  });
+ get('resume').addEventListener('click',async()=>{
+  const id=get('resume').dataset.taskId;if(!id)return;
+  get('resume').disabled=true;
+  try{
+   const task=await deviceRequest('/api/sms-tasks/'+encodeURIComponent(id)+'/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'},10000);
+   taskStatus(taskLabel(task));get('resume').hidden=true;watchTask(id);
+  }catch(error){taskStatus('未能继续：'+error.message,true);}
+  finally{get('resume').disabled=false;}
+ });
  get('cancel').addEventListener('click',async()=>{
   const id=get('cancel').dataset.taskId;if(!id)return;
   get('cancel').disabled=true;
@@ -1137,7 +1202,7 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
   const library=texts();if(!library.length||library.some(text=>text.length>6000)){status('文本库至少需要一条正文，每条不超过 6000 字。',true);return;}
   if(!selected.length){status('请至少勾选一台参与设备。',true);return;}
   if(selected.some(([,value])=>!Number.isInteger(value.min)||!Number.isInteger(value.max)||value.min<1||value.max<value.min||value.max>86400)){status('请检查勾选设备的间隔：1–86400 秒，最大值不能小于最小值。',true);return;}
-  const concurrency=Number(get('concurrency').value);if(!Number.isInteger(concurrency)||concurrency<1||concurrency>20||concurrency>selected.length){status('同时操作设备数须为 1–20，且不能超过所选设备数。',true);return;}
+  const concurrency=Number(get('concurrency').value);if(!Number.isInteger(concurrency)||concurrency<1||concurrency>3||concurrency>selected.length){status('在途自动发送同时最多 3 台，且不能超过所选设备数。',true);return;}
   const startMode=form.querySelector('[name=new-sms-start-mode]:checked').value,startLocal=get('start-at').value;
   if(startMode==='scheduled'&&(!startLocal||!Number.isFinite(new Date(startLocal).getTime())||new Date(startLocal).getTime()<=Date.now())){status('请选择未来的定时开始日期和时间。',true);return;}
   if(startMode==='immediate'&&selected.some(([id])=>!ready.has(id))){status('立即发送所选设备必须已就绪；设备恢复画面后重试，或改为定时发送。',true);return;}
@@ -1148,8 +1213,10 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
   try{
    const task=await deviceRequest('/api/sms-tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)},20000);
    lastTaskId=task.id;try{localStorage.setItem(lastTaskKey,lastTaskId);}catch{}
+   updateInlineTask(task);
    status(startMode==='scheduled'?'定时发送任务已保存；到时会自动执行。':'立即发送任务已创建，后台开始执行。');
    taskStatus(taskLabel(task));get('cancel').dataset.taskId=task.id;get('cancel').hidden=false;
+   get('resume').hidden=true;
    watchTask(task.id);
   }catch(error){status('任务未创建：'+error.message,true);}
   finally{inflight=false;get('submit').disabled=false;get('submit').removeAttribute('aria-busy');}

@@ -16,6 +16,8 @@ def serialize(kind,fields):
     return {'ObjectType':kind,'Value':passthrough({k:passthrough(v) for k,v in fields.items()})}
 
 async def scan(service):
+    if hasattr(service, 'set_show_visuals'):
+        await service.set_show_visuals(False)
     items=[];iterator=service.iter_elements()
     try:
         async with asyncio.timeout(18):

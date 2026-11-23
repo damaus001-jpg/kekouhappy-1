@@ -203,8 +203,12 @@ def main():
     notification_monitor=NotificationMonitor(devices,workspace_service.phone_lock,
         lambda device: nullcontext(),workspace_service.banner_notifications,
         lambda d: control_allowed(d) and not reconnects.pending(d['udid']) and viewer_ready(d),stopping,
-        interval=2,lock_for=workspace_service.device_lock,manual_device=lambda: manager.active,
+        interval=2,lock_for=workspace_service.device_lock,manual_device=lambda: manager.selected,
         on_new_cards=play_notification_sound)
+    from unread_badge import UnreadBadgeMonitor
+    unread_badge_monitor=UnreadBadgeMonitor(devices,workspace_service.unread_icon_badge,
+        lambda d: connection_allowed(d,enabled) and not reconnects.pending(d['udid']) and viewer_ready(d),
+        stopping,lambda:manager.selected,workspace_service.device_lock,interval=2)
     # Banner discovery has no legacy scan-policy or gesture-control lease.
     workspace_service.notification_runner.set_enabled(True)
     notification_monitor.set_enabled(True)
@@ -233,6 +237,7 @@ def main():
         if startup_queue.request(device):device['error']='排队等待接入，逐台准备画面…'
 
     def stop_viewer(device):
+        workspace_service.notification_runner.retire(device['udid'])
         child=children.get(device['udid'])
         if child is None or child.poll() is not None:return
         from owned_viewer_process import stop_tree
@@ -306,6 +311,7 @@ def main():
                 if manager.active not in {d['udid'] for d in devices}:manager.active=None
                 if manager.selected not in {d['udid'] for d in devices}:manager.selected=None
             notification_monitor.update_devices(devices)
+            unread_badge_monitor.update_devices(devices)
             for device in removed:
                 startup_queue.cancel(device['udid'])
                 stop_viewer(device)
@@ -588,6 +594,8 @@ def main():
                     return self.respond(200,{'tasks':sms_task_runner.list(limit)})
                 except (ValueError,TypeError):
                     return self.respond(404,{'error':'短信任务不存在或查询参数无效'})
+            if parsed.path == '/api/sms-tasks/daily':
+                return self.respond(200,{'tasks':sms_task_runner.daily_summary()})
             if parsed.path == '/api/cpu':
                 return self.respond(200, {'cpu_percent': cpu_usage.snapshot()})
             if parsed.path == '/api/contact-profile':
@@ -623,6 +631,7 @@ def main():
                              'sms_task_busy':sms_device_busy(device['udid']),
                              **reconnects.snapshot(device['udid']),
                              **input_readiness_snapshot(device['udid']), 'trust_pending':device['udid'] in trust_pending,
+                             'unread_badge':unread_badge_monitor.snapshot(device['udid']),
                              'notifications':notifications})
             return self.respond(200,{'devices':rows,'active':manager.active,'selected':manager.selected,'scan_enabled':notification_monitor.enabled,'translation_enabled':False,'cpu_percent':cpu_usage.snapshot()})
 
@@ -651,6 +660,17 @@ def main():
                     return self.respond(400,{'error':str(exc)})
                 except Exception:
                     return self.respond(503,{'error':'短信任务未创建，请刷新设备状态后重试；没有发送短信'})
+            if self.path.startswith('/api/sms-tasks/') and self.path.endswith('/resume'):
+                try:
+                    identifier=self.path.removeprefix('/api/sms-tasks/').removesuffix('/resume')
+                    task=sms_task_runner.snapshot(identifier)
+                    for configured in task['devices']:
+                        target=next((row for row in devices if row['udid']==configured['udid']),None)
+                        if target is None:raise ValueError('任务设备已不存在')
+                        require_control(target)
+                    return self.respond(200,sms_task_runner.resume_unsent(identifier))
+                except ValueError as exc:
+                    return self.respond(400,{'error':str(exc)})
             if self.path.startswith('/api/sms-tasks/') and self.path.endswith('/cancel'):
                 try:
                     identifier=self.path.removeprefix('/api/sms-tasks/').removesuffix('/cancel')
@@ -874,6 +894,21 @@ def main():
                     if target is None:raise ValueError('Unknown device')
                     if reconnects.pending(target['udid']):raise ValueError('该手机正在重新连接，请稍候')
                     if target['udid'] in trust_pending:raise ValueError('该手机正在等待信任确认')
+                    previous=manager.selected
+                    if previous and previous!=target['udid']:
+                        old=next((row for row in devices if row['udid']==previous),None)
+                        if old and manager.active==previous and control_allowed(old) and viewer_ready(old) and not reconnects.pending(previous):
+                            with workspace_service.device_lock(previous):
+                                if manager.active==previous and control_allowed(old) and viewer_ready(old):
+                                    request=urllib.request.Request(f"http://127.0.0.1:{old['port']}/manual-home",
+                                        data=b'{}',headers={'Content-Type':'application/json'},method='POST')
+                                    try:
+                                        with signed_opener().open(request,timeout=5) as response:
+                                            if response.status!=200:raise RuntimeError('Home action rejected')
+                                    except Exception:
+                                        # Selection remains available; the badge reader will
+                                        # report unavailable until the device is on Home.
+                                        pass
                     manager.select(body['udid'],ready=control_allowed(target) and viewer_ready(target))
                     readiness=input_readiness_snapshot(body['udid'])
                 return self.respond(200,{'active':manager.active,'selected':manager.selected,**readiness})
@@ -918,11 +953,13 @@ def main():
         threading.Thread(target=watch_viewers,daemon=True).start()
         threading.Thread(target=watch_input_readiness,daemon=True).start()
         threading.Thread(target=notification_monitor.run,daemon=True).start()
+        threading.Thread(target=unread_badge_monitor.run,name='unread-icon-badges',daemon=True).start()
         threading.Thread(target=sms_task_runner.run,name='sms-task-scheduler',daemon=True).start()
         controller.emit({'status':'dashboard_ready','url':f'http://127.0.0.1:{args.port}/','devices':devices})
         server.serve_forever(poll_interval=0.25)
     finally:
         stopping.set()
+        workspace_service.notification_runner.set_enabled(False)
         foreground_reader.close()
         if cpu_thread.is_alive():cpu_thread.join(timeout=2)
         startup_queue.close()

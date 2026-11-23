@@ -3,6 +3,8 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
+from datetime import datetime, timezone
 
 from sms_tasks import SmsTaskRunner, SmsTaskWait
 
@@ -59,6 +61,47 @@ class SmsTaskRunnerTests(unittest.TestCase):
         restored = SmsTaskRunner(self.temp.name, lambda: self.devices, self.deliver,
                                  self.stopping, max_workers=2)
         self.assertEqual(restored.snapshot(task["id"])["status"], "scheduled")
+
+    def test_explicit_resume_reconciles_receipt_and_sends_only_remaining_numbers(self):
+        task = self.runner.create(self.body())
+        job = self.runner.jobs[task['id']]
+        first = job['items'][0]
+        path = self.runner._write_unit(task['id'], first)
+        unit = json.loads(path.read_text(encoding='utf-8'))
+        SmsTaskRunner.write_unit_status(path, unit, 'sent_verified', sent_at='2026-11-22T12:00:00+00:00')
+        first['status'] = 'failed'
+        job['status'] = 'failed'
+        result = self.runner.resume_unsent(task['id'])
+        self.assertEqual(result['counts'], {'sent_verified': 1, 'queued': 2})
+        self.runner._run_job(task['id'])
+        self.assertEqual(self.runner.snapshot(task['id'])['counts'], {'sent_verified': 3})
+        self.assertEqual({r[1] for r in self.deliveries}, set(self.body()['numbers'][1:]))
+
+    def test_explicit_resume_rejects_send_marker_even_when_unit_still_ready(self):
+        task = self.runner.create(self.body())
+        job = self.runner.jobs[task['id']]
+        job.update(status='failed')
+        first = job['items'][0]
+        first['status'] = 'failed'
+        path = self.runner._write_unit(task['id'], first)
+        unit = json.loads(path.read_text(encoding='utf-8'))
+        unit['send_requested_at'] = '2026-11-22T12:00:00+00:00'
+        path.write_text(json.dumps(unit), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '禁止自动重发'):
+            self.runner.resume_unsent(task['id'])
+        self.assertEqual(job['status'], 'failed')
+        self.assertEqual(first['status'], 'failed')
+
+    def test_explicit_resume_rejects_receipt_for_different_recipient(self):
+        task = self.runner.create(self.body())
+        job = self.runner.jobs[task['id']]
+        job['status'] = 'failed'
+        path = self.runner._write_unit(task['id'], job['items'][0])
+        unit = json.loads(path.read_text(encoding='utf-8'))
+        unit.update(number='+15559999999', status='sent_verified')
+        path.write_text(json.dumps(unit), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '不匹配'):
+            self.runner.resume_unsent(task['id'])
 
     def test_scheduled_task_runs_once_when_due(self):
         from datetime import datetime, timedelta, timezone
@@ -118,6 +161,142 @@ class SmsTaskRunnerTests(unittest.TestCase):
         self.assertEqual(restored.snapshot(task["id"])["status"], "uncertain")
         self.assertEqual(restored.snapshot(task["id"])["counts"], {"uncertain": 1})
         self.assertEqual(self.deliveries, [])
+
+    def test_gap_starts_at_send_action_and_receipt_time_is_included(self):
+        clock = [1000.0]
+        calls, waits = [], []
+        def deliver(device, job, item, path):
+            calls.append(clock[0])
+            unit = json.loads(path.read_text())
+            unit['send_requested_at'] = datetime.fromtimestamp(clock[0], timezone.utc).isoformat()
+            clock[0] += 20  # receipt verification and navigation back to list
+            SmsTaskRunner.write_unit_status(path, unit, 'sent_verified',
+                sent_at=datetime.fromtimestamp(clock[0], timezone.utc).isoformat())
+            return 'sent_verified'
+        def wait(seconds):
+            waits.append(seconds)
+            snapshot = self.runner.snapshot(task['id'])
+            self.assertEqual(snapshot['waiting_next_compose'], 1)
+            self.assertEqual(snapshot['in_flight'], 0)
+            clock[0] += seconds
+            return True
+        self.runner.deliver = deliver
+        task = self.runner.create(self.body(numbers=['+15550000001', '+15550000002'],
+            devices={'phone-a': {'min': 30, 'max': 30}}, concurrency=1))
+        with patch('sms_tasks.time.time', side_effect=lambda: clock[0]), \
+                patch.object(self.runner, '_wait_interval', side_effect=wait):
+            self.runner._run_job(task['id'])
+        self.assertEqual(calls, [1000, 1030])
+        self.assertEqual(waits, [10])
+
+    def test_slow_receipt_does_not_add_another_full_interval(self):
+        clock = [1000.0]
+        def deliver(device, job, item, path):
+            unit = json.loads(path.read_text())
+            unit['send_requested_at'] = datetime.fromtimestamp(clock[0], timezone.utc).isoformat()
+            clock[0] += 40
+            SmsTaskRunner.write_unit_status(path, unit, 'sent_verified',
+                sent_at=datetime.fromtimestamp(clock[0], timezone.utc).isoformat())
+            return 'sent_verified'
+        self.runner.deliver = deliver
+        task = self.runner.create(self.body(numbers=['+15550000001', '+15550000002'],
+            devices={'phone-a': {'min': 30, 'max': 30}}, concurrency=1))
+        with patch('sms_tasks.time.time', side_effect=lambda: clock[0]), \
+                patch.object(self.runner, '_wait_interval') as wait:
+            self.runner._run_job(task['id'])
+        wait.assert_not_called()
+
+    def test_waiting_next_compose_does_not_reserve_slot_for_other_devices(self):
+        entered_wait = threading.Event()
+        other_sent = threading.Event()
+        def deliver(device, job, item, path):
+            self.deliver(device, job, item, path)
+            if device == 'phone-b':
+                other_sent.set()
+            return 'sent_verified'
+        def wait(_seconds):
+            entered_wait.set()
+            self.assertTrue(other_sent.wait(2), 'second device was starved by the first device interval')
+            return True
+        self.runner.deliver = deliver
+        task = self.runner.create(self.body(concurrency=1))
+        # Use current action timestamps so device A genuinely has an interval to wait.
+        def delivery(device, job, item, path):
+            result = deliver(device, job, item, path)
+            unit = json.loads(path.read_text())
+            unit['send_requested_at'] = datetime.now(timezone.utc).isoformat()
+            path.write_text(json.dumps(unit))
+            return result
+        self.runner.deliver = delivery
+        with patch.object(self.runner, '_wait_interval', side_effect=wait):
+            self.runner._run_job(task['id'])
+        self.assertTrue(entered_wait.is_set())
+        self.assertEqual(self.runner.snapshot(task['id'])['status'], 'completed')
+
+    def test_api_and_legacy_tasks_never_exceed_three_in_flight(self):
+        self.devices.update({'phone-c': {}, 'phone-d': {}})
+        devices = {device: {'min': 1, 'max': 1} for device in self.devices}
+        with self.assertRaisesRegex(ValueError, '3'):
+            self.runner.create(self.body(devices=devices, concurrency=4))
+        task = self.runner.create(self.body(devices=devices, concurrency=3,
+            numbers=['+15550000001', '+15550000002', '+15550000003', '+15550000004']))
+        self.runner.jobs[task['id']]['concurrency'] = 20  # legacy persisted configuration
+        self.runner._save(self.runner.jobs[task['id']])
+        runner = SmsTaskRunner(self.temp.name, lambda: self.devices, self.deliver, self.stopping, max_workers=20)
+        self.assertEqual(runner.max_workers, 3)
+        active = [0, 0]
+        lock = threading.Lock()
+        barrier = threading.Barrier(3)
+        def deliver(device, job, item, path):
+            with lock:
+                active[0] += 1
+                active[1] = max(active)
+            try:
+                if item['index'] < 3:
+                    barrier.wait(timeout=3)
+                return self.deliver(device, job, item, path) or 'sent_verified'
+            finally:
+                with lock:
+                    active[0] -= 1
+        runner.deliver = deliver
+        runner._run_job(task['id'])
+        self.assertEqual(active[1], 3)
+        self.assertEqual(runner.snapshot(task['id'])['status'], 'completed')
+
+    def test_known_send_then_return_failure_stops_without_reclassifying_or_replaying_send(self):
+        def deliver(device, job, item, path):
+            self.deliver(device, job, item, path)
+            raise RuntimeError('return navigation failed')
+        self.runner.deliver = deliver
+        task = self.runner.create(self.body(numbers=['+15550000001']))
+        self.runner._run_job(task['id'])
+        result = self.runner.snapshot(task['id'])
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['counts'], {'sent_verified': 1})
+        self.assertIn('返回短信列表失败', result['error'])
+        restored = SmsTaskRunner(self.temp.name, lambda: self.devices, self.deliver, self.stopping)
+        self.assertEqual(restored.snapshot(task['id'])['status'], 'failed')
+        self.assertEqual(len(self.deliveries), 1)
+
+    def test_restart_keeps_send_action_interval_for_next_unsent_number(self):
+        task = self.runner.create(self.body(numbers=['+15550000001', '+15550000002'],
+            devices={'phone-a': {'min': 30, 'max': 30}}, concurrency=1))
+        job = self.runner.jobs[task['id']]
+        job['status'] = 'running'
+        job['items'][0].update(status='sending', next_delay_seconds=30)
+        path = self.runner._write_unit(task['id'], job['items'][0])
+        unit = json.loads(path.read_text())
+        unit['send_requested_at'] = datetime.fromtimestamp(1000, timezone.utc).isoformat()
+        SmsTaskRunner.write_unit_status(path, unit, 'sent_verified',
+            sent_at=datetime.fromtimestamp(1020, timezone.utc).isoformat())
+        self.runner._save(job)
+        restored = SmsTaskRunner(self.temp.name, lambda: self.devices, self.deliver, self.stopping)
+        waits = []
+        with patch('sms_tasks.time.time', return_value=1020), \
+                patch.object(restored, '_wait_interval', side_effect=lambda delay: waits.append(delay) or True):
+            restored._run_job(task['id'])
+        self.assertEqual(waits, [10])
+        self.assertEqual(len(self.deliveries), 1)
 
 
 if __name__ == "__main__":

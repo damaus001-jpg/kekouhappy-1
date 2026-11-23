@@ -14,6 +14,8 @@
 .device-entry{min-width:0;align-items:center;gap:7px;padding:14px 3px 10px;text-align:center}
 .device-entry strong{font-size:10px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .device-entry .device-state{font-size:9px}
+.device-entry .device-number-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;max-width:100%;min-height:19px;overflow:visible}
+.device-entry .unread-count-badge{position:absolute;top:-8px;right:-19px;z-index:2;display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:12px;background:#d93636;color:#fff;font-size:10px;font-weight:700;line-height:1;box-shadow:0 0 0 1px #24291f}
 .device-entry .device-remark{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:#53675b;line-height:1.4}
 .device-entry .device-remark.followup{color:var(--workspace-accent-edge,#9b641b);background:#fff1ce;border-radius:4px;padding:1px 4px;font-weight:600}
 .followup-panel{margin:0 16px 10px;border:1px solid var(--line);border-radius:7px;flex:none}.followup-panel summary{padding:8px 10px;font-size:12px;cursor:pointer}.followup-contact-list{display:flex;flex-wrap:wrap;gap:6px;padding:0 10px 10px;max-height:150px;overflow:auto}.followup-contact{background:#fff7df;border:1px solid #eadab2;color:var(--workspace-accent-edge,#705525);font-size:11px;padding:7px 9px;overflow-wrap:anywhere}.device-remark.followup:hover{text-decoration:underline}
@@ -260,6 +262,9 @@ body{background-image:radial-gradient(ellipse at 8% 0%,var(--workspace-accent-a0
 .current-display-device.current{border-color:var(--workspace-accent,#d5bd68);background:var(--workspace-accent-surface,#39351f);color:var(--workspace-accent,#ffe284)}
 #new-sms-task{position:sticky;top:0;z-index:2;flex:none;width:100%;min-height:48px;margin-bottom:5px;padding:7px 3px;border:1px solid #6198ec;border-radius:6px;background:#286bce;color:#fff;box-shadow:inset 0 1px #ffffff20;font-size:12px;line-height:1.35;font-weight:600;text-align:center}
 #new-sms-task span{display:block}#new-sms-task:hover:not(:disabled){background:#347ce3;color:#fff;border-color:#84b6ff}
+#sms-task-list-open{width:100%;min-height:38px;margin:0 0 8px;padding:6px 3px;font-size:12px;line-height:1.25;white-space:normal;word-break:keep-all}
+.sms-task-list-dialog{width:min(1040px,96vw);max-height:88vh;overflow:auto}
+.sms-task-table-wrap{overflow:auto;max-height:66vh}.sms-task-table{width:100%;border-collapse:collapse;font-size:13px}.sms-task-table th,.sms-task-table td{padding:9px 10px;border-bottom:1px solid #414c37;text-align:left;white-space:nowrap}.sms-task-table th{position:sticky;top:0;background:#242d23}.sms-task-table tr[data-active=true]{background:#30402f}.sms-task-table .task-error{color:#f3a59b;white-space:normal;max-width:340px}.sms-task-table button{padding:5px 9px;font-size:12px}
 .new-sms-dialog{width:min(1440px,96vw);max-width:none;height:min(740px,94dvh);max-height:94dvh;overflow:hidden;padding:18px;border:1px solid #4b563d;border-radius:12px;background:#242d23;color:var(--ink);font-size:14px;box-shadow:0 12px 35px #0006,inset 0 1px var(--workspace-accent-a09,#e3dc8709)}
 .new-sms-dialog form{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:14px}
 .new-sms-dialog::backdrop{background:#030805b8;backdrop-filter:blur(3px)}
@@ -334,6 +339,8 @@ main{max-width:none;width:100%;margin:0;padding:8px;gap:8px;transition:height 18
 .foreground-reading{display:flex;align-items:center;gap:8px;padding:6px 12px;color:#fff;font-size:14px;flex-wrap:wrap}
 .foreground-reading button{font-size:14px;padding:4px 8px}
 .foreground-reading button[hidden]{display:none}
+.foreground-reading #sms-task-status-inline{flex:1 1 180px;min-width:120px;padding:3px 9px;border-left:1px solid #ffffff45;color:#fff;font-size:12px;line-height:1.45}
+.foreground-reading #sms-task-status-inline[hidden]{display:none}
 .phone-panel>.section-title{height:auto;gap:6px}
 .phone-actions{display:flex;align-items:center;gap:6px;flex:0 1 auto;flex-wrap:nowrap;min-width:0;max-width:100%;overflow:visible;white-space:nowrap}
 .phone-title-container{display:flex;align-items:center;gap:8px;flex:0 0 auto;white-space:nowrap}.phone-title-container h2{margin:0;font-size:20px;line-height:24px}

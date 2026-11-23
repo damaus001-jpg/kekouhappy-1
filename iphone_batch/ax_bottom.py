@@ -21,6 +21,8 @@ async def move_focus(service, direction, quiet=.08):
                     items = data if isinstance(data, list) else [data]
                     if items:
                         return items[0]
+    if hasattr(service, 'set_show_visuals'):
+        await service.set_show_visuals(False)
     while not service._event_queue.empty():
         service._event_queue.get_nowait()
     await service.move_focus(direction)

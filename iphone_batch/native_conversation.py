@@ -10,6 +10,8 @@ from native_ui_scan import scan
 ROOT=Path(__file__).resolve().parent/'.device-data';common._HOMEFOLDER=ROOT
 DEVICE='00008030-001C481A3C32802E'
 def phone_key(value):
+    if not isinstance(value, str):return None
+    value=value.translate({0x200e:None,0x200f:None})
     value=value.replace('\u200e','').strip()
     if not re.fullmatch(r'\+?[\d ()-]+',value):return None
     digits=re.sub(r'\D','',value)

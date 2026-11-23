@@ -118,6 +118,11 @@ startVideoReports();
 window.addEventListener('pagehide',()=>{clearInterval(videoReportTimer);videoReportTimer=null;});
 let inputReady = !batchManaged, inputHealthPaused = false, inputMonitor = null, inputEpoch = 0;
 function controlAvailable() { return batchActive && inputReady; }
+window.touchTrace = new TouchDiagnostics({enabled: window.__devTouchTrace === true,
+    state: () => ({input_ready: inputReady, batch_active: batchActive,
+        active_pointer: activePointer === null ? -1 : activePointer,
+        pointer_running: pointerInput.running, pointer_active: pointerInput.active,
+        queue: pointerInput.queue.length})});
 if (batchManaged) document.body.classList.add('batch-preview', 'frame-on');
 window.AUDIO_DEFAULT_ON = __AUDIO_DEFAULT_ON__;
 // Resolution-collapse compensation default (server --compensate flag), with a
@@ -301,6 +306,7 @@ function touchCoords(e) {
 }
 
 function reportManualInputFailure(path, error) {
+    window.touchTrace?.record('input-error');
     const message = error?.message || '控制输入失败，请检查手机连接';
     log(path + ' err: ' + message);
     if (batchManaged) {
@@ -369,6 +375,7 @@ canvas.addEventListener('wheel', event => {if(controlAvailable())notifyForegroun
 // cursor is over (often nothing). Mirror up / cancel / lostcapture
 // listeners onto `window` so we always see the release.
 function releaseActive() {
+    window.touchTrace?.record('pointer-end');
     wheelInput.stop();
     if (activePointer === null) return;
     activePointer = null;
@@ -379,8 +386,10 @@ function releaseActive() {
 }
 canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 && e.button !== 1) return;
-    if (activePointer !== null) return;
+    window.touchTrace?.record('pointer-down', {button: e.button, pointer_id: e.pointerId});
+    if (activePointer !== null) { window.touchTrace?.record('pointer-busy'); return; }
     if (!controlAvailable()) {
+        window.touchTrace?.record('pointer-blocked');
         reportManualInputFailure('/manual-touch', Error('当前手机控制连接尚未就绪，请检查连接后重新操作'));
         inputMonitor?.invalidate();
         return;
@@ -414,6 +423,7 @@ function onMove(e) {
     pointerInput.move(lastCoords);
 }
 function onUp(e) {
+    window.touchTrace?.record(e.type === 'pointercancel' ? 'pointer-cancel' : 'pointer-up', {pointer_id: e.pointerId});
     if (e.pointerId !== activePointer) return;
     const rect=canvas.getBoundingClientRect();
     const completedTap=activePointerButton===0&&e.type==='pointerup'&&foregroundPointerStart!==null&&!foregroundPointerMoved&&
@@ -463,6 +473,7 @@ document.addEventListener('visibilitychange', () => {
 });
 // Right-click on the phone image = Home button, matching the original control.
 canvas.addEventListener('contextmenu', (e) => {
+    window.touchTrace?.record('home');
     e.preventDefault();
     releaseActive();
     pointerInput.idle()
@@ -2130,6 +2141,7 @@ inputMonitor = new InputHealthMonitor({
     eligible: () => !inputHealthPaused && !pastePending && !document.hidden && activePointer === null &&
         !pointerInput.running && !wheelInput.active && pressedUsages.size === 0,
     changed: state => {
+        window.touchTrace?.record('health-change', {input_ready: state.ready});
         if (!state.ready && inputReady) inputEpoch++;
         inputReady = state.ready;
         if (!state.ready) { releaseActive(); releaseAllKeys(); }

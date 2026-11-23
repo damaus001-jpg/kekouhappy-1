@@ -55,7 +55,13 @@ def stage_files(stage,build,electron,version,host_only=False):
         if candidate.is_file():shutil.copy2(candidate,runtime/'NODE-LICENSE.txt');break
     print('Copying 8070 source and web assets; excluding runtime data...',flush=True)
     files=command(['git','-c','safe.directory='+ROOT.as_posix(),'-c','core.quotepath=false','ls-files','iphone_batch']).stdout.splitlines()
-    files=sorted(set(files+['iphone_batch/host_access.py','iphone_batch/host_control.py','iphone_batch/web/workspace_theme.js','iphone_batch/message_banner.py','iphone_batch/sms_tasks.py']))
+    files=sorted(set(files+[
+        'iphone_batch/host_access.py','iphone_batch/host_control.py',
+        'iphone_batch/web/workspace_theme.js','iphone_batch/web/touch_diagnostics.js',
+        'iphone_batch/message_banner.py','iphone_batch/message_icon_badge.py',
+        'iphone_batch/notification_worker.py','iphone_batch/sms_tasks.py',
+        'iphone_batch/touch_diagnostics.py','iphone_batch/unread_badge.py',
+    ]))
     for name in files:
         relative=Path(name)
         if '.device-data' in relative.parts or '__pycache__' in relative.parts or relative.name.startswith('test_'):continue
@@ -66,7 +72,8 @@ def stage_files(stage,build,electron,version,host_only=False):
     for name in root_files:
         shutil.copy2(ROOT/name,stage/name)
     (stage/'tools').mkdir(exist_ok=True)
-    shutil.copy2(ROOT/'tools/check_8070_install.py',stage/'tools/check_8070_install.py')
+    for name in ('check_8070_install.py','PACKAGING_8070.md','PERFORMANCE_8070.md','TOUCH_DIAGNOSTICS_8070.md'):
+        shutil.copy2(ROOT/'tools'/name,stage/'tools'/name)
     (stage/'使用说明.txt').write_text(
         '皮卡丘手机工作台 '+version+'\n\nWindows 10/11 x64。包含独立桌面入口、Python、Node 和项目依赖，无需预装开发环境。\n'
         '首次使用：\n1. 安装 Apple Mobile Device USB 驱动与服务（可通过 Apple 官方 iTunes 安装）。\n'
@@ -179,8 +186,8 @@ def main():
     for dll in crt.glob('*.dll'):shutil.copy2(dll,stage/'runtime'/dll.name)
     # Refresh validation and release documentation when reusing a runtime stage.
     for name in ('README.md','RECOVERY.md','VERSION'):shutil.copy2(ROOT/name,stage/name)
-    shutil.copy2(ROOT/'tools/check_8070_install.py',stage/'tools/check_8070_install.py')
-    shutil.copy2(ROOT/'tools/PACKAGING_8070.md',stage/'tools/PACKAGING_8070.md')
+    for name in ('check_8070_install.py','PACKAGING_8070.md','PERFORMANCE_8070.md','TOUCH_DIAGNOSTICS_8070.md'):
+        shutil.copy2(ROOT/'tools'/name,stage/'tools'/name)
     shutil.copy2(ROOT/'iphone_batch/WORKSPACE.md',stage/'iphone_batch/WORKSPACE.md')
     (ROOT/'.tmp/8070-current-build.json').write_text(json.dumps({'build':str(build),'stage':str(stage)}),encoding='utf-8')
     finish(stage,build,iscc,version)

@@ -10,6 +10,20 @@ from workspace_service import WorkspaceService
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_followup_open_without_messages_does_not_reconcile_or_backup_phone(self):
+        from unittest.mock import Mock
+        from message_archive import archive_reading
+        with tempfile.TemporaryDirectory() as directory:
+            native = Mock(return_value={'phone_number': '+12025550176', 'messages': [],
+                'contact': '+12025550176', 'source': 'native-current', 'raw_elements': []})
+            service = WorkspaceService(directory, native=native, translator=archive_reading)
+            with patch.object(service, '_backup', side_effect=AssertionError('must not backup')):
+                result = service.dispatch('device-05', {'action': 'open', 'phone_number': '+12025550176'}, 'local')
+            native.assert_called_once_with('device-05', 'open', 'local', phone='+12025550176')
+            self.assertEqual(result['message_count'], 0)
+            self.assertIn('自行输入', result['scope'])
+            self.assertIsNotNone(service.conversation('device-05', result['conversation_id']))
+
     def test_history_overlap_preserves_identical_occurrences(self):
         def message(text):return {'side':'incoming','text':text,'time':'10:00','kind':'text'}
         first=list(map(message,['A','Okay','Okay','B']))
@@ -237,12 +251,13 @@ class RecipientFocusTests(unittest.IsolatedAsyncioTestCase):
         number='+13153602544'
         current={'phone_number':number,'messages':[]}
         pages=[[{'caption':'To:'},{'caption':'Message'},{'caption':'New Message, Show Conversation Details, Button'}],
-               [{'caption':'To:, '+number}]]
+               [{'caption':'To:, '+number}], [{'caption':number+', Button'},{'caption':'Message'}],
+               [{'caption':number+', Button'},{'caption':'Message'}]]
         with patch('native_workspace.list_page',AsyncMock(return_value=[{'caption':'Messages, Header'}])), patch('native_workspace.raw_page',AsyncMock(side_effect=pages)), patch('native_workspace.read',AsyncMock(return_value=current)), patch('native_workspace.asyncio.sleep',AsyncMock()):
             self.assertEqual(await open_phone_conversation(None,phone,number),current)
         phone.chord.assert_awaited_once_with(0x11)
         phone.paste.assert_awaited_once_with(number)
-        self.assertEqual([c.args for c in phone.keys.await_args_list],[([0x28],),([], )])
+        self.assertEqual([c.args for c in phone.keys.await_args_list],[([0x28],),([], ),([0x28],),([], )])
 
     async def test_open_preserves_existing_phone_draft(self):
         phone=AsyncMock()
@@ -253,7 +268,7 @@ class RecipientFocusTests(unittest.IsolatedAsyncioTestCase):
     async def test_open_rejects_wrong_recipient_before_confirmation(self):
         phone=AsyncMock()
         pages=[[{'caption':'To:'},{'caption':'Message'},{'caption':'New Message, Show Conversation Details, Button'}],
-               [{'caption':'To:, +13153602545'}]]
+               *[[{'caption':'To:, +13153602545'}]]*4]
         with patch('native_workspace.list_page',AsyncMock()), patch('native_workspace.raw_page',AsyncMock(side_effect=pages)), patch('native_workspace.asyncio.sleep',AsyncMock()):
             with self.assertRaises(ValueError):await open_phone_conversation(None,phone,'+13153602544')
         phone.keys.assert_not_awaited()
@@ -261,7 +276,8 @@ class RecipientFocusTests(unittest.IsolatedAsyncioTestCase):
     async def test_open_rechecks_final_conversation_number(self):
         phone=AsyncMock()
         pages=[[{'caption':'To:'},{'caption':'Message'},{'caption':'New Message, Show Conversation Details, Button'}],
-               [{'caption':'To:, +13153602544'}]]
+               [{'caption':'To:, +13153602544'}], [{'caption':'+13153602544, Button'},{'caption':'Message'}],
+               [{'caption':'+13153602544, Button'},{'caption':'Message'}]]
         with patch('native_workspace.list_page',AsyncMock()), patch('native_workspace.raw_page',AsyncMock(side_effect=pages)), patch('native_workspace.read',AsyncMock(return_value={'phone_number':'+13153602545'})), patch('native_workspace.asyncio.sleep',AsyncMock()):
             with self.assertRaises(ValueError):await open_phone_conversation(None,phone,'+13153602544')
 

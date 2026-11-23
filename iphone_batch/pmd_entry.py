@@ -16,6 +16,19 @@ def main():
     from tunnel_target import install as install_targeted_tunnel
     install_targeted_tunnel()
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == 'trace-touch':
+        import argparse
+        import asyncio
+        from touch_diagnostics import collect_phone, enabled
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--udid', required=True)
+        args = parser.parse_args(sys.argv[2:])
+        if not enabled():
+            parser.error('Touch tracing is available only in a development checkout')
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.run(collect_phone(args.udid))
+        return
     if 'reset-workspace-session' in sys.argv:
         from media_recovery import install_cli
         install_cli()
