@@ -54,8 +54,41 @@ def title_number(caption):
     return None
 
 
-async def probe_title(service, *, recover_first=False):
+STATUS_BAR_MARKERS = ('Swipe down with three fingers', 'Wi-Fi bars',
+                      'battery power', 'Cellular')
+
+
+def looks_like_status_bar(caption):
+    return isinstance(caption, str) and any(marker in caption for marker in STATUS_BAR_MARKERS)
+
+
+async def lock_sms_audit_target(service):
+    """Point the audit focus at the live MobileSMS process so traversal stays
+    inside Messages instead of the SpringBoard status bar. Returns True only
+    when a unique MobileSMS pid was applied."""
+    try:
+        from pymobiledevice3.services.os_trace import OsTraceService
+        lockdown = getattr(service, 'lockdown', None)
+        if lockdown is None:
+            return False
+        async with OsTraceService(lockdown) as trace:
+            processes = (await asyncio.wait_for(trace.get_pid_list(), 2.5))['Payload']
+        pids = [int(pid) for pid, row in processes.items()
+                if row.get('ProcessName') == 'MobileSMS']
+        if len(pids) != 1:
+            return False
+        await service._invoke('deviceSetAuditTargetPid:', pids[0], expects_reply=False)
+        await asyncio.sleep(.15)
+        while not service._event_queue.empty():
+            service._event_queue.get_nowait()
+        return True
+    except Exception:
+        return False
+
+
+async def _probe_once(service, *, recover_first=False):
     count, monitoring = 0, False
+    seen = []
     try:
         # Setup has its own bound; each focus request/response below gets a
         # fresh 200 ms budget, including ignored or duplicate events.
@@ -88,11 +121,14 @@ async def probe_title(service, *, recover_first=False):
                         break
                 previous = key
                 count += 1
+                seen.append(item.caption or '')
                 number = title_number(item.caption)
                 if number:
                     contact = next(item.caption.partition(marker)[0].strip() for marker, _ in TITLE_MARKERS if marker in item.caption)
                     return {'found': True, 'phone_number': number, 'contact': contact, 'elements_checked': count}
     except TimeoutError:
+        if seen and all(looks_like_status_bar(caption) for caption in seen):
+            return {'found': False, 'reason': 'status_bar', 'elements_checked': count}
         return {'found': False, 'reason': 'timeout', 'elements_checked': count}
     finally:
         if monitoring:
@@ -100,7 +136,20 @@ async def probe_title(service, *, recover_first=False):
                 await asyncio.wait_for(service.set_app_monitoring_enabled(False), .1)
             except Exception:
                 pass
+    if seen and all(looks_like_status_bar(caption) for caption in seen):
+        return {'found': False, 'reason': 'status_bar', 'elements_checked': count}
     return {'found': False, 'reason': 'not_conversation', 'elements_checked': count}
+
+
+async def probe_title(service, *, recover_first=False):
+    result = await _probe_once(service, recover_first=recover_first)
+    if not result.get('found') and result.get('reason') == 'status_bar':
+        # The focus is sitting on the SpringBoard status bar instead of the
+        # open Messages conversation. Lock the audit target to the live
+        # MobileSMS process once and retry; normal devices never reach here.
+        if await lock_sms_audit_target(service):
+            result = await _probe_once(service, recover_first=True)
+    return result
 
 
 async def confirmed_title(service):

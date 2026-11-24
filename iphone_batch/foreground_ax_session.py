@@ -59,6 +59,10 @@ class ForegroundAXSession:
         self.lockdown = await open_paired_usb(self.device, data)
         self.audit = AccessibilityAudit(self.lockdown)
         await self.audit.__aenter__()
+        # Keep the audit focus inside Messages from the first use; probe_title
+        # refreshes this target only when it observes the status bar.
+        from native_foreground import lock_sms_audit_target
+        await lock_sms_audit_target(self.audit)
 
     async def _close_services(self):
         audit, lockdown = self.audit, self.lockdown

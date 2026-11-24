@@ -1,4 +1,15 @@
-# Current recovery point: v0.1.32 (2026-11-24)
+# Current recovery point: v0.1.33 (2026-11-24)
+
+Archive: [SESSION_ARCHIVE_2026-11-24_v0.1.33.md](SESSION_ARCHIVE_2026-11-24_v0.1.33.md). Local commit/tag only; no remote push this time. Next recovery version: v0.1.34.
+
+## What changed in v0.1.33
+
+- Device 05 identification fix. The AX focus traversal sat on the SpringBoard status bar (time, cellular, Wi-Fi, battery captions cycling) instead of the open Messages conversation, so `probe_title` never saw the title. Devices 01/02/03 were unaffected: their iMessage conversations expose Back, FaceTime, title, `Your iMessage` bubble and Delivered by default.
+- `lock_sms_audit_target()` added: queries the live MobileSMS pid via OsTraceService and applies `deviceSetAuditTargetPid`. `ForegroundAXSession._open()` locks the target once per session; `probe_title` detects status-bar-only traversals and locks + retries once automatically. Normal devices never pay the retry cost.
+- The 200 ms per-element budget stays: it is a give-up ceiling, not a dwell time (measured element responses are 0.03-0.15 s); title hits return immediately.
+- Three new tests cover status-bar detection, lock-and-retry orchestration and lock-failure fallback. `test_native_foreground` 21 tests pass; the 65-test core group passes. User verified on device 05: the previously unrecognized conversation now identifies the peer number.
+
+# Historical recovery point: v0.1.32 (2026-11-24)
 
 Archive: [SESSION_ARCHIVE_2026-11-24_v0.1.32.md](SESSION_ARCHIVE_2026-11-24_v0.1.32.md). Local commit/tag only; no remote push. Next recovery version: v0.1.33.
 

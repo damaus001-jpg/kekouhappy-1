@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import unittest
 from pathlib import Path
 import tempfile
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 from pymobiledevice3.services.accessibilityaudit import Direction
 from native_foreground import probe_title, read_window, title_number, run_foreground
 from bubble_records import parse_bubbles
@@ -220,6 +220,36 @@ class NativeForegroundTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await task
             self.assertFalse(service.monitoring)
+
+    async def test_status_bar_only_elements_report_status_bar(self):
+        status = ('10:12 AM, Updates Frequently, Swipe down with three fingers to reveal notifications., '
+                  'Swipe up with three fingers to reveal the control center, Double-tap to scroll to top')
+        service = Inspector([status, 'Cellular, No signal, Swipe down with three fingers to reveal notifications.'] * 3)
+        result = await probe_title(service)
+        self.assertFalse(result['found'])
+        self.assertEqual(result['reason'], 'status_bar')
+        self.assertFalse(service.monitoring)
+
+    async def test_status_bar_focus_locks_sms_target_and_retries(self):
+        service = Inspector(['Back, Button', HEADER])
+        with patch('native_foreground._probe_once', new=AsyncMock(side_effect=[
+                {'found': False, 'reason': 'status_bar', 'elements_checked': 5},
+                {'found': True, 'phone_number': NUMBER, 'contact': NUMBER, 'elements_checked': 2},
+            ])), patch('native_foreground.lock_sms_audit_target', new=AsyncMock(return_value=True)) as lock:
+            result = await probe_title(service)
+        self.assertTrue(result['found'])
+        self.assertEqual(result['phone_number'], NUMBER)
+        lock.assert_awaited_once_with(service)
+
+    async def test_status_bar_focus_without_lock_keeps_status_bar(self):
+        service = Inspector(['Back, Button', HEADER])
+        with patch('native_foreground._probe_once', new=AsyncMock(return_value={
+                'found': False, 'reason': 'status_bar', 'elements_checked': 5,
+            })), patch('native_foreground.lock_sms_audit_target', new=AsyncMock(return_value=False)) as lock:
+            result = await probe_title(service)
+        self.assertFalse(result['found'])
+        self.assertEqual(result['reason'], 'status_bar')
+        lock.assert_awaited_once_with(service)
 
     def test_recycled_ids_do_not_replace_distinct_message_occurrences(self):
         records = [{'caption': NUMBER + ', ' + text + ', 10:00', 'platform_identifier': 'reused'}
