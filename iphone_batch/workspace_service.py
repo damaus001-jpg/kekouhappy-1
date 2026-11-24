@@ -88,6 +88,17 @@ class WorkspaceService:
                 return read_profile(self.root, device, conversation)
             return save_profile(self.root, device, conversation, fields)
 
+    def contact_profile_by_phone(self, device, phone):
+        """Read profile facts for the followup list without requiring a saved
+        conversation record; storage is already keyed by normalized number."""
+        from contact_profiles import read_profile
+        from native_conversation import phone_key
+        if not isinstance(phone, str) or not phone_key(phone):
+            raise ValueError('对方号码无效')
+        with self.lock:
+            conversation = {'id': 'phone:' + phone_key(phone), 'phone_number': phone}
+            return read_profile(self.root, device, conversation)
+
     def write(self, path, value):
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_suffix('.tmp')

@@ -397,6 +397,21 @@ def main():
     def viewer_ready(device):
         return viewer_video_ready(device)
 
+    viewer_ready_cache={}
+    viewer_ready_cache_lock=threading.Lock()
+    def viewer_ready_cached(device, ttl=2.0):
+        """Reuse the last health probe for fast state polls; a disconnected or
+        fresh viewer is naturally re-probed after the short ttl."""
+        now=time.monotonic()
+        with viewer_ready_cache_lock:
+            cached=viewer_ready_cache.get(device['udid'])
+            if cached and now-cached[0]<ttl:
+                return cached[1]
+        ready=viewer_ready(device)
+        with viewer_ready_cache_lock:
+            viewer_ready_cache[device['udid']]=(now,ready)
+        return ready
+
     def viewer_video_ready(device):
         """A device is connected only after it supplies a decodable video config."""
         if not connection_allowed(device, enabled):return False
@@ -637,6 +652,8 @@ def main():
                 if device not in {d['udid'] for d in devices}:
                     return self.respond(400, {'error':'请选择有效的手机'})
                 try:
+                    if query.get('phone', [''])[0]:
+                        return self.respond(200,workspace_service.contact_profile_by_phone(device,query['phone'][0]))
                     return self.respond(200,workspace_service.contact_profile(device,query.get('conversation',[''])[0]))
                 except (ValueError,KeyError,OSError,TypeError):
                     return self.respond(400,{'error':'联系人资料读取失败，请刷新记录后重试'})
@@ -650,7 +667,7 @@ def main():
                 return self.respond(404,{'error':'not found'})
             rows=[]
             current_devices=list(devices)
-            readiness=list(health_pool.map(viewer_ready,current_devices))
+            readiness=[viewer_ready_cached(device) for device in current_devices]
             for device,ready in zip(current_devices,readiness):
                 try:notifications=notification_monitor.snapshot(device['udid']) if notification_monitor is not None else {'state':'disabled','items':[],'card_count':0,'enabled':False}
                 except KeyError:notifications={'state':'waiting','items':[],'card_count':0,'enabled':False}
@@ -946,6 +963,16 @@ def main():
                                         pass
                     manager.select(body['udid'],ready=control_allowed(target) and viewer_ready(target))
                     readiness=input_readiness_snapshot(body['udid'])
+                    if (not readiness['control_ready'] and control_allowed(target)
+                            and viewer_ready(target) and not reconnects.pending(target['udid'])
+                            and target['udid'] not in trust_pending):
+                        # Stale readiness: refresh it in the background so the
+                        # next state poll sees the control channel promptly
+                        # instead of waiting for the next watch cycle.
+                        future=input_readiness_pool.submit(probe_input_readiness,target)
+                        future.add_done_callback(lambda result, udid=target['udid'],
+                            generation=generations.get(target['udid'],0):
+                            record_input_readiness(udid,result,generation))
                 return self.respond(200,{'active':manager.active,'selected':manager.selected,**readiness})
             except (ValueError, KeyError, TypeError):
                 return self.respond(400,{'error':'invalid device selection'})

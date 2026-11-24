@@ -50,5 +50,25 @@ class ContactProfileTests(unittest.TestCase):
         self.assertEqual(service.contact_profile('phone1','sample-translated')['fields']['姓名'],'Alice')
         with self.assertRaises(ValueError):service.contact_profile('phone2','sample-translated',{'姓名':'wrong'})
 
+    def test_followup_list_reads_profile_by_phone_without_saved_conversation(self):
+        service=WorkspaceService(root=self.root)
+        save_profile(self.root,'phone1',self.contact,{'地区':'底特律','婚否':'单身'})
+        fields=service.contact_profile_by_phone('phone1','+15550000001')['fields']
+        self.assertEqual(fields['地区'],'底特律')
+        self.assertEqual(fields['婚否'],'单身')
+
+    def test_followup_list_reads_empty_profile_when_never_saved(self):
+        service=WorkspaceService(root=self.root)
+        self.assertEqual(service.contact_profile_by_phone('phone1','+15550000001')['fields'],{})
+
+    def test_followup_list_rejects_invalid_phone(self):
+        service=WorkspaceService(root=self.root)
+        with self.assertRaises(ValueError):service.contact_profile_by_phone('phone1','not-a-number')
+
+    def test_followup_list_profile_is_isolated_per_device(self):
+        service=WorkspaceService(root=self.root)
+        save_profile(self.root,'phone1',self.contact,{'姓名':'Alice'})
+        self.assertEqual(service.contact_profile_by_phone('phone2','+15550000001')['fields'],{})
+
 
 if __name__=='__main__':unittest.main()

@@ -1,4 +1,16 @@
-# Current recovery point: v0.1.33 (2026-11-24)
+# Current recovery point: v0.1.34 (2026-11-24)
+
+Archive: [SESSION_ARCHIVE_2026-11-24_v0.1.34.md](SESSION_ARCHIVE_2026-11-24_v0.1.34.md). Local commit/tag only; no remote push this time. Next recovery version: v0.1.35.
+
+## What changed in v0.1.34
+
+- Followup-list profile sync fix. The list previously resolved profile facts through saved conversation records and a per-conversation cache, so a fresh or unmatched conversation showed stale/empty remarks after editing the seven fact fields. The list now reads profiles directly by phone number (`contact_profile_by_phone`, storage was already keyed by normalized number), and the saved-profile event clears the whole list cache. User verified: edited fields appear in the followup list after about 0.5 s.
+- Selection readiness refresh (plan A): `/api/select` submits a background input-readiness probe when the cached snapshot is stale, so the next state poll confirms the control channel quickly instead of waiting for the next watch cycle.
+- Fast state polls: `viewer_ready_cached` reuses the last health probe for 2 s instead of probing all viewers on every `/api/state`; with 10 devices the poll dropped from ~1.3 s to tens of milliseconds.
+- Frontend select queue: a click during a busy switch is queued and auto-applied afterwards instead of being silently dropped; user confirmed switching feels faster.
+- Known open item: with 10 viewers running, individual devices occasionally lose their screen and are restarted by the watchdog (screen stream forced restart on ignored bootstrap PLIs, plus AAC-ELD audio decode errors on Windows). Follow-up work should isolate the audio decoder failure from the video stream.
+
+# Historical recovery point: v0.1.33 (2026-11-24)
 
 Archive: [SESSION_ARCHIVE_2026-11-24_v0.1.33.md](SESSION_ARCHIVE_2026-11-24_v0.1.33.md). Local commit/tag only; no remote push this time. Next recovery version: v0.1.34.
 

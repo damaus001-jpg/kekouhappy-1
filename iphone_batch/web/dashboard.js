@@ -652,22 +652,16 @@ function normalizedProfilePhone(value){
  if(digits.length===11&&digits.startsWith('1'))return digits;
  return digits;
 }
-function followupConversation(number){
- const digits=normalizedProfilePhone(number);
- return (typeof savedConversations!=='undefined'?savedConversations:[]).find(row=>
-  normalizedProfilePhone(row.phone_number||row.contact)===digits);
-}
 function followupProfile(device,number){
- const conversation=followupConversation(number);if(!conversation?.id)return Promise.resolve({});
- const key=device+':'+conversation.id;
- if(!followupProfileCache.has(key))followupProfileCache.set(key,fetch('/api/contact-profile?'+new URLSearchParams({device,conversation:conversation.id}),{cache:'no-store'})
+ const key=device+':phone:'+normalizedProfilePhone(number);
+ if(!followupProfileCache.has(key))followupProfileCache.set(key,fetch('/api/contact-profile?'+new URLSearchParams({device,phone:number}),{cache:'no-store'})
   .then(async response=>{const data=await response.json();if(!response.ok||data.error)throw Error(data.error||'资料读取失败');return data.fields||{};})
   .catch(()=>({})));
  return followupProfileCache.get(key);
 }
 window.addEventListener('contact-profile-saved',event=>{
- const {device,conversation}=event.detail||{};
- if(device&&conversation)followupProfileCache.delete(device+':'+conversation);
+ const {device}=event.detail||{};
+ followupProfileCache.clear();
  if(device===active)renderFollowupContacts();
 });
 function contactFollowupContext(){
@@ -934,15 +928,20 @@ function render(rows,selected,controller=controlOwner){
  const ownerLabel=owner?deviceLabel(owner,rows.indexOf(owner)):null;
  globalMonitor?.render(ordered,cards,sortControl.value);
 }
+let pendingSelect=null;
 async function select(udid){
- if(busy||workspaceBusy||refreshingDevices||phonePastePending)return;
+ if(workspaceBusy||refreshingDevices||phonePastePending)return;
+ if(busy){pendingSelect=udid;return;}
  window.ForegroundSync?.activity('select');
  globalMonitor?.openWorkbench();
  if(devicePreview){previewSelection=udid;render(previewDevices,previewSelection);return;}
   if(busy||workspaceBusy||refreshingDevices)return;selectionRevision++;busy=true;active=udid;controlOwner=null;for(const card of cards.values()){sendFocus(card,false);card.lastActive=false;}render(latest,active);
  try{const j=await deviceRequest('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({udid})});active=j.selected??j.active;controlOwner=j.active;const card=cards.get(udid);if(card)card.controlReady=j.control_ready===true;}
  catch(e){active=null;controlOwner=null;notice(e.message);}
- finally{busy=false;render(latest,active);refresh();}
+ finally{
+  busy=false;render(latest,active);refresh();
+  if(pendingSelect!==null){const next=pendingSelect;pendingSelect=null;if(next!==active)select(next);}
+ }
 }
 const cpuUsage=document.getElementById('cpu-usage');let cpuUsageExpiry=null;
 function showCpuUsage(value){
