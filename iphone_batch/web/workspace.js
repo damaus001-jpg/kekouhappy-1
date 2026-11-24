@@ -11,7 +11,9 @@ function protectNotificationDraft(){
  if(notificationProtection.get(workspaceDevice)===protectedDraft)return;
  notificationProtection.set(workspaceDevice,protectedDraft);
  fetch('/api/notification-policy',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({device:workspaceDevice,protected:protectedDraft})}).catch(()=>notificationProtection.delete(workspaceDevice));
+  body:JSON.stringify({device:workspaceDevice,protected:protectedDraft})}).then(response=>{
+   if(!response.ok)notificationProtection.delete(workspaceDevice);
+  }).catch(()=>notificationProtection.delete(workspaceDevice));
 }
 const messagesEl=document.getElementById('messages'), draftEl=document.getElementById('reply-zh');
 function scrollReadingToBottom(){

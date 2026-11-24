@@ -31,7 +31,7 @@ def discover_for_dashboard():
     """Keep the workbench available when the local Apple USB service is down."""
     try:
         return controller.discover(), None
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         return [], ('无法连接 Apple USB 设备服务（127.0.0.1:27015）。'
                     '请检查 Apple 官方设备软件及 Apple Mobile Device Service 是否已安装并运行，'
                     '恢复后点击“刷新设备”。详细错误：' + str(error))
@@ -340,6 +340,9 @@ def main():
             if unread_badge_monitor is not None:unread_badge_monitor.update_devices(devices)
             for device in removed:
                 startup_queue.cancel(device['udid'])
+                # A USB re-plug is a cold start: forget the previous readiness
+                # so the first reconnect gets the initial startup timeout.
+                startup_queue.discard_ready(device['udid'])
                 stop_viewer(device)
             for device in devices:
                 if device['udid'] in trust_pending or reconnects.pending(device['udid']) or startup_queue.pending(device['udid']):continue
@@ -495,7 +498,11 @@ def main():
             # lock while other phones remain usable during confirmation.
             if reboot:
                 reconnects.stage(device['udid'],'rebooting')
-                device['error']='正在重启手机；开机后请在手机输入密码解锁'
+                device['error']='正在重启手机；开机后工作台会自动重建画面'
+                # Reboot takes longer than a warm reconnect (measured ~75 s).
+                # Treat its next startup as a first setup so the queue gives
+                # the initial timeout instead of the short ready-device one.
+                startup_queue.discard_ready(device['udid'])
                 reboot_phone(device,stopping,stage=lambda value:reconnects.stage(device['udid'],value))
             else:
                 reconnects.stage(device['udid'],'trusting')
@@ -768,7 +775,7 @@ def main():
                         if body.get('confirm')!=device['udid']:raise ValueError('请确认要重启的手机')
                     identifier=reconnects.begin(device,operation='reboot' if reboot else 'reconnect')
                     return self.respond(202,{'ok':True,'job':identifier,'message':
-                        '正在重启此手机，开机后请在手机输入密码解锁' if reboot else '正在重新连接此设备，请稍候'})
+                        '正在重启此手机，开机后工作台会自动重连' if reboot else '正在重新连接此设备，请稍候'})
                 except (ValueError,TypeError) as exc:return self.respond(400,{'error':str(exc)})
             if self.path=='/api/devices/trust':
                 device=None

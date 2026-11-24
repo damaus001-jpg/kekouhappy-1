@@ -106,3 +106,22 @@ class ViewerStartTests(unittest.TestCase):
         queue.request(device)
         until(lambda:failed.called)
         self.assertIn('0.02秒',str(failed.call_args.args[1]))
+
+    def test_discard_ready_restores_initial_timeout_for_next_request(self):
+        ready=threading.Event();ready.set();failed=Mock()
+        queue=self.queue(lambda d,t:None,lambda d:ready.is_set(),failed=failed,
+            startup_timeout=.02,initial_startup_timeout=.5)
+        device={'udid':'known'}
+        queue.request(device)
+        until(lambda:'known' in queue.ready_devices and not queue.pending('known'))
+        ready.clear()
+        queue.discard_ready('known')
+        self.assertNotIn('known',queue.ready_devices)
+        queue.request(device)
+        # The short timeout would already have failed; the restored initial
+        # budget must still be running when readiness returns.
+        time.sleep(.1)
+        self.assertFalse(failed.called)
+        ready.set()
+        until(lambda:'known' in queue.ready_devices and not queue.pending('known'))
+        self.assertFalse(failed.called)

@@ -155,8 +155,8 @@ class DeviceReconnects:
                     deadline=time.monotonic()+budget
                     waited_for_startup=False
                 if time.monotonic()>=deadline:
-                    raise ValueError('等待重启后连接恢复超时，请在手机输入密码解锁，再重新连接；未重复重启'
-                        if operation=='reboot' else '重新连接超时，请检查 USB、手机解锁及设备状态后重试')
+                    raise ValueError('等待重启后连接恢复超时，请检查 USB 并确认手机已开机，再重新连接；未重复重启'
+                        if operation=='reboot' else '重新连接超时，请检查 USB 及设备状态后重试')
                 if self.ready(device) and self.finish(device):
                     with self.lock:self.jobs[device['udid']].update(state='ready',stage='ready',elapsed=round(time.monotonic()-started,1))
                     return

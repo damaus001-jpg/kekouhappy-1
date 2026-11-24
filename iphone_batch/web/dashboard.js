@@ -534,7 +534,7 @@ function showDeviceMenu(event,device,index){
  const rebootButton=document.getElementById('device-context-reboot');
  rebootButton.disabled=reconnectButton.disabled||device.readonly;
  rebootButton.textContent=device.reconnecting&&device.reconnect_operation==='reboot'?'正在重启手机…':'重启此手机…';
- rebootButton.title='重启这台手机，开机后需要在手机输入密码解锁。';
+ rebootButton.title='重启这台手机，开机后工作台会自动重新连接。';
  const followup=deviceLabel(device,index).followup;
  document.getElementById('device-context-followup').setAttribute('aria-checked',String(followup));
  document.getElementById('device-context-none').setAttribute('aria-checked',String(!followup));
@@ -582,7 +582,7 @@ document.getElementById('device-context-reboot').addEventListener('click',async(
  const target=deviceMenuTarget;closeDeviceMenu();if(!target||devicePreview)return;
  const device=target.device,label=deviceLabel(device,target.index).number;
  if(device.enabled===false||device.readonly||device.trust_pending||device.reconnecting||reconnectRequests.has(device.udid)||workspaceBusy||busy)return;
- if(!window.confirm('确定重启设备 '+label+'（'+device.name+'）吗？\n此手机的画面和操作会暂时断开，开机后请在手机输入密码解锁。'))return;
+ if(!window.confirm('确定重启设备 '+label+'（'+device.name+'）吗？\n此手机的画面和操作会暂时断开，开机后工作台会自动重连。'))return;
  reconnectRequests.add(device.udid);notice('设备 '+label+'：正在发送重启指令…');
  try{
   const response=await fetch('/api/devices/reboot',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -824,7 +824,7 @@ function render(rows,selected,controller=controlOwner){
    notice('设备 '+job.label+'：'+(row.reconnect_state==='ready'?(job.operation==='reboot'?'手机已重启，画面与操控已恢复':'系统会话与连接已重建')+'（'+(row.reconnect_elapsed||0)+'秒）':row.reconnect_error||'连接恢复未完成，请检查手机状态'));
    reconnectNotices.delete(udid);
   }else if(row.reconnect_id===job.job&&row.reconnecting){
-   const stages={stopping:'停止旧连接',rebooting:'发送手机重启指令',waiting_boot:'等待手机开机，开机后请在手机输入密码解锁',trusting:'检查并修复信任（若手机弹窗，请确认）',resetting:'清理手机端远程会话',starting:'建立新连接（重启后请先解锁手机）',checking:'检查操控通道'};
+   const stages={stopping:'停止旧连接',rebooting:'发送手机重启指令',waiting_boot:'等待手机开机，开机后自动重连',trusting:'检查并修复信任（若手机弹窗，请确认）',resetting:'清理手机端远程会话',starting:'建立新连接',checking:'检查操控通道'};
    notice('设备 '+job.label+'：正在'+(stages[row.reconnect_stage]||'重新连接')+'，已用时 '+(row.reconnect_elapsed||0)+' 秒…');
   }
  }

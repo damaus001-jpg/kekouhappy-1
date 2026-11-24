@@ -48,6 +48,51 @@ class ParseMessagesTests(unittest.TestCase):
         self.assertFalse(messages)
         self.assertFalse(unknown)
 
+    def test_formatted_header_contact_matches_formatted_sender(self):
+        contact = '+1 (313) 422-3491'
+        records = [{'caption': contact + ', Show Conversation Details, Button'},
+                   {'caption': contact + ', Who is this, 8:13 PM', 'platform_identifier': 'a'}]
+        parsed, messages, unknown = parse_records(records)
+        self.assertEqual(parsed, contact)
+        self.assertEqual([(m['side'], m['text']) for m in messages], [('incoming', 'Who is this')])
+        self.assertFalse(unknown)
+
+    def test_normalized_contact_matches_formatted_sender(self):
+        records = [{'caption': '+13134223491, Show Conversation Details, Button'},
+                   {'caption': '+1 (313) 422-3491, Who is this, 8:13 PM', 'platform_identifier': 'a'}]
+        _, messages, unknown = parse_records(records)
+        self.assertEqual([(m['side'], m['text']) for m in messages], [('incoming', 'Who is this')])
+        self.assertFalse(unknown)
+
+    def test_formatted_contact_matches_normalized_sender(self):
+        records = [{'caption': '+1 (313) 422-3491, Show Conversation Details, Button'},
+                   {'caption': '+13134223491, Hello, 9:00 AM', 'platform_identifier': 'a'}]
+        _, messages, unknown = parse_records(records)
+        self.assertEqual([(m['side'], m['text']) for m in messages], [('incoming', 'Hello')])
+        self.assertFalse(unknown)
+
+    def test_contact_name_still_uses_plain_string_path(self):
+        records = [{'caption': 'Alice, Show Conversation Details, Button'},
+                   {'caption': 'Alice, Hello, 9:00 AM', 'platform_identifier': 'a'},
+                   {'caption': 'Bob, Hi, 9:01 AM', 'platform_identifier': 'b'}]
+        _, messages, unknown = parse_records(records)
+        self.assertEqual([(m['side'], m['text']) for m in messages], [('incoming', 'Hello')])
+        self.assertEqual(len(unknown), 1)
+
+    def test_number_sender_does_not_match_name_contact(self):
+        records = [{'caption': 'Alice, Show Conversation Details, Button'},
+                   {'caption': '+1 (313) 422-3491, Who is this, 8:13 PM', 'platform_identifier': 'a'}]
+        _, messages, unknown = parse_records(records)
+        self.assertFalse(messages)
+        self.assertEqual(len(unknown), 1)
+
+    def test_sender_without_comma_separator_stays_unclassified(self):
+        records = [{'caption': '+13134223491, Show Conversation Details, Button'},
+                   {'caption': '+13134223491 Who is this, 8:13 PM', 'platform_identifier': 'a'}]
+        _, messages, unknown = parse_records(records)
+        self.assertFalse(messages)
+        self.assertEqual(len(unknown), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,4 +1,23 @@
-# Current recovery point: v0.1.31 (2026-11-23)
+# Current recovery point: v0.1.32 (2026-11-24)
+
+Archive: [SESSION_ARCHIVE_2026-11-24_v0.1.32.md](SESSION_ARCHIVE_2026-11-24_v0.1.32.md). Local commit/tag only; no remote push. Next recovery version: v0.1.33.
+
+## What changed in v0.1.32
+
+- Incoming-message sender matching in `parse_records` now falls back to normalized phone-key comparison after the exact string path. A formatted header contact such as `+1 (313) 422-3491` and a normalized `+13134223491` both match message captions; contact names keep the plain string path. The previously failing `test_formatted_title_matches_incoming_messages_and_send_fingerprint` now passes; six new parsing tests were added.
+- `ViewerStartQueue.discard_ready()` added. Phone reboot and USB re-plug cold starts forget previous readiness so the next first attempt gets the 360-second initial startup timeout; warm reconnects keep the 60-second short timeout. Reboot hint texts no longer assume the phone has a passcode.
+- `discover_for_dashboard()` also catches `ValueError`, so a malformed usbmux payload cannot stop the workbench from starting.
+- `dashboard.html` and `help.html` (unreferenced, unserved) moved to `iphone_batch/web/legacy/`.
+- `workspace.js` clears the local notification-protection marker when `/api/notification-policy` returns a non-2xx response, keeping browser state aligned with the disabled monitor.
+- `probe_title` focus condition now uses explicit parentheses around the `recover_first` branches.
+- AGENTS.md records the client version display rule: the version badge follows the last packaged installer (currently v0.1.30); `VERSION` and README follow the source version.
+
+## Validation
+
+- 83 tests pass across sms_collect, native_foreground, viewer_start_queue, dashboard, bubble_status, sent_tail_speed, ax_conversation and ax_recheck. The wider suite keeps its pre-existing 8 failures + 2 errors with an identical list before and after. Python and JS syntax checks pass; `git diff --check` is clean.
+- No installer was built or installed; the D-drive installed environment and the Pikachu/VNC repos were not touched; no SMS was sent and no phone inputs were issued. The C-drive development backend was restarted through `Backend.stop()`/`Backend.start()` to load the changes.
+
+# Historical recovery point: v0.1.31 (2026-11-23)
 
 Archive: [SESSION_ARCHIVE_2026-11-23_v0.1.31.md](SESSION_ARCHIVE_2026-11-23_v0.1.31.md). Local archive, v0.1.31 tag and remote force push complete. Installer remains v0.1.30 and was not installed. Next recovery version: v0.1.32.
 

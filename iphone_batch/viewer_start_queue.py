@@ -58,6 +58,12 @@ class ViewerStartQueue:
             self.terminal.discard(identifier)
             self.lock.notify_all()
 
+    def discard_ready(self,identifier):
+        """Forget a previously ready device so its next first attempt uses the
+        initial startup timeout again (phone reboot, USB re-plug cold start)."""
+        with self.lock:
+            self.ready_devices.discard(identifier)
+
     def run(self):
         while not self.stopping.is_set():
             with self.lock:

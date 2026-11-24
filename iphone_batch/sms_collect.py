@@ -18,6 +18,8 @@ import traceback
 ROOT = Path(__file__).resolve().parent / '.device-data'
 TIME = re.compile(r', (\d{1,2}:\d{2}(?:\s*[AP]M)?)(?P<traits>(?:, (?:Link|Button|Image))*)$')
 
+from native_conversation import phone_key
+
 
 def parse_records(records):
     contact = None
@@ -46,9 +48,20 @@ def parse_records(records):
                 side = 'outgoing'
                 content = content[len(prefix):]
                 break
-        if side is None and contact and content.startswith(contact + ', '):
-            side = 'incoming'
-            content = content[len(contact) + 2:]
+        # Keep the exact string path first (contact names, names containing
+        # commas). When it misses, the header may expose a formatted contact
+        # such as '+1 (313) 422-3491' while callers hold the normalized
+        # '+13134223491'; compare normalized numbers so either form matches.
+        if side is None and contact:
+            if content.startswith(contact + ', '):
+                side = 'incoming'
+                content = content[len(contact) + 2:]
+            else:
+                sender, separator, body = content.partition(', ')
+                normalized_sender = phone_key(sender)
+                if separator and normalized_sender is not None and normalized_sender == phone_key(contact):
+                    side = 'incoming'
+                    content = body
         if side is None:
             unclassified.append(record)
             continue

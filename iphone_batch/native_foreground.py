@@ -70,7 +70,7 @@ async def probe_title(service, *, recover_first=False):
         previous = None
         while count < 5:
             async with asyncio.timeout(.2):
-                if count == 0 and not recover_first or count == 1 and recover_first:
+                if (count == 0 and not recover_first) or (count == 1 and recover_first):
                     await service.move_focus(Direction.First)
                 else:
                     await service.move_focus_next()

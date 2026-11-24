@@ -13,6 +13,14 @@ class DiscoveryTests(unittest.TestCase):
             self.assertIn('Apple Mobile Device Service',error)
             self.assertEqual(discover_for_dashboard(),(devices,None))
 
+    def test_bad_usb_payload_keeps_workbench_available(self):
+        devices=[{'udid':'one'}]
+        with patch('dashboard.controller.discover',side_effect=[ValueError('bad plist'),devices]):
+            rows,error=discover_for_dashboard()
+            self.assertEqual(rows,[])
+            self.assertIn('27015',error)
+            self.assertEqual(discover_for_dashboard(),(devices,None))
+
 
 class CpuUsageTests(unittest.TestCase):
     def readings(self, values):
