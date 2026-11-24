@@ -1,4 +1,15 @@
-# Current recovery point: v0.1.20 (2026-11-21)
+# Current recovery point: v0.1.31 (2026-11-23)
+
+Archive: [SESSION_ARCHIVE_2026-11-23_v0.1.31.md](SESSION_ARCHIVE_2026-11-23_v0.1.31.md). Local archive, v0.1.31 tag and remote force push complete. Installer remains v0.1.30 and was not installed. Next recovery version: v0.1.32.
+
+## Current release and device status
+
+- v0.1.30 installer SHA256: `0f488f7aa095709d18c4013146bd93dd9b188fffc53eb2bbfd9e925b05e53745`. Its offline zero-device isolation check passed; existing AppId caused installer verification to stop. User must manually upgrade in place.
+- New-device initial viewer start timeout is 360 seconds; subsequent attempts retain 60 seconds. Apple USB service discovery errors no longer prevent the empty workbench from starting. Neither change proves the new-computer WinTun IPv6 connection issue is resolved; screen 30-second timeout remains open.
+- Notifications, SMS badge scan, and deselect-to-home remain disabled at runtime. Unread assessment relies on the live device list. Automatic/manual title-number recognition shares a five-element, 200ms-per-element probe.
+- `Recover.ps1 -Ref v0.1.31` now selects the GitHub tag archive. Preserve and push the v0.1.31 tag with `master`; do not change GitHub About description.
+
+# Historical recovery point: v0.1.20 (2026-11-21)
 
 Archive: [SESSION_ARCHIVE_2026-11-21_v0.1.20.md](SESSION_ARCHIVE_2026-11-21_v0.1.20.md). Local commit/tag only; no remote push. Next recovery point: v0.1.21.
 

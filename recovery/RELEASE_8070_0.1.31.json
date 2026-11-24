@@ -1,0 +1,23 @@
+{
+  "version": "0.1.31",
+  "project": "8070",
+  "platform": "Windows 10/11 x64",
+  "source_only_recovery_point": true,
+  "installer_version": "0.1.30",
+  "installer": "releases/皮卡丘手机工作台-0.1.30-安装.exe",
+  "installer_bytes": 204273559,
+  "installer_sha256": "0f488f7aa095709d18c4013146bd93dd9b188fffc53eb2bbfd9e925b05e53745",
+  "payload_files": 17876,
+  "pikachu_host_only": true,
+  "control_protocol": 1,
+  "runtime_data_bundled": false,
+  "zero_device_isolation_check_passed": true,
+  "source_targeted_checks_passed": 53,
+  "frontend_syntax_checks_passed": true,
+  "physical_second_pc_phone_tested": false,
+  "installer_installed": false,
+  "video_30_second_timeout_resolved": false,
+  "remote_push_completed": true,
+  "source_tag": "v0.1.31",
+  "github_about_description_changed": false
+}

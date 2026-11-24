@@ -85,3 +85,24 @@ class ViewerStartTests(unittest.TestCase):
         queue.close()
         self.assertEqual(started,['one'])
         self.assertFalse(queue.request({'udid':'three'}))
+
+    def test_initial_setup_can_finish_after_normal_reconnect_deadline(self):
+        started=[];failed=Mock()
+        queue=self.queue(lambda d,t:started.append(time.monotonic()),
+            lambda d:bool(started) and time.monotonic()-started[-1]>.08,
+            failed=failed,startup_timeout=.02,initial_startup_timeout=.3)
+        queue.request({'udid':'new'})
+        until(lambda:'new' in queue.ready_devices)
+        self.assertFalse(failed.called)
+
+    def test_previously_ready_device_uses_short_timeout_on_reconnect(self):
+        ready=threading.Event();ready.set();failed=Mock()
+        queue=self.queue(lambda d,t:None,lambda d:ready.is_set(),failed=failed,
+            startup_timeout=.02,initial_startup_timeout=.8)
+        device={'udid':'known'}
+        queue.request(device)
+        until(lambda:'known' in queue.ready_devices and not queue.pending('known'))
+        ready.clear()
+        queue.request(device)
+        until(lambda:failed.called)
+        self.assertIn('0.02秒',str(failed.call_args.args[1]))

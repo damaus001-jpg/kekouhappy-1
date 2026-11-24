@@ -89,16 +89,13 @@ async def read(service, start_from_last=True):
 
 
 async def identify_conversation(service):
-    # A header identifies the recipient only. No bubble or history boundary is
-    # inferred, so a photo blocking focus cannot prevent database extraction.
-    scanned = await scan(service, limit=3000, seconds=22, settle=0,
-                         stop_when=lambda item: ', Show Conversation Details, Button' in (item.caption or ''))
-    titles = {item.caption.split(', Show Conversation Details, Button')[0]
-              for item in scanned if ', Show Conversation Details, Button' in (item.caption or '')}
-    if len(titles) != 1 or not phone_key(next(iter(titles))):
+    # Manual capture and automatic probing must use the same bounded title
+    # parser, including Chinese labels, number formatting and focus cleanup.
+    from native_foreground import probe_title
+    title = await probe_title(service)
+    if not title.get('found'):
         raise ValueError('未确认当前会话的完整电话号码，请打开目标短信会话后重试')
-    contact = next(iter(titles))
-    return {'contact': contact, 'phone_number': phone_key(contact)}
+    return {'contact': title['contact'], 'phone_number': title['phone_number']}
 
 
 def merge_history_messages(existing, incoming):

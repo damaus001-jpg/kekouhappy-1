@@ -855,7 +855,7 @@ function render(rows,selected,controller=controlOwner){
   const manualOff=Number(a.device.enabled===false)-Number(b.device.enabled===false);
   if(manualOff)return manualOff;
   const numberOrder=String(a.label.number).localeCompare(String(b.label.number),undefined,{numeric:true})||a.index-b.index;
-  return sortControl.value==='unread'?
+  return sortControl.value==='unread'&&rows.some(row=>row.notifications?.enabled===true)?
    ((b.device.notifications?.card_count??b.device.notifications?.items?.length??0)-(a.device.notifications?.card_count??a.device.notifications?.items?.length??0)||a.index-b.index):
    sortControl.value==='followup'?(b.followupCount-a.followupCount||a.index-b.index):numberOrder;
  });
@@ -865,23 +865,17 @@ function render(rows,selected,controller=controlOwner){
   const number=label.number;
   const nameWrap=document.createElement('span');nameWrap.className='device-number-wrap';
   const name=document.createElement('strong');name.textContent='设备 '+number;nameWrap.append(name);
-  const badge=d.unread_badge;
-  if(badge?.state==='read'&&badge.count>0){const unread=document.createElement('span');unread.className='unread-count-badge';unread.textContent=String(badge.count);unread.title='主屏幕信息 App 未读数';nameWrap.append(unread);}
-  else if(badge?.state==='unavailable')nameWrap.title='未读角标暂不可读：'+(badge.error||'');
   const remark=document.createElement('span');remark.className='device-remark'+(followupCount||label.followup?' followup':'');remark.textContent=followupCount||label.followup?'待跟进 '+followupCount:'无';
   remark.title='阅读区已勾选 '+followupCount+' 位联系人';
   remark.addEventListener('click',event=>{event.stopPropagation();showDeviceFollowups(d.udid);});
   const detail=document.createElement('span');detail.className='device-state';
   const phone=document.createElement('span');phone.className='device-phone';phone.setAttribute('aria-hidden','true');
   const notification=d.notifications;
-  const count=notification?.card_count??notification?.items?.length??0;
   const setupError=String(d.error||'');
   const setupState=d.enabled===false?'已手动断开':setupError.includes('开发者模式未开启')?'开发者模式关闭':setupError.includes('信任')?'需解锁并信任':setupError.includes('镜像准备失败')?'投屏准备失败':'正在准备投屏';
-  detail.textContent=devicePreview?'':!d.ready?setupState:d.readonly?'仅监看':notification?.manual_control?'当前控制':notification?.protected?'草稿保护':
-   notification?.state==='scanning'?'读取横幅':notification?.state==='paused'?'检查暂停':
-   notification?.last_checked?(count?'有新消息提示':'暂未发现横幅'):'待检查';
-  entry.title='设备 '+number+' · '+remark.textContent+' · '+d.name+' · '+d.udid.slice(-8)+' · '+detail.textContent+' · '+count+' 条已发现的短信横幅提示（非完整未读数）'+
-   (d.error?' · '+d.error:notification?.error?' · '+notification.error:notification?.last_checked?' · 最近检查：'+new Date(notification.last_checked).toLocaleString():'');
+  detail.textContent=devicePreview?'':!d.ready?setupState:d.readonly?'仅监看':d.active?'当前控制':'';
+  entry.title='设备 '+number+' · '+remark.textContent+' · '+d.name+' · '+d.udid.slice(-8)+' · '+detail.textContent+
+   (d.error?' · '+d.error:'');
   entry.setAttribute('aria-label',entry.title);
   entry.append(phone,nameWrap,remark);if(detail.textContent)entry.append(detail);entry.onclick=()=>select(d.udid);
   const tile=document.createElement('div');tile.className='device-tile';
@@ -972,7 +966,7 @@ async function refreshCpuUsage(){
  catch{showCpuUsage(null);}
  finally{cpuRefreshing=false;}
 }
-async function refresh(){if(devicePreview){showCpuUsage(null);render(previewDevices,previewSelection);return;}const revision=selectionRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){notice('管理页面连接中断');}}
+async function refresh(){if(devicePreview){showCpuUsage(null);render(previewDevices,previewSelection);return;}const revision=selectionRevision;try{const j=await deviceRequest('/api/state',{cache:'no-store'},8000);const serviceError=document.getElementById('device-service-error');if(serviceError){serviceError.textContent=j.device_discovery_error||'';serviceError.hidden=!j.device_discovery_error;}if(!busy&&revision===selectionRevision)render(j.devices,j.selected??j.active,j.active);}catch(e){notice('管理页面连接中断');}}
 refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInterval(refreshCpuUsage,3000);}
 
 // New-message tasks: browser storage restores unfinished form input; submission

@@ -57,7 +57,9 @@ def title_number(caption):
 async def probe_title(service, *, recover_first=False):
     count, monitoring = 0, False
     try:
-        async with asyncio.timeout(.8):
+        # Setup has its own bound; each focus request/response below gets a
+        # fresh 200 ms budget, including ignored or duplicate events.
+        async with asyncio.timeout(1.5):
             monitoring = True
             if hasattr(service, 'set_show_visuals'):
                 await service.set_show_visuals(False)
@@ -65,34 +67,31 @@ async def probe_title(service, *, recover_first=False):
             await service.set_monitored_event_type()
             while not service._event_queue.empty():
                 service._event_queue.get_nowait()
-            if recover_first:
-                await service.move_focus_next()
-            else:
-                await service.move_focus(Direction.First)
-            previous = None
-            while count < 3:
-                name, args = await service._event_queue.get()
-                if name != 'hostInspectorCurrentElementChanged:':
-                    continue
-                data = deserialize_object(service._extract_event_payload(args))
-                items = data if isinstance(data, list) else [data]
-                if not items:
-                    continue
-                item = items[0]
-                key = (item.platform_identifier, item.caption)
-                if key == previous:
-                    continue
+        previous = None
+        while count < 5:
+            async with asyncio.timeout(.2):
+                if count == 0 and not recover_first or count == 1 and recover_first:
+                    await service.move_focus(Direction.First)
+                else:
+                    await service.move_focus_next()
+                while True:
+                    name, args = await service._event_queue.get()
+                    if name != 'hostInspectorCurrentElementChanged:':
+                        continue
+                    data = deserialize_object(service._extract_event_payload(args))
+                    items = data if isinstance(data, list) else [data]
+                    if not items:
+                        continue
+                    item = items[0]
+                    key = (item.platform_identifier, item.caption)
+                    if key != previous:
+                        break
                 previous = key
                 count += 1
                 number = title_number(item.caption)
                 if number:
                     contact = next(item.caption.partition(marker)[0].strip() for marker, _ in TITLE_MARKERS if marker in item.caption)
                     return {'found': True, 'phone_number': number, 'contact': contact, 'elements_checked': count}
-                if count < 3:
-                    if recover_first and count == 1:
-                        await service.move_focus(Direction.First)
-                    else:
-                        await service.move_focus_next()
     except TimeoutError:
         return {'found': False, 'reason': 'timeout', 'elements_checked': count}
     finally:

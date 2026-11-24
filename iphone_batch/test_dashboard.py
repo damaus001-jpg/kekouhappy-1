@@ -1,6 +1,17 @@
 ﻿import unittest
 from unittest.mock import Mock, patch
-from dashboard import CpuUsage, FocusManager
+from dashboard import CpuUsage, FocusManager, discover_for_dashboard
+
+
+class DiscoveryTests(unittest.TestCase):
+    def test_missing_apple_service_allows_empty_workbench_and_later_recovery(self):
+        devices=[{'udid':'one'}]
+        with patch('dashboard.controller.discover',side_effect=[ConnectionRefusedError(10061,'refused'),devices]):
+            rows,error=discover_for_dashboard()
+            self.assertEqual(rows,[])
+            self.assertIn('27015',error)
+            self.assertIn('Apple Mobile Device Service',error)
+            self.assertEqual(discover_for_dashboard(),(devices,None))
 
 
 class CpuUsageTests(unittest.TestCase):

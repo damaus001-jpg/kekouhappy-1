@@ -7,10 +7,12 @@ import logging
 
 class ViewerStartQueue:
     def __init__(self,start,ready,allowed,failed,stopping,*,busy=lambda:False,
-                 startup_timeout=60,busy_timeout=90,retry_delay=30,poll=.25):
+                 startup_timeout=60,initial_startup_timeout=None,busy_timeout=90,retry_delay=30,poll=.25):
         self.start,self.ready,self.allowed,self.failed=start,ready,allowed,failed
         self.stopping,self.busy=stopping,busy
         self.startup_timeout,self.busy_timeout,self.retry_delay,self.poll=startup_timeout,busy_timeout,retry_delay,poll
+        self.initial_startup_timeout=initial_startup_timeout if initial_startup_timeout is not None else startup_timeout
+        self.ready_devices=set()
         self.lock=threading.Condition(threading.RLock())
         self.waiting=OrderedDict()
         self.generations={}
@@ -81,10 +83,15 @@ class ViewerStartQueue:
                     if time.monotonic()>=deadline:raise TimeoutError('CPU 持续繁忙，暂未接入此台')
                     self.stopping.wait(self.poll)
                 if not valid() or self.start(device,ticket) is False:continue
-                deadline=time.monotonic()+self.startup_timeout
+                # First-time setup includes image preparation before a frame can
+                # exist. Later reconnects and the one retry stay bounded normally.
+                timeout=self.initial_startup_timeout if attempt==0 and identifier not in self.ready_devices else self.startup_timeout
+                deadline=time.monotonic()+timeout
                 while valid():
-                    if self.ready(device):break
-                    if time.monotonic()>=deadline:raise TimeoutError('连接超过60秒，已跳过此台')
+                    if self.ready(device):
+                        self.ready_devices.add(identifier)
+                        break
+                    if time.monotonic()>=deadline:raise TimeoutError(f'连接超过{timeout:g}秒，已跳过此台')
                     self.stopping.wait(self.poll)
             except Exception as error:
                 if valid():

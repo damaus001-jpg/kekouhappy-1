@@ -67,12 +67,73 @@ class NativeForegroundTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(title_number('Call +12025550123, 10:00'))
         self.assertIsNone(title_number(HEADER + ', body text'))
 
-    async def test_probe_never_walks_more_than_three_controls(self):
-        service = Inspector(['Back, Button', 'Search, Text Field', 'Other, Button', HEADER])
+    async def test_probe_never_walks_more_than_five_controls(self):
+        service = Inspector(['Back, Button', 'Search, Text Field', 'Other, Button',
+                             'More, Button', 'Another, Button', HEADER])
         result = await probe_title(service)
         self.assertFalse(result['found'])
+        self.assertEqual(result['elements_checked'], 5)
+        self.assertEqual(len(service.moves), 5)
+        self.assertFalse(service.monitoring)
+
+    async def test_title_in_fourth_or_fifth_position_is_identified(self):
+        for index in (4, 5):
+            with self.subTest(position=index):
+                service = Inspector(['Back, Button']+['Other, Button']*(index-2)+[HEADER])
+                result = await probe_title(service)
+                self.assertTrue(result['found'])
+                self.assertEqual(result['phone_number'], NUMBER)
+                self.assertEqual(result['elements_checked'], index)
+                self.assertEqual(len(service.moves), index)
+                self.assertFalse(service.monitoring)
+
+    async def test_manual_identification_uses_shared_english_and_chinese_title_probe(self):
+        from native_workspace import identify_conversation
+        for marker in ('Show Conversation Details, Button', '显示对话详细信息, 按钮'):
+            with self.subTest(marker=marker):
+                contact = '+1 (202) 555.0123'
+                service = Inspector(['Back, Button', 'Other, Button', 'More, Button',
+                                     'Another, Button', contact+', '+marker])
+                with patch('native_workspace.scan') as scan:
+                    result = await identify_conversation(service)
+                self.assertEqual(result, {'contact': contact, 'phone_number': NUMBER})
+                self.assertEqual(len(service.moves), 5)
+                self.assertFalse(service.monitoring)
+                scan.assert_not_called()
+
+    async def test_manual_identification_rejects_body_numbers_and_sixth_title(self):
+        from native_workspace import identify_conversation
+        service = Inspector(['Back, Button', NUMBER+', Hello, 10:00',
+                             'Other, Button', 'More, Button', 'Another, Button', HEADER])
+        with self.assertRaisesRegex(ValueError, '未确认当前会话'):
+            await identify_conversation(service)
+        self.assertEqual(len(service.moves), 5)
+        self.assertFalse(service.monitoring)
+
+    async def test_each_element_gets_its_own_200ms_budget(self):
+        service = Inspector(['Back, Button', 'Search, Text Field', HEADER])
+        move = service.move_focus
+        async def delayed_move(direction):
+            await asyncio.sleep(.12)
+            await move(direction)
+        service.move_focus = delayed_move
+        result = await probe_title(service)
+        self.assertTrue(result['found'])
+        self.assertEqual(result['phone_number'], NUMBER)
         self.assertEqual(result['elements_checked'], 3)
-        self.assertEqual(len(service.moves), 3)
+        self.assertFalse(service.monitoring)
+
+    async def test_late_element_times_out_without_requesting_next(self):
+        service = Inspector(['Back, Button', HEADER])
+        move = service.move_focus
+        async def delayed_move(direction):
+            await move(direction)
+            await asyncio.sleep(.3)
+        service.move_focus = delayed_move
+        result = await probe_title(service)
+        self.assertFalse(result['found'])
+        self.assertEqual(result['reason'], 'timeout')
+        self.assertEqual(len(service.moves), 1)
         self.assertFalse(service.monitoring)
 
     async def test_missing_ack_does_not_advance_again(self):

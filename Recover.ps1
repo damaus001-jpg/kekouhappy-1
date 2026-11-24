@@ -27,7 +27,8 @@ $extract = $null
 if (!$resumeInstall) {
     $archive = Join-Path $env:TEMP ('qunkong-recovery-' + [guid]::NewGuid().ToString('N') + '.zip')
     $extract = Join-Path $env:TEMP ('qunkong-recovery-' + [guid]::NewGuid().ToString('N'))
-    $uri = "https://github.com/damaus001-jpg/kekouhappy-1/archive/refs/heads/$Ref.zip"
+    $refKind = if ($Ref -match '^v\d+\.\d+\.\d+$') { 'tags' } else { 'heads' }
+    $uri = "https://github.com/damaus001-jpg/kekouhappy-1/archive/refs/$refKind/$Ref.zip"
     try {
         Invoke-WebRequest -Uri $uri -OutFile $archive
         Expand-Archive -LiteralPath $archive -DestinationPath $extract

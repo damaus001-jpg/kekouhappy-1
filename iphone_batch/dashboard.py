@@ -20,6 +20,22 @@ from cpu_metrics import create_cpu_reader
 
 ROOT = Path(__file__).resolve().parent
 
+# Keep the implementation available, but preserve SMS task starting positions
+# when switching devices and avoid background Home-screen badge queries.
+AUTO_HOME_ON_DESELECT = False
+UNREAD_ICON_BADGES_ENABLED = False
+CONTINUOUS_BANNER_MONITOR_ENABLED = False
+
+
+def discover_for_dashboard():
+    """Keep the workbench available when the local Apple USB service is down."""
+    try:
+        return controller.discover(), None
+    except (OSError, RuntimeError) as error:
+        return [], ('无法连接 Apple USB 设备服务（127.0.0.1:27015）。'
+                    '请检查 Apple 官方设备软件及 Apple Mobile Device Service 是否已安装并运行，'
+                    '恢复后点击“刷新设备”。详细错误：' + str(error))
+
 
 def reveal_developer_mode(udid):
     if udid not in {row['udid'] for row in controller.discover()}:
@@ -167,8 +183,10 @@ def main():
     def require_control(device):
         require_connection(device, enabled)
         if device['udid'] in readonly:raise ValueError('该设备仅监看，请先允许操作')
-    requested=args.udid or [row['udid'] for row in controller.discover()]
-    udids=controller.resolve_devices(requested) if requested else []
+    discovered, device_discovery_error=discover_for_dashboard()
+    requested=args.udid or [row['udid'] for row in discovered]
+    # Do not query a known unavailable USB service again before HTTP startup.
+    udids=controller.resolve_devices(requested) if requested and not device_discovery_error else []
     if not 1024 <= args.port <= 65535 or not 1024 <= args.base_port <= 65535-len(udids)+1:
         raise ValueError('Invalid ports')
     if args.port in range(args.base_port,args.base_port+len(udids)):
@@ -198,20 +216,24 @@ def main():
     input_readiness={}
     trust_pending=set()
     trust_lock=threading.Lock()
-    from notification_monitor import NotificationMonitor
     from device_reconnect import DeviceReconnects, reset_phone_session, repair_phone_trust, reboot_phone
-    notification_monitor=NotificationMonitor(devices,workspace_service.phone_lock,
-        lambda device: nullcontext(),workspace_service.banner_notifications,
-        lambda d: control_allowed(d) and not reconnects.pending(d['udid']) and viewer_ready(d),stopping,
-        interval=2,lock_for=workspace_service.device_lock,manual_device=lambda: manager.selected,
-        on_new_cards=play_notification_sound)
-    from unread_badge import UnreadBadgeMonitor
-    unread_badge_monitor=UnreadBadgeMonitor(devices,workspace_service.unread_icon_badge,
-        lambda d: connection_allowed(d,enabled) and not reconnects.pending(d['udid']) and viewer_ready(d),
-        stopping,lambda:manager.selected,workspace_service.device_lock,interval=2)
+    notification_monitor=None
+    if CONTINUOUS_BANNER_MONITOR_ENABLED:
+        from notification_monitor import NotificationMonitor
+        notification_monitor=NotificationMonitor(devices,workspace_service.phone_lock,
+            lambda device: nullcontext(),workspace_service.banner_notifications,
+            lambda d: control_allowed(d) and not reconnects.pending(d['udid']) and viewer_ready(d),stopping,
+            interval=2,lock_for=workspace_service.device_lock,manual_device=lambda: manager.selected,
+            on_new_cards=play_notification_sound)
+    unread_badge_monitor=None
+    if UNREAD_ICON_BADGES_ENABLED:
+        from unread_badge import UnreadBadgeMonitor
+        unread_badge_monitor=UnreadBadgeMonitor(devices,workspace_service.unread_icon_badge,
+            lambda d: connection_allowed(d,enabled) and not reconnects.pending(d['udid']) and viewer_ready(d),
+            stopping,lambda:manager.selected,workspace_service.device_lock,interval=2)
     # Banner discovery has no legacy scan-policy or gesture-control lease.
-    workspace_service.notification_runner.set_enabled(True)
-    notification_monitor.set_enabled(True)
+    workspace_service.notification_runner.set_enabled(CONTINUOUS_BANNER_MONITOR_ENABLED)
+    if notification_monitor is not None:notification_monitor.set_enabled(True)
 
     def start_viewer_now(device):
         if not connection_allowed(device, enabled):
@@ -299,7 +321,11 @@ def main():
                 workspace_service.phone_lock.release()
 
     def refresh_connected_devices():
-        discovered=controller.discover()
+        nonlocal device_discovery_error
+        discovered, device_discovery_error=discover_for_dashboard()
+        if device_discovery_error:
+            # An unavailable service is not proof that existing phones detached.
+            raise ValueError(device_discovery_error)
         with registry.lock, workspace_service.phone_lock:
             # Preserve the row/selection while an intentional reboot temporarily
             # removes the phone from USB discovery. Its worker owns recovery.
@@ -310,8 +336,8 @@ def main():
                 added,removed=registry.refresh(discovered)
                 if manager.active not in {d['udid'] for d in devices}:manager.active=None
                 if manager.selected not in {d['udid'] for d in devices}:manager.selected=None
-            notification_monitor.update_devices(devices)
-            unread_badge_monitor.update_devices(devices)
+            if notification_monitor is not None:notification_monitor.update_devices(devices)
+            if unread_badge_monitor is not None:unread_badge_monitor.update_devices(devices)
             for device in removed:
                 startup_queue.cancel(device['udid'])
                 stop_viewer(device)
@@ -619,8 +645,8 @@ def main():
             current_devices=list(devices)
             readiness=list(health_pool.map(viewer_ready,current_devices))
             for device,ready in zip(current_devices,readiness):
-                try:notifications=notification_monitor.snapshot(device['udid'])
-                except KeyError:notifications={'state':'waiting','items':[],'card_count':0}
+                try:notifications=notification_monitor.snapshot(device['udid']) if notification_monitor is not None else {'state':'disabled','items':[],'card_count':0,'enabled':False}
+                except KeyError:notifications={'state':'waiting','items':[],'card_count':0,'enabled':False}
                 if ready:
                     device.pop('error',None)
                 if not connection_allowed(device, enabled):
@@ -631,9 +657,10 @@ def main():
                              'sms_task_busy':sms_device_busy(device['udid']),
                              **reconnects.snapshot(device['udid']),
                              **input_readiness_snapshot(device['udid']), 'trust_pending':device['udid'] in trust_pending,
-                             'unread_badge':unread_badge_monitor.snapshot(device['udid']),
+                             'unread_badge':unread_badge_monitor.snapshot(device['udid']) if unread_badge_monitor is not None
+                                 else {'state':'disabled','count':None,'updated_at':None,'error':None},
                              'notifications':notifications})
-            return self.respond(200,{'devices':rows,'active':manager.active,'selected':manager.selected,'scan_enabled':notification_monitor.enabled,'translation_enabled':False,'cpu_percent':cpu_usage.snapshot()})
+            return self.respond(200,{'devices':rows,'active':manager.active,'selected':manager.selected,'device_discovery_error':device_discovery_error,'scan_enabled':bool(notification_monitor and notification_monitor.enabled),'translation_enabled':False,'cpu_percent':cpu_usage.snapshot()})
 
         def do_POST(self):
             if not self.allowed():
@@ -846,6 +873,7 @@ def main():
                 except Exception:
                     return self.respond(500,{'error':'复制或打开 ChatGPT 失败，请重试；没有发送任何内容'})
             if self.path=='/api/notification-policy':
+                if notification_monitor is None:return self.respond(410,{'error':'横幅通知监控已关闭'})
                 try:
                     length=int(self.headers.get('Content-Length','0'))
                     if not 0<length<4096:raise ValueError('无效请求')
@@ -870,9 +898,9 @@ def main():
                         with workspace_service.device_lock(device['udid']):
                             result=workspace_service.dispatch(device['udid'],body,f"http://127.0.0.1:{device['port']}")
                         if body.get('action')=='notifications':
-                            notification_monitor.record(device['udid'],result)
+                            if notification_monitor is not None:notification_monitor.record(device['udid'],result)
                         if body.get('action')=='open_notification':
-                            notification_monitor.acknowledge(device['udid'],body['notification_id'])
+                            if notification_monitor is not None:notification_monitor.acknowledge(device['udid'],body['notification_id'])
                     return self.respond(200,result)
                 except (ValueError, TranslationError) as exc:
                     return self.respond(400,{'error':str(exc)})
@@ -895,7 +923,7 @@ def main():
                     if reconnects.pending(target['udid']):raise ValueError('该手机正在重新连接，请稍候')
                     if target['udid'] in trust_pending:raise ValueError('该手机正在等待信任确认')
                     previous=manager.selected
-                    if previous and previous!=target['udid']:
+                    if AUTO_HOME_ON_DESELECT and previous and previous!=target['udid']:
                         old=next((row for row in devices if row['udid']==previous),None)
                         if old and manager.active==previous and control_allowed(old) and viewer_ready(old) and not reconnects.pending(previous):
                             with workspace_service.device_lock(previous):
@@ -930,8 +958,8 @@ def main():
             stop_viewer(device)
             if (startup_queue.attempt(device['udid']) or 0)>0:
                 device['error']='请重连此设备'
-            elif isinstance(error,TimeoutError) and '连接超过60秒' in str(error):
-                device['error']='连接超过60秒，已跳过；30秒后重试一次'
+            elif isinstance(error,TimeoutError) and str(error).startswith('连接超过'):
+                device['error']=str(error)+'；30秒后重试一次'
             else:
                 device['error']='本次连接失败，已跳过；30秒后重试一次'
     def startup_ready(device):
@@ -942,6 +970,7 @@ def main():
         return True
     startup_queue=ViewerStartQueue(queued_start,startup_ready,
         lambda device:connection_allowed(device,enabled),startup_failed,stopping,
+        initial_startup_timeout=360,
         busy=lambda:psutil.cpu_percent(interval=.2)>75)
     server=ThreadingHTTPServer(('127.0.0.1',args.port),Handler)
     server.daemon_threads=True
@@ -952,8 +981,10 @@ def main():
             launch_viewer(device)
         threading.Thread(target=watch_viewers,daemon=True).start()
         threading.Thread(target=watch_input_readiness,daemon=True).start()
-        threading.Thread(target=notification_monitor.run,daemon=True).start()
-        threading.Thread(target=unread_badge_monitor.run,name='unread-icon-badges',daemon=True).start()
+        if notification_monitor is not None:
+            threading.Thread(target=notification_monitor.run,daemon=True).start()
+        if unread_badge_monitor is not None:
+            threading.Thread(target=unread_badge_monitor.run,name='unread-icon-badges',daemon=True).start()
         threading.Thread(target=sms_task_runner.run,name='sms-task-scheduler',daemon=True).start()
         controller.emit({'status':'dashboard_ready','url':f'http://127.0.0.1:{args.port}/','devices':devices})
         server.serve_forever(poll_interval=0.25)
