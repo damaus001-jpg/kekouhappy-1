@@ -1,9 +1,11 @@
 import asyncio
+import sys
 from types import SimpleNamespace
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import video_idle
 from video_idle import install, pause_if_idle, stream_until_disconnect, touch_media
 
 
@@ -26,6 +28,9 @@ class MediaIdleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(item._active_service)
         self.assertIsNone(item._audio_service)
         self.assertIsNone(item._init_sequence)
+        # The codec config survives standby so /codec probes can answer
+        # without waking media (dashboard readiness polls).
+        self.assertEqual(item._codec_string, 'old')
         self.assertEqual(item._batch_input_generation, 1)
         item._stop_hid.assert_awaited_once()
 
@@ -62,6 +67,10 @@ class MediaIdleTests(unittest.IsolatedAsyncioTestCase):
             async def serve(self): pass
         lock = asyncio.Lock()
         install(FakeServer, lambda instance: lock)
+        if sys.platform != 'darwin':
+            # Windows swaps upstream's AAC-ELD decoding receive task for the
+            # decode-free keepalive (no AudioToolbox on Windows).
+            self.assertIs(FakeServer._audio_udp_recv, video_idle.audio_recv_keepalive)
         item = FakeServer()
         await item._eager_stream_start()
         self.assertEqual(item.starts, 0)
@@ -76,6 +85,24 @@ class MediaIdleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item.audio_starts, 1)
         await item._ensure_fresh_stream(force=True)
         self.assertEqual(item._batch_input_generation, 1)
+
+    async def test_audio_keepalive_drains_rtp_without_decode_or_broadcast(self):
+        class Transport:
+            def __init__(self, packets):
+                self.packets = list(packets)
+            async def recv(self, bufsize):
+                if not self.packets:
+                    raise OSError('closed')
+                return self.packets.pop(0)
+        def rtp(seq):
+            return bytes([0x80, 0x65]) + seq.to_bytes(2, 'big') + bytes(8) + b'payload'
+        item = SimpleNamespace(_audio_rtp_packets_received=0, _audio_rtp_highest_seq=0,
+                               _http_port=8080, _audio_subscribers={object(): asyncio.Queue()})
+        await video_idle.audio_recv_keepalive(item, Transport([rtp(1), rtp(2), b'\x80\xc9' + bytes(12)]))
+        self.assertEqual(item._audio_rtp_packets_received, 2)
+        self.assertEqual(item._audio_rtp_highest_seq, 2)
+        for queue in item._audio_subscribers.values():
+            self.assertTrue(queue.empty())
 
     async def test_static_stream_disconnect_cancels_and_releases_subscription(self):
         reader = asyncio.StreamReader()

@@ -1,4 +1,19 @@
-# Current recovery point: v0.1.34 (2026-11-24)
+# Current recovery point: v0.1.35 (2026-11-25)
+
+Archive: [SESSION_ARCHIVE_2026-11-25_v0.1.35.md](SESSION_ARCHIVE_2026-11-25_v0.1.35.md). Local commit/tag plus remote force push (user authorized). Next recovery version: v0.1.36 (versions containing digit 4 are skipped per user rule).
+
+## What changed in v0.1.35
+
+- Media-session churn fix (main): /codec answers from cached parameter sets without waking standby media; /input-readiness three-state gate; standby pause keeps codec cache. Killed the 6-8 s pause/wake loop that churned 10 devices' media sessions and was the prime suspect behind viewer dropouts.
+- Windows audio keepalive without decode (audio_recv_keepalive): consumes AAC-ELD RTP and maintains RTCP counters without a decoder, no error churn, audio session kept as video pairing signal.
+- New hid_rebuild.py: passive detection of backboardd digitizer rejections ("ignoring digitizer event ... unsupported service", device 5 left-click loss, 3rd recurrence) with bounded HID rebuild (30 s cooldown, never replays input, media session untouched). Not yet verified live on a real recurrence.
+- Stress validation: 1-hour automated switching (90 switches, 0 failures, 10/10 ready+control 100%, 0 recovery events, CPU avg 66.9%/max 91.7%) and manual rapid random switching (34 switches, 0 drops).
+- Pikachu collaboration: host webview background throttling disabled for the 8070 partition (implemented by Pikachu session); 8070-side acceptance: two 60-minute scenarios (background/hidden and visible/static), 60 samples each, 0 subscription drops. See PIKACHU_CHAT.md / PIKACHU_PAGE_KEEPALIVE_2026-11-24.md.
+- USB enumeration loss root-caused to Apple UMDF driver crashes (event 10116); fixed by user reinstalling driver 538.0.0.0 via i4 assistant; 18/18 stable.
+- Installer v0.1.35 built (204,276,304 bytes, SHA256 241ef287a9c966ad74404fae22f1f1733df4e9f756df073130353a1ccbcc31e4), isolation checks pass, payload 17,877 files incl. hid_rebuild.py; user installed it manually. releases/ keeps only the current package per user rule (2026-11-25). Version numbers skip any containing digit 4 (AGENTS.md).
+- Known open: 30 s screen timeout unresolved; device 5 coordinate-touch loss not root-fixed (auto HID rebuild awaits live verification); upstream pinned 11.50.3 (11.61.1 not yet evaluated).
+
+# Historical recovery point: v0.1.34 (2026-11-24)
 
 Archive: [SESSION_ARCHIVE_2026-11-24_v0.1.34.md](SESSION_ARCHIVE_2026-11-24_v0.1.34.md). Local commit/tag only; no remote push this time. Next recovery version: v0.1.35.
 

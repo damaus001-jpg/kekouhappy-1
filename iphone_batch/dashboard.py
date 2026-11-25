@@ -557,6 +557,12 @@ def main():
                 # reconnects. Never steal that phone's control ownership.
                 if manager.selected==device['udid']:manager.select(device['udid'],ready=True)
             finally:workspace_service.phone_lock.release()
+        if manager.selected!=device['udid']:
+            # Only the control owner needs an input-readiness verdict. An
+            # unselected phone is legitimately in standby media mode; the
+            # select path re-probes it when the user switches to it.
+            device.pop('error',None)
+            return True
         future=input_readiness_pool.submit(probe_input_readiness,device)
         record_input_readiness(device['udid'],future)
         if not input_readiness_snapshot(device['udid'])['control_ready']:

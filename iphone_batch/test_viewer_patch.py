@@ -142,20 +142,85 @@ class ClipboardHTTPTests(ViewerHTTPFixture):
                 self.assertEqual(code,403,path)
             wake.assert_not_awaited()
 
-    async def test_signed_background_probe_does_not_grant_input_ownership(self):
+    async def test_background_readiness_probe_never_wakes_standby_media(self):
+        # A dashboard readiness probe for a paused, unselected phone must
+        # answer "standby" without restarting its audio/video sessions: the
+        # probe previously woke media every few seconds and the idle monitor
+        # paused it again, churning media sessions on 10-device hubs.
+        self.instance._batch_token='manager'
+        self.instance._batch_active=False
+        self.instance._active_service=None
+        self.instance._ensure_hid=AsyncMock()
+        self.instance._ensure_keyboard=AsyncMock()
+        self.instance._kb_service_id=4
+        self.instance._uhs=SimpleNamespace(send_keyboard=AsyncMock())
+        with patch('viewer_patch.wake_media', new_callable=AsyncMock) as wake:
+            code, _=await self.request('POST', {}, path='/input-readiness')
+            self.assertEqual(code,403)
+            code, data=await self.request('POST', {}, path='/input-readiness', token='manager')
+            self.assertEqual(code,200)
+            self.assertEqual(json.loads(data), {'ok': False, 'state': 'standby'})
+            self.instance._uhs.send_keyboard.assert_not_awaited()
+            self.instance._ensure_hid.assert_not_awaited()
+            wake.assert_not_awaited()
+        code, _=await self.request('POST', {'usages':[4]}, path='/manual-key', token='manager')
+        self.assertEqual(code,403)
+
+    async def test_media_up_unselected_probe_checks_without_wake(self):
+        # During the short window after switching away (media still running),
+        # probes may verify input but must neither wake media nor refresh the
+        # activity timer, so the idle pause still happens on schedule.
         self.instance._batch_token='manager'
         self.instance._batch_active=False
         self.instance._ensure_hid=AsyncMock()
         self.instance._ensure_keyboard=AsyncMock()
         self.instance._kb_service_id=4
         self.instance._uhs=SimpleNamespace(send_keyboard=AsyncMock())
-        code, _=await self.request('POST', {}, path='/input-readiness')
-        self.assertEqual(code,403)
-        code, _=await self.request('POST', {}, path='/input-readiness', token='manager')
-        self.assertEqual(code,200)
+        with patch('viewer_patch.wake_media', new_callable=AsyncMock) as wake:
+            code, data=await self.request('POST', {}, path='/input-readiness', token='manager')
+            self.assertEqual(code,200)
+            self.assertEqual(json.loads(data)['state'], 'ready')
         self.instance._uhs.send_keyboard.assert_awaited_once_with(4,[])
-        code, _=await self.request('POST', {'usages':[4]}, path='/manual-key', token='manager')
-        self.assertEqual(code,403)
+        wake.assert_not_awaited()
+
+    async def test_selected_device_readiness_probe_still_checks_input(self):
+        self.instance._batch_token='manager'
+        self.instance._batch_active=True
+        self.instance._ensure_hid=AsyncMock()
+        self.instance._ensure_keyboard=AsyncMock()
+        self.instance._kb_service_id=4
+        self.instance._uhs=SimpleNamespace(send_keyboard=AsyncMock())
+        with patch('viewer_patch.wake_media', new_callable=AsyncMock) as wake:
+            code, data=await self.request('POST', {}, path='/input-readiness', token='manager')
+            self.assertEqual(code,200)
+            self.assertEqual(json.loads(data)['state'], 'ready')
+        self.instance._uhs.send_keyboard.assert_awaited_once_with(4,[])
+        wake.assert_awaited_once()
+
+    async def test_codec_cache_answers_without_waking_standby_media(self):
+        self.instance._codec_string='hev1.1.6.L123.B0'
+        self.instance._vps_nal=b'\x40\x01\x0c\x01\xff\xff\x01\x60\x00\x00\x03\x00\x90'
+        self.instance._sps_nal=b'\x42\x01'+bytes(32)
+        self.instance._pps_nal=b'\x44\x01\xc0\x72'
+        with patch('viewer_patch.wake_media', new_callable=AsyncMock) as wake:
+            code, data=await self.request(path='/codec')
+            self.assertEqual(code,200)
+            payload=json.loads(data)
+            self.assertEqual(payload['codec'],'hev1.1.6.L123.B0')
+            self.assertTrue(payload['description'])
+            wake.assert_not_awaited()
+
+    async def test_codec_miss_still_wakes_media(self):
+        # With no cached parameter sets the request falls through to the
+        # upstream handler, which starts a real stream before answering.
+        self.instance._codec_string=None
+        self.instance._vps_nal=self.instance._sps_nal=self.instance._pps_nal=None
+        self.instance._ensure_fresh_stream=AsyncMock()
+        self.instance._stream_ready=asyncio.Event()
+        self.instance._stream_ready.set()
+        code, _=await self.request(path='/codec')
+        self.assertEqual(code,503)
+        self.instance._ensure_fresh_stream.assert_awaited_once_with(force=False)
 
     async def test_compatible_video_rejects_cross_origin_and_writes(self):
         with patch('video_compat.serve_jpeg') as serve:

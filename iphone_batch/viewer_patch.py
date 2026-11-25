@@ -54,6 +54,31 @@ def policy_allows_input(instance):
     return input_allowed(identifier,Path(__file__).resolve().parent/'.device-data'/'workspace'/'device-policy.json')
 
 
+def cached_codec_payload(instance):
+    """Answer /codec from the last stream's parameter sets without waking
+    standby media. The dashboard readiness polls hit /codec every few seconds
+    for every enabled device; waking media for those polls made each idle
+    viewer restart its audio+video sessions in a short loop (the media-session
+    churn behind occasional viewer dropouts on 10-device hubs). VPS/SPS/PPS
+    are stable per device, so the cached answer is truthful until the next
+    real stream start replaces them."""
+    codec = getattr(instance, '_codec_string', None)
+    vps = getattr(instance, '_vps_nal', None)
+    sps = getattr(instance, '_sps_nal', None)
+    pps = getattr(instance, '_pps_nal', None)
+    if not (codec and vps and sps and pps):
+        return None
+    from pymobiledevice3.remote.core_device.screen_stream import hevc_decoder_configuration_record
+    try:
+        description = base64.b64encode(
+            hevc_decoder_configuration_record(vps, sps, pps)).decode('ascii')
+    except Exception:
+        logging.getLogger(__name__).warning(
+            'cached codec description failed: port=%s', getattr(instance, '_http_port', None))
+        return None
+    return {'codec': codec, 'description': description}
+
+
 def viewer_script(folder):
     flag = b'window.__devTouchTrace = ' + (b'true' if touch_trace_enabled() else b'false') + b';'
     return b'\n'.join([flag] + [(folder / name).read_bytes() for name in (
@@ -168,6 +193,10 @@ def install():
         if not hasattr(instance, '_batch_input_lock'):
             instance._batch_input_lock = asyncio.Lock()
         return instance._batch_input_lock
+    from hid_rebuild import handle_phone_log as detect_digitizer_rejection
+    import touch_diagnostics
+    touch_diagnostics.phone_log_observer = (
+        lambda instance, event: detect_digitizer_rejection(instance, input_lock, event))
     from video_idle import install as install_idle_video
     install_idle_video(screen_stream.ScreenStreamServer, input_lock)
     from video_health import install as install_video_health
@@ -306,7 +335,13 @@ def install():
             # Signed video recovery must work for background monitor viewers;
             # it neither grants input control nor wakes a stopped source.
             return await delegate(ReplayReader(prefix, reader))
-        if parts[0] == 'GET' and path in ('/codec', '/stream.bin', '/audio.bin'):
+        if parts[0] == 'GET' and path == '/codec':
+            # Dashboard readiness polls answer from the cached parameter sets
+            # so a standby phone's media is never woken by a status probe.
+            cached = cached_codec_payload(self)
+            if cached is not None:
+                return await reply(writer, 200, cached)
+        if parts[0] == 'GET' and path in ('/stream.bin', '/audio.bin'):
             if not await prepare_media():
                 return
         if parts[0] == 'GET' and path in ('/', '/index.html'):
@@ -357,6 +392,20 @@ def install():
                     return await reply(writer, 400, {'error': 'invalid readiness request'})
                 if json.loads(await asyncio.wait_for(reader.readexactly(length), 3)) != {}:
                     return await reply(writer, 400, {'error': 'invalid readiness request'})
+                # The dashboard's periodic readiness watch probes every enabled
+                # device. A paused standby phone must not have its audio+video
+                # sessions restarted just to answer; otherwise each probe
+                # undoes the idle pause and the device cycles media sessions
+                # forever on a multi-device hub.
+                if not active(self):
+                    if self._active_service is None:
+                        return await reply(writer, 200, {'ok': False, 'state': 'standby'})
+                    # Media is still up (reconnect finish probe, or the first
+                    # idle seconds after switching away): check input without
+                    # waking or refreshing the activity timer, so the idle
+                    # pause still happens on schedule.
+                    result = await check_input(self, input_lock(self), lambda: True)
+                    return await reply(writer, 200, result)
                 if not await prepare_media():
                     return
                 # Readiness probes are authorized by the dashboard token and

@@ -27,6 +27,10 @@ LOG_ROOT = DATA / 'diagnostics' / 'touch'
 PHONE_FILTER = re.compile(r'digitizer|unsupported service|externalAccessory|authenticat|mainTouchscreen|remote.*(?:hid|touch)', re.I)
 PROCESSES = ('backboardd', 'dtuhidd')
 
+# Set by viewer_patch.install() to the HID-rebuild detector. Called from the
+# event-loop thread of each viewer with (instance, phone_log_event).
+phone_log_observer = None
+
 
 def enabled(root=PROJECT):
     """A packaged backend must never opt into this through inherited env vars."""
@@ -73,6 +77,7 @@ class TouchTrace:
             raise ValueError('Invalid trace device')
         self.device, self.port = device, port
         self.session = uuid.uuid4().hex
+        self.instance = None  # owning ScreenStreamServer, set by trace_for()
         self.path = Path(root) / (device + '.jsonl')
         self.max_bytes = max_bytes
         self.events = deque(maxlen=128)
@@ -182,6 +187,13 @@ class TouchTrace:
                         if kind == 'phone-log':
                             self.phone_lines += 1
                             self.collector_state = 'streaming'
+                            observer = phone_log_observer
+                            if observer is not None and self.instance is not None:
+                                try:
+                                    observer(self.instance, event)
+                                except Exception:
+                                    logging.getLogger(__name__).debug(
+                                        'phone-log observer failed', exc_info=True)
                         elif kind == 'collector-ready':
                             self.collector_state = 'listening'
                             self.collector_error = None
@@ -258,6 +270,7 @@ def trace_for(instance):
         return None
     try:
         trace = TouchTrace(device, getattr(instance, '_http_port', None))
+        trace.instance = instance
         instance._batch_touch_trace = trace
         return trace
     except Exception:

@@ -158,7 +158,7 @@ class RebuildTrustIntegrationTests(unittest.TestCase):
             workspace_service=SimpleNamespace(device_lock=lambda _:device_lock,phone_lock=phone_lock),
             registry=SimpleNamespace(lock=registry_lock),devices=[target,other],trust_pending=set(),
             manager=SimpleNamespace(lock=threading.Lock(),active='nine'),
-            startup_queue=SimpleNamespace(cancel=Mock()),input_readiness_lock=threading.Lock(),input_readiness={},
+            startup_queue=SimpleNamespace(cancel=Mock(),discard_ready=Mock()),input_readiness_lock=threading.Lock(),input_readiness={},
             reconnects=SimpleNamespace(stage=Mock()),retry_policy=SimpleNamespace(reset=Mock()),stopping=threading.Event(),
             stop_viewer=Mock(side_effect=lambda _:events.append('stop')),
             reset_phone_session=Mock(side_effect=lambda *a,**k:events.append('reset')),

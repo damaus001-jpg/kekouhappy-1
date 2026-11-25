@@ -1,11 +1,52 @@
 """Start media on demand and stop receiving standby phones' audio/video."""
 import asyncio
 import logging
+import sys
 import time
 
 from input_health import clear_input
 
 IDLE_SECONDS = 5
+
+
+async def audio_recv_keepalive(instance, transport):
+    """Windows replacement for upstream ``_audio_udp_recv``: consume the
+    device's AAC-ELD RTP without decoding.
+
+    The 8070 page never plays phone audio and Windows has no AudioToolbox, so
+    upstream's decoder construction fails there on every start: the receive
+    task dies, the idle/wake cycle rebuilds the audio session, and each cycle
+    logs a misleading error. The device-side audio session must still exist
+    (it pairs with the video session through the shared client_session_id,
+    see upstream ``_shared_session_id``), so this task keeps draining RTP and
+    maintaining the counters the audio RTCP keepalive uses, then discards the
+    payload. No decoder, no error churn, no PCM broadcasts.
+    """
+    while True:
+        try:
+            data = await transport.recv(65535)
+        except (OSError, asyncio.CancelledError):
+            return
+        except Exception:
+            logging.getLogger(__name__).warning(
+                'audio keepalive recv crashed: port=%s',
+                getattr(instance, '_http_port', None), exc_info=True)
+            return
+        if len(data) < 12:
+            continue
+        payload_type = data[1] & 0x7F
+        if 64 <= payload_type <= 95:  # RTCP
+            continue
+        instance._audio_rtp_packets_received += 1
+        seq = int.from_bytes(data[2:4], 'big')
+        cur_ext = instance._audio_rtp_highest_seq
+        cycles = (cur_ext >> 16) & 0xFFFF
+        last_seq16 = cur_ext & 0xFFFF
+        if seq < last_seq16 and (last_seq16 - seq) > 0x8000:
+            cycles = (cycles + 1) & 0xFFFF
+        new_ext = (cycles << 16) | seq
+        if cur_ext == 0 or ((new_ext - cur_ext) & 0xFFFFFFFF) < 0x80000000:
+            instance._audio_rtp_highest_seq = new_ext
 
 
 def touch_media(instance):
@@ -37,7 +78,10 @@ async def pause_if_idle(instance, input_lock, now=None):
                 await instance._stop_active_stream()
                 await instance._stop_audio_stream()
             instance._init_sequence = None
-            instance._codec_string = None
+            # Keep the cached codec config (_codec_string + VPS/SPS/PPS): the
+            # dashboard readiness polls hit /codec every few seconds and must
+            # be answerable without waking standby media. A real stream start
+            # re-derives them from the new SPS anyway.
         await clear_input(instance)
         # Stop on a fresh connection: a second reply-bearing call on the
         # connection that started media can crash the device's media daemon.
@@ -125,3 +169,8 @@ def install(server_class, input_lock):
     server_class._eager_stream_start = lazy_start
     server_class._ensure_fresh_stream = fresh
     server_class.serve = serve
+    if sys.platform != 'darwin':
+        # Windows has no AudioToolbox: upstream's AAC-ELD decoder would fail
+        # on every start and kill the receive task. Keep the paired audio
+        # session alive by draining RTP without decoding.
+        server_class._audio_udp_recv = audio_recv_keepalive

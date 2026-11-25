@@ -61,6 +61,7 @@ def stage_files(stage,build,electron,version,host_only=False):
         'iphone_batch/message_banner.py','iphone_batch/message_icon_badge.py',
         'iphone_batch/notification_worker.py','iphone_batch/sms_tasks.py',
         'iphone_batch/touch_diagnostics.py','iphone_batch/unread_badge.py',
+        'iphone_batch/hid_rebuild.py',
     ]))
     for name in files:
         relative=Path(name)
