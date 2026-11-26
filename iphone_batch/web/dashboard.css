@@ -265,6 +265,18 @@ body{background-image:radial-gradient(ellipse at 8% 0%,var(--workspace-accent-a0
 #sms-task-list-open{width:100%;min-height:38px;margin:0 0 8px;padding:6px 3px;font-size:12px;line-height:1.25;white-space:normal;word-break:keep-all}
 .sms-task-list-dialog{width:min(1040px,96vw);max-height:88vh;overflow:auto}
 .sms-task-table-wrap{overflow:auto;max-height:66vh}.sms-task-table{width:100%;border-collapse:collapse;font-size:13px}.sms-task-table th,.sms-task-table td{padding:9px 10px;border-bottom:1px solid #414c37;text-align:left;white-space:nowrap}.sms-task-table th{position:sticky;top:0;background:#242d23}.sms-task-table tr[data-active=true]{background:#30402f}.sms-task-table .task-error{color:#f3a59b;white-space:normal;max-width:340px}.sms-task-table button{padding:5px 9px;font-size:12px}
+.sms-task-table tr.task-expand-row>td{padding:12px 14px;white-space:normal;background:#1d241d}
+.task-detail{display:flex;flex-direction:column;gap:10px;font-size:13px}
+.task-detail-summary{font-weight:600}
+.task-detail-error{color:#f3a59b}
+.task-detail-removed{color:#f3c76b}
+.task-detail-devices{display:flex;flex-wrap:wrap;gap:6px 18px;color:var(--muted,#cfd8c4)}
+.task-detail-device{white-space:nowrap}
+.task-detail-filter{width:180px;padding:5px 8px;background:#1d241d;color:var(--ink);border:1px solid #414c37;border-radius:6px}
+.task-detail-table td,.task-detail-table th{padding:5px 8px;font-size:12px;white-space:normal}
+.task-detail-table td:first-child{white-space:nowrap}
+.task-detail-actions{display:flex;gap:8px;flex-wrap:wrap}
+.task-detail-actions button{padding:6px 12px;font-size:12px}
 .new-sms-dialog{width:min(1440px,96vw);max-width:none;height:min(740px,94dvh);max-height:94dvh;overflow:hidden;padding:18px;border:1px solid #4b563d;border-radius:12px;background:#242d23;color:var(--ink);font-size:14px;box-shadow:0 12px 35px #0006,inset 0 1px var(--workspace-accent-a09,#e3dc8709)}
 .new-sms-dialog form{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:14px}
 .new-sms-dialog::backdrop{background:#030805b8;backdrop-filter:blur(3px)}

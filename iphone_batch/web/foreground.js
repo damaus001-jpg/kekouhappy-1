@@ -138,6 +138,9 @@ class ForegroundSyncController {
    if(result.phase==='trust_required'){this.sendCheck=null;this.showTrustRequired(result);return;}
    if(result.phase==='send_changed'){
     this.sendCheck=null;this.expectedSend=null;this.number=null;
+    // Detach the pending bubble from the stale conversation. The actual
+    // number is reported so the bubble can be re-attached elsewhere later.
+    if(result.expected_number&&task.receipt)window.removeOutgoingReceipt?.(task.device,result.expected_number,task.receipt.id);
     this.activity('tap-complete');return;
    }
    if(result.phase==='cancelled'){

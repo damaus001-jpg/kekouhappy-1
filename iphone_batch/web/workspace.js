@@ -151,6 +151,18 @@ function saveOutgoingReceipts(device,number,receipts){
  const key=outgoingReceiptKey(device,number);outgoingReceiptCache.set(key,receipts);
  try{if(receipts.length)localStorage.setItem(key,JSON.stringify(receipts));else localStorage.removeItem(key);}catch{}
 }
+// Foreground sync calls this when the phone screen showed a different
+// conversation than the one the pending bubble was attached to. Removing the
+// receipt detaches the misplaced bubble; sending is never blocked.
+window.removeOutgoingReceipt=(device,number,id)=>{
+ if(!device||!number||!id)return false;
+ const receipts=outgoingReceipts(device,number);
+ const remaining=receipts.filter(receipt=>receipt.id!==id);
+ if(remaining.length===receipts.length)return false;
+ saveOutgoingReceipts(device,number,remaining);
+ renderConversation();
+ return true;
+};
 function outgoingMessageKey(message){return JSON.stringify([message.side,message.text,message.time||null,message.kind||'text']);}
 function outgoingBaseline(device,number){
  if(device!==workspaceDevice||String(currentConversation?.phone_number||'').replace(/\D/g,'')!==String(number||'').replace(/\D/g,''))return [];

@@ -149,7 +149,7 @@ class SmsTaskRunner:
                                     if uncertain else None)
                     if job.get('navigation_failed') and not uncertain:
                         job['status'] = 'failed'
-                        job['error'] = '已发送，返回短信列表失败；任务已停止，不会重发'
+                        job['error'] = '已发送，返回短信列表失败；该设备已停止，其余设备继续发送'
                     self._save(job)
                 self.jobs[job["id"]] = job
             except (OSError, ValueError, TypeError):
@@ -215,6 +215,18 @@ class SmsTaskRunner:
             raise ValueError("本地时区标识无效")
 
         identifier = uuid.uuid4().hex
+        # Never re-send numbers already confirmed today by any task. The
+        # user may intentionally follow up on older days, so the check is
+        # limited to tasks created on the same local day.
+        today = datetime.now().astimezone().date().isoformat()
+        sent_today = {item['number'] for job in self.jobs.values()
+                      if (job.get('created_at') or '')[:10] == today
+                      for item in job.get('items', [])
+                      if item.get('status') == 'sent_verified'}
+        removed_duplicates = [number for number in normalized if number in sent_today]
+        normalized = [number for number in normalized if number not in sent_today]
+        if not normalized:
+            raise ValueError('名单中所有号码今天都已发送过，未创建任务')
         items = []
         for index, number in enumerate(normalized):
             owner = selected[index % len(selected)]
@@ -227,6 +239,7 @@ class SmsTaskRunner:
                "timezone": zone,
                "concurrency": concurrency, "devices": selected, "texts": texts,
                "status": "queued" if mode == "immediate" else "scheduled",
+               "removed_duplicates": removed_duplicates,
                "items": items, "cancel_requested": False, "error": None}
         with self.lock:
             self._save(job)
@@ -253,7 +266,7 @@ class SmsTaskRunner:
             for job in jobs:
                 items=job.get('items',[])
                 sent=[item for item in items if item.get('status')=='sent_verified']
-                failed=[item for item in items if item.get('status') in ('failed','uncertain') or item.get('phase')=='return_failed']
+                failed=[item for item in items if item.get('status') in ('failed','uncertain','skipped') or item.get('phase')=='return_failed']
                 detailed=sum(bool(item.get('had_existing_conversation')) for item in sent)
                 rows.append({'id':job['id'],'name':job.get('name',''),'date':job.get('created_at','')[:10],
                     'status':job.get('status'),'created_at':job.get('created_at'),
@@ -274,8 +287,8 @@ class SmsTaskRunner:
             assigned=[item for item in job.get('items', []) if item.get('device')==device.get('udid')]
             device_rows.append({'udid':device['udid'], 'total':len(assigned),
                 'sent':sum(item.get('status')=='sent_verified' for item in assigned),
-                'remaining':sum(item.get('status') not in ('sent_verified','cancelled') for item in assigned),
-                'failed':sum(item.get('status') in ('failed','uncertain') or item.get('phase')=='return_failed' for item in assigned),
+                'remaining':sum(item.get('status') not in ('sent_verified','cancelled','skipped') for item in assigned),
+                'failed':sum(item.get('status') in ('failed','uncertain','skipped') or item.get('phase')=='return_failed' for item in assigned),
                 'failure':next((item.get('error') for item in assigned if item.get('error')),None)})
         return {key: value for key, value in job.items() if key not in ("texts", "items")} | {
             "total": len(job.get("items", [])), "counts": counts, "device_progress":device_rows,
@@ -303,12 +316,17 @@ class SmsTaskRunner:
             self.halt.set()
             return self._public(job)
 
-    def resume_unsent(self, identifier):
-        """Explicit recovery only; preserve receipts and reject any uncertain send."""
+    def resume_unsent(self, identifier, include_uncertain=False):
+        """Explicit recovery only; preserve receipts and reject any uncertain send.
+
+        ``include_uncertain`` is an explicit, user-confirmed exception: the
+        owner has checked the phone and states the uncertain numbers were not
+        sent, so they may be replayed once.
+        """
         with self.lock:
             original = self.jobs.get(identifier)
-            if not original or original.get('status') != 'failed':
-                raise ValueError('只能继续已停止的失败任务')
+            if not original or original.get('status') not in ('failed', 'uncertain', 'completed_with_errors'):
+                raise ValueError('只能继续失败、待核对或部分完成的任务')
             if self.active_id is not None:
                 raise ValueError('请等待当前发送任务停止后再继续')
             job = deepcopy(original)
@@ -321,6 +339,18 @@ class SmsTaskRunner:
                 if unit.get('status') == 'sent_verified':
                     item.update(status='sent_verified', phase='finished',
                                 last_send_at=unit.get('sent_at'), error=None)
+                    continue
+                if item.get('status') in ('uncertain', 'skipped'):
+                    if include_uncertain:
+                        # Explicitly confirmed unsent by the owner. Clear the
+                        # durable marker and re-queue this one number only.
+                        item.update(status='queued', phase='waiting_slot', error=None)
+                        self._write_unit(identifier, item)
+                        continue
+                    # An uncertain send may already have reached the phone.
+                    # Skipping it keeps the durable send_requested marker intact.
+                    item.update(status='skipped', phase='skipped',
+                                error='发送结果不明，已跳过且未重发；请核对手机')
                     continue
                 if (unit.get('send_requested_at') or unit.get('status') == 'send_requested'
                         or item.get('status') in ('sent_verified', 'sending', 'uncertain', 'send_requested')):
@@ -404,8 +434,12 @@ class SmsTaskRunner:
                 return
             item = job["items"][index]
             if item.get("status") != "queued":
-                if item.get("status") in ("uncertain", "failed"):
-                    self.halt.set()
+                if item.get("status") == "uncertain":
+                    # An uncertain send may already have reached the phone.
+                    # Skip it in place and keep sending later numbers; the
+                    # durable send_requested marker is never touched.
+                    self._update_item(identifier, index, status='skipped', phase='skipped',
+                                      error='发送结果不明，已跳过且未重发；请核对手机')
                 continue
             due = self._next_compose_at(identifier, device)
             if due > time.time():
@@ -447,16 +481,20 @@ class SmsTaskRunner:
                         with self.lock:
                             job = self.jobs[identifier]
                             job['navigation_failed'] = True
-                            job['error'] = '已发送，返回短信列表失败；任务已停止，不会重发'
+                            job['error'] = '已发送，返回短信列表失败；该设备已停止，其余设备继续发送'
                             self._save(job)
-                        self.halt.set()
+                        # Stop only this device's queue. Other devices keep
+                        # sending; the confirmed send is never replayed.
                         return
                     requested = unit.get('status') == 'send_requested'
-                    self._update_item(identifier, index, status='uncertain' if requested else 'failed',
-                        phase='uncertain' if requested else 'failed',
-                        error='发送结果不明，请核对手机；禁止自动重发' if requested else str(exc)[:500])
-                    self.halt.set()
-                    return
+                    self._update_item(identifier, index,
+                        status='skipped' if requested else 'failed',
+                        phase='skipped' if requested else 'failed',
+                        error='发送结果不明，已跳过且未重发；请核对手机' if requested else str(exc)[:500])
+                    # One bad number must not stop the rest of the campaign.
+                    # The loop continues with the next queued number for this
+                    # device; skipped/failed markers are never replayed.
+                    continue
                 sent_at = unit.get('sent_at') or _iso_now()
                 anchor = _epoch(unit.get('send_requested_at')) or _epoch(sent_at)
                 self._update_item(identifier, index, status='sent_verified', last_send_at=sent_at,
@@ -490,9 +528,19 @@ class SmsTaskRunner:
                 job["error"] = "存在发送结果不明的号码；核对手机后再处理，系统不会自动重发"
             elif job.get('navigation_failed'):
                 job['status'] = 'failed'
-            elif "failed" in states:
-                job["status"] = "failed"
-                job["error"] = next((item.get("error") for item in job["items"] if item.get("status") == "failed"), None)
+            elif all(item.get("status") in ("sent_verified", "skipped", "failed")
+                     for item in job["items"]) and ("failed" in states or "skipped" in states):
+                job["status"] = "completed_with_errors"
+                failure = next((item.get("error") for item in job["items"]
+                                if item.get("status") == "failed"), None)
+                skipped = sum(item.get("status") == "skipped" for item in job["items"])
+                failed = sum(item.get("status") == "failed" for item in job["items"])
+                parts = []
+                if skipped:
+                    parts.append(f"已跳过 {skipped} 个发送结果不明的号码（未重发）")
+                if failed:
+                    parts.append(f"{failed} 个号码发送失败，可用“重发失败号码”重试" + (f"：{failure}" if failure else ""))
+                job["error"] = "；".join(parts)
             elif job.get("cancel_requested"):
                 for item in job["items"]:
                     if item.get("status") == "queued":

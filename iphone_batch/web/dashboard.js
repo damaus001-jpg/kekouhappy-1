@@ -974,10 +974,8 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
  const dialog=document.getElementById('new-sms-dialog'),form=document.getElementById('new-sms-form');
  const get=id=>document.getElementById('new-sms-'+id);
  const storageKey='iphone-new-sms-task-draft:v1';
- const lastTaskKey='iphone-new-sms-last-task:v1';
- let imported=null,devices={},fileRevision=0,inflight=false,lastTaskId=null,pollTimer=0,saveTimer=0,inlineTaskTimer=0;
+ let imported=null,devices={},fileRevision=0,inflight=false,saveTimer=0;
  const status=(message,error=false)=>{get('status').textContent=message;get('status').dataset.error=String(error);};
- const taskStatus=(message,error=false)=>{get('task-status').textContent=message;get('task-status').dataset.error=String(error);};
  function normalize(value){
   const clean=value.trim().replace(/[\s()\-]/g,'');
   if(/^\+\d{7,15}$/.test(clean))return clean;
@@ -1043,73 +1041,158 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
  }
  const updateTiming=()=>{const scheduled=form.querySelector('[name=new-sms-start-mode]:checked').value==='scheduled';get('start-at').disabled=!scheduled;get('submit').textContent=scheduled?'保存定时发送':'立即发送';};
  const terminal=new Set(['completed','completed_with_errors','failed','uncertain','cancelled']);
+ const activeSet=new Set(['running','waiting_for_device','queued','scheduled']);
+ const stateLabels={running:'正在发送',waiting_for_device:'等待设备',queued:'即将进行',scheduled:'即将进行',completed:'已完成',completed_with_errors:'部分完成',failed:'失败',uncertain:'待核对',cancelled:'已取消'};
+ const itemStateLabels={sent_verified:'已确认发送',sending:'发送中',queued:'未发送',failed:'发送失败',skipped:'结果不明已跳过',cancelled:'已取消'};
  const taskListDialog=document.getElementById('sms-task-list-dialog');
- document.getElementById('sms-task-list-open').addEventListener('click',async()=>{taskListDialog.showModal();await refreshTaskList();});
+ const expandedTasks=new Set(),taskDetails=new Map();
+ let listTimer=0,listFetching=false;
+ document.getElementById('sms-task-list-open').addEventListener('click',async()=>{
+  taskListDialog.showModal();await refreshTaskList();
+  clearInterval(listTimer);listTimer=setInterval(()=>{if(taskListDialog.open)void refreshTaskList();},3000);
+ });
  document.getElementById('sms-task-list-close').addEventListener('click',()=>taskListDialog.close());
+ taskListDialog.addEventListener('close',()=>{clearInterval(listTimer);listTimer=0;expandedTasks.clear();taskDetails.clear();});
+ function downloadNumbers(filename,numbers){
+  if(!numbers.length){notice('没有可导出的号码');return;}
+  const text='\ufeff'+numbers.join('\r\n')+'\r\n';
+  const url=URL.createObjectURL(new Blob([text],{type:'text/plain;charset=utf-8'})),link=document.createElement('a');
+  link.href=url;link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+ }
+ function taskUnsentNumbers(task){
+  return (task.items||[]).filter(item=>item.status==='queued'||item.status==='cancelled').map(item=>item.number);
+ }
+ function taskFailedNumbers(task){
+  return (task.items||[]).filter(item=>['failed','uncertain','skipped'].includes(item.status)||item.phase==='return_failed')
+   .map(item=>item.number).filter(Boolean);
+ }
+ function deviceName(udid){
+  const index=latest.findIndex(device=>device.udid===udid);
+  return index>=0?'设备 '+deviceLabel(latest[index],index).number:udid.slice(-4);
+ }
+ function renderTaskDetail(task,container){
+  container.replaceChildren();
+  const wrap=document.createElement('div');wrap.className='task-detail';
+  const counts=task.counts||{};
+  const sent=counts.sent_verified||0,skipped=counts.skipped||0,failed=counts.failed||0;
+  const queued=counts.queued||0,cancelled=counts.cancelled||0,unsent=queued+cancelled;
+  const summary=document.createElement('p');summary.className='task-detail-summary';
+  summary.textContent=`总数 ${task.total||0} · 已确认发送 ${sent} · 失败 ${failed} · 结果不明跳过 ${skipped} · 未发送 ${unsent}${cancelled?`（其中已取消 ${cancelled}）`:''}`;
+  wrap.append(summary);
+  if(task.error){const line=document.createElement('p');line.className='task-detail-error muted';line.textContent=task.error;wrap.append(line);}
+  const removed=task.removed_duplicates||[];
+  if(removed.length){
+   const line=document.createElement('p');line.className='task-detail-removed';
+   line.textContent=`已自动剔除 ${removed.length} 个今天已发送过的号码（未重复发送）`;
+   const exp=document.createElement('button');exp.type='button';exp.className='secondary';exp.textContent='导出剔除号码';
+   exp.addEventListener('click',()=>downloadNumbers(`已剔除号码_${task.date}_${task.id.slice(0,8)}.txt`,removed));
+   line.append(' ',exp);wrap.append(line);
+  }
+  const deviceRow=document.createElement('div');deviceRow.className='task-detail-devices';
+  for(const device of task.device_progress||[]){
+   const cell=document.createElement('span');cell.className='task-detail-device';
+   cell.textContent=`${deviceName(device.udid)}：${device.sent}/${device.total} 已发 · 失败 ${device.failed} · 剩余 ${device.remaining}`;
+   deviceRow.append(cell);
+  }
+  wrap.append(deviceRow);
+  const filter=document.createElement('select');filter.className='task-detail-filter';
+  for(const [value,label] of [['all','全部状态'],['sent_verified','已确认'],['failed','失败'],['skipped','跳过'],['unsent','未发送']]){
+   const option=document.createElement('option');option.value=value;option.textContent=label;filter.append(option);
+  }
+  const table=document.createElement('table');table.className='sms-task-table task-detail-table';
+  const head=document.createElement('thead');head.innerHTML='<tr><th>号码</th><th>设备</th><th>状态</th><th>时间/原因</th></tr>';table.append(head);
+  const tbody=document.createElement('tbody');
+  const renderRows=value=>{
+   tbody.replaceChildren();
+   for(const item of task.items||[]){
+    const unsentItem=item.status==='queued'||item.status==='cancelled';
+    const bucket=unsentItem?'unsent':item.status;
+    if(value!=='all'&&bucket!==value)continue;
+    const tr=document.createElement('tr');
+    const num=document.createElement('td');num.textContent=item.number||'';tr.append(num);
+    const dev=document.createElement('td');dev.textContent=deviceName(item.device);tr.append(dev);
+    const st=document.createElement('td');st.textContent=itemStateLabels[item.status]||item.status||'';tr.append(st);
+    const info=document.createElement('td');info.textContent=item.error||item.last_send_at||'';tr.append(info);
+    tbody.append(tr);
+   }
+  };
+  filter.addEventListener('change',()=>renderRows(filter.value));
+  renderRows('all');
+  table.append(tbody);wrap.append(filter,table);
+  const actions=document.createElement('div');actions.className='task-detail-actions';
+  const exportUnsent=document.createElement('button');exportUnsent.type='button';exportUnsent.className='secondary';
+  exportUnsent.textContent='一键导出未发送号码';
+  exportUnsent.addEventListener('click',()=>downloadNumbers(`未发送号码_${task.date}_${task.id.slice(0,8)}.txt`,taskUnsentNumbers(task)));
+  actions.append(exportUnsent);
+  const exportFailed=document.createElement('button');exportFailed.type='button';exportFailed.className='secondary';
+  exportFailed.textContent='导出失败号码';
+  exportFailed.addEventListener('click',()=>downloadNumbers(`失败手机号_${task.date}_${task.id.slice(0,8)}.txt`,taskFailedNumbers(task)));
+  actions.append(exportFailed);
+  if(activeSet.has(task.status)){
+   const cancel=document.createElement('button');cancel.type='button';cancel.textContent='取消任务';
+   cancel.addEventListener('click',async()=>{
+    if(!confirm('确定取消此任务？正在发送的单条短信会先完成，排队号码不再发送。'))return;
+    cancel.disabled=true;
+    try{await deviceRequest('/api/sms-tasks/'+encodeURIComponent(task.id)+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'},8000);notice('已请求取消；正在发送的单条会先完成，不会自动重发。');void refreshTaskList();}
+    catch(error){notice('取消失败：'+error.message);}
+    finally{cancel.disabled=false;}
+   });
+   actions.append(cancel);
+  }
+  if(['failed','uncertain','completed_with_errors'].includes(task.status)){
+   const resume=document.createElement('button');resume.type='button';
+   resume.textContent=task.status==='uncertain'?'继续发送剩余号码':task.status==='completed_with_errors'?'重发失败号码':'继续发送';
+   resume.addEventListener('click',async()=>{
+    if(task.status==='uncertain'&&!confirm('发送结果不明的号码将被跳过且不会自动重发。请确认你已在手机上核对过这些号码。是否继续发送剩余号码？'))return;
+    if(task.status==='completed_with_errors'&&!confirm('将重发明确失败的号码；结果不明已跳过的号码不会重发。是否继续？'))return;
+    resume.disabled=true;
+    try{await deviceRequest('/api/sms-tasks/'+encodeURIComponent(task.id)+'/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'},10000);notice('已继续发送，请在任务列表查看进度。');void refreshTaskList();}
+    catch(error){notice('未能继续：'+error.message);}
+    finally{resume.disabled=false;}
+   });
+   actions.append(resume);
+  }
+  wrap.append(actions);container.append(wrap);
+ }
  async function refreshTaskList(){
+  if(listFetching)return;listFetching=true;
   const body=document.getElementById('sms-task-list-body'),empty=document.getElementById('sms-task-list-empty');body.replaceChildren();
   try{
+   for(const id of expandedTasks){
+    try{taskDetails.set(id,await deviceRequest('/api/sms-tasks?id='+encodeURIComponent(id),{cache:'no-store'},8000));}
+    catch(error){taskDetails.set(id,{read_error:'无法读取任务详情：'+error.message});}
+   }
    const result=await deviceRequest('/api/sms-tasks/daily',{cache:'no-store'},10000);
-   const active=new Set(['running','waiting_for_device','queued','scheduled']);
    for(const task of result.tasks){
-    const row=document.createElement('tr');row.dataset.active=String(active.has(task.status));
+    const unsent=Math.max(0,(task.total||0)-(task.sent||0)-(task.failed||0));
+    const row=document.createElement('tr');row.dataset.taskId=task.id;row.dataset.active=String(activeSet.has(task.status));
     const date=document.createElement('td');date.textContent=task.date;row.append(date);
-    const status=document.createElement('td');status.textContent=task.name+' · '+({running:'正在发送',waiting_for_device:'等待设备',queued:'即将进行',scheduled:'即将进行',completed:'已完成',failed:'失败',uncertain:'待核对',cancelled:'已取消'}[task.status]||task.status)+(task.status==='scheduled'?' · '+new Date(task.due_at*1000).toLocaleTimeString():'');row.append(status);
+    const st=document.createElement('td');st.textContent=task.name+' · '+(stateLabels[task.status]||task.status)+(task.status==='scheduled'?' · '+new Date(task.due_at*1000).toLocaleTimeString():'');row.append(st);
     for(const key of ['sent','failed']){const cell=document.createElement('td');cell.textContent=String(task[key]);row.append(cell);}
-    const exp=document.createElement('td');
-    if(task.failed_numbers.length){const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent='失败手机号';button.addEventListener('click',()=>exportFailedNumbers(task));exp.append(button);}else exp.textContent='—';row.append(exp);body.append(row);
+    const unsentCell=document.createElement('td');unsentCell.textContent=String(unsent);row.append(unsentCell);
+    const action=document.createElement('td');
+    const toggle=document.createElement('button');toggle.type='button';toggle.className='secondary';toggle.textContent=expandedTasks.has(task.id)?'收起':'展开';
+    action.append(toggle);row.append(action);
+    row.addEventListener('click',event=>{if(event.target!==toggle)toggle.click();});
+    toggle.addEventListener('click',()=>{
+     if(expandedTasks.has(task.id)){expandedTasks.delete(task.id);taskDetails.delete(task.id);}
+     else expandedTasks.add(task.id);
+     void refreshTaskList();
+    });
+    body.append(row);
+    if(expandedTasks.has(task.id)){
+     const expandRow=document.createElement('tr');expandRow.className='task-expand-row';
+     const cell=document.createElement('td');cell.colSpan=6;
+     const detail=taskDetails.get(task.id);
+     if(detail&&!detail.read_error)renderTaskDetail(detail,cell);
+     else cell.textContent=(detail&&detail.read_error)||'正在读取任务详情…';
+     expandRow.append(cell);body.append(expandRow);
+    }
    }
    empty.hidden=result.tasks.length>0;
   }catch(error){empty.hidden=false;empty.textContent='任务列表暂不可用：'+error.message;}
+  finally{listFetching=false;}
  }
- function exportFailedNumbers(task){
-  const numbers=task.failed_numbers.map(item=>item.number).filter(Boolean).join('\r\n')+'\r\n';
-  const url=URL.createObjectURL(new Blob(['\ufeff',numbers],{type:'text/plain;charset=utf-8'})),link=document.createElement('a');link.href=url;link.download=`失败手机号_${task.date}_${task.id.slice(0,8)}.txt`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
- }
- function taskLabel(task){
-  const labels={scheduled:'已定时',queued:'等待开始',waiting_for_device:'等待设备恢复',running:'正在执行',completed:'全部发送完成',completed_with_errors:'部分完成',failed:'发送失败',uncertain:'发送结果待核对',cancelled:'已取消'};
-  const sent=task.counts?.sent_verified||0,total=task.total||0;
-  return `${task.name||'短信任务'}：${labels[task.status]||task.status} · 已确认发送 ${sent}/${total}`+
-   (task.status==='running'?` · 在途 ${task.in_flight||0} 台 · 等待下一次新建 ${task.waiting_next_compose||0} 台`:'')+(task.error?' · '+task.error:'');
- }
- function updateInlineTask(task){
-  const node=document.getElementById('sms-task-status-inline');
-  if(!node)return;
-  if(!task||!task.total){node.hidden=true;node.textContent='';return;}
-  if(task.status==='scheduled'){
-   const seconds=Math.max(0,Math.floor(Number(task.due_at||0)-Date.now()/1000));
-   const hours=Math.floor(seconds/3600),minutes=Math.floor((seconds%3600)/60),remainder=seconds%60;
-   node.textContent=`距离定时发送还有 ${hours} 小时 ${minutes} 分钟 ${remainder} 秒 · ${task.total} 条`;
-   node.title=task.name||'定时发送';node.dataset.state=task.status;node.hidden=false;return;
-  }
-  const sent=task.counts?.sent_verified||0,remaining=Math.max(0,task.total-sent);
-  const states={running:'正在发送',queued:'等待开始',scheduled:'已定时',waiting_for_device:'等待设备恢复',completed:'发送完成',failed:'发送失败',uncertain:'发送结果待核对',cancelled:'已取消'};
-  const failures=(task.device_progress||[]).filter(device=>device.failed);
-  const deviceNames=new Map(latest.map((device,index)=>[device.udid,deviceLabel(device,index).number]));
-  const failedText=failures.map(device=>`设备${deviceNames.get(device.udid)||device.udid.slice(-4)}故障${device.failed}条`).join('，');
-  node.textContent=`${states[task.status]||task.status} · 剩余 ${remaining} 条（${sent}/${task.total} 已确认）${failedText?' · '+failedText:''}`;
-  const perDevice=(task.device_progress||[]).map(device=>`设备${deviceNames.get(device.udid)||device.udid.slice(-4)}：${device.sent}/${device.total} 已发，剩余 ${device.remaining}${device.failure?'；故障：'+device.failure:''}`).join('\n');
-  node.title=[perDevice,task.status==='running'?`在途 ${task.in_flight||0} 台 · 等待下一次新建 ${task.waiting_next_compose||0} 台`:null,task.error].filter(Boolean).join('\n');
-  node.dataset.state=task.status;node.hidden=false;
- }
- async function refreshInlineTask(){
-  if(!lastTaskId){updateInlineTask(null);return;}
-  try{updateInlineTask(await deviceRequest('/api/sms-tasks?id='+encodeURIComponent(lastTaskId),{cache:'no-store'},8000));}
-  catch{const node=document.getElementById('sms-task-status-inline');if(node){node.hidden=false;node.textContent='短信任务状态暂不可用';}}
- }
- async function refreshTask(id){
-  if(!id||!dialog.open)return;
-  try{
-   const task=await deviceRequest('/api/sms-tasks?id='+encodeURIComponent(id),{cache:'no-store'},8000);
-   if(id!==lastTaskId)return;
-   updateInlineTask(task);
-   taskStatus(taskLabel(task),['failed','uncertain','completed_with_errors'].includes(task.status));
-   get('cancel').hidden=terminal.has(task.status);get('cancel').dataset.taskId=id;
-   get('resume').hidden=task.status!=='failed';get('resume').dataset.taskId=id;
-   if(terminal.has(task.status)){clearInterval(pollTimer);pollTimer=0;}
-  }catch(error){taskStatus('任务状态暂时无法读取：'+error.message,true);}
- }
- function watchTask(id){clearInterval(pollTimer);if(!id)return;void refreshTask(id);pollTimer=setInterval(()=>void refreshTask(id),2000);}
  function open(){
   let draft=null;try{draft=JSON.parse(localStorage.getItem(storageKey)||'null');}catch{}
   imported=null;devices={};get('texts').value='';get('min').value='15';get('max').value='25';get('concurrency').value='2';
@@ -1130,15 +1213,21 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
   get('text-count').textContent=texts().length+' 条';
   get('timezone').textContent='本地时区：'+Intl.DateTimeFormat().resolvedOptions().timeZone;
   status(draft?'已恢复上次未提交的配置。':'导入号码、填写正文并选择设备。');
-  try{lastTaskId=localStorage.getItem(lastTaskKey)||null;}catch{lastTaskId=null;}
-  void refreshInlineTask();clearInterval(inlineTaskTimer);inlineTaskTimer=setInterval(()=>void refreshInlineTask(),5000);
-  taskStatus('');get('cancel').hidden=true;get('resume').hidden=true;get('submit').disabled=false;inflight=false;
+  get('submit').disabled=false;inflight=false;
   dialog.showModal();
-  watchTask(lastTaskId);
+ }
+ function resetForm(){
+  imported=null;devices={};fileRevision++;get('file').value='';
+  get('texts').value='';get('name').value='';get('min').value='15';get('max').value='25';get('concurrency').value='2';
+  get('start-at').value='';form.querySelector('[name=new-sms-start-mode][value=immediate]').checked=true;
+  try{localStorage.removeItem(storageKey);}catch{}
+  showImport();renderDevices();updateTiming();
+  get('text-count').textContent='0 条';
+  status('导入号码、填写正文并选择设备。');
  }
  document.getElementById('new-sms-task').addEventListener('click',open);
  get('close').addEventListener('click',()=>dialog.close());
- dialog.addEventListener('close',()=>{fileRevision++;clearInterval(pollTimer);pollTimer=0;clearTimeout(saveTimer);});
+ dialog.addEventListener('close',()=>{fileRevision++;clearTimeout(saveTimer);});
  form.addEventListener('input',scheduleLocalDraftSave);
  form.addEventListener('change',scheduleLocalDraftSave);
  form.querySelectorAll('[name=new-sms-start-mode]').forEach(input=>input.addEventListener('change',updateTiming));
@@ -1167,22 +1256,6 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
    status(parsed.numbers.length?'号码已导入，原 TXT 不变。':'未找到有效号码，请检查文件内容。',!parsed.numbers.length);scheduleLocalDraftSave();
   }catch{if(revision===fileRevision)status('文件读取失败，请检查文件编码或重新选择。',true);}
  });
- get('resume').addEventListener('click',async()=>{
-  const id=get('resume').dataset.taskId;if(!id)return;
-  get('resume').disabled=true;
-  try{
-   const task=await deviceRequest('/api/sms-tasks/'+encodeURIComponent(id)+'/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'},10000);
-   taskStatus(taskLabel(task));get('resume').hidden=true;watchTask(id);
-  }catch(error){taskStatus('未能继续：'+error.message,true);}
-  finally{get('resume').disabled=false;}
- });
- get('cancel').addEventListener('click',async()=>{
-  const id=get('cancel').dataset.taskId;if(!id)return;
-  get('cancel').disabled=true;
-  try{await deviceRequest('/api/sms-tasks/'+encodeURIComponent(id)+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'},8000);taskStatus('已请求取消；正在发送的单条短信会先完成，不会自动重发。');void refreshTask(id);}
-  catch(error){taskStatus('取消失败：'+error.message,true);}
-  finally{get('cancel').disabled=false;}
- });
  form.addEventListener('submit',async event=>{
   event.preventDefault();captureDevices();
   if(inflight)return;
@@ -1205,12 +1278,10 @@ refresh();refreshCpuUsage();if(!devicePreview){setInterval(refresh,2000);setInte
   inflight=true;get('submit').disabled=true;get('submit').setAttribute('aria-busy','true');status(startMode==='scheduled'?'正在保存定时发送任务…':'正在创建立即发送任务…');
   try{
    const task=await deviceRequest('/api/sms-tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)},20000);
-   lastTaskId=task.id;try{localStorage.setItem(lastTaskKey,lastTaskId);}catch{}
-   updateInlineTask(task);
-   status(startMode==='scheduled'?'定时发送任务已保存；到时会自动执行。':'立即发送任务已创建，后台开始执行。');
-   taskStatus(taskLabel(task));get('cancel').dataset.taskId=task.id;get('cancel').hidden=false;
-   get('resume').hidden=true;
-   watchTask(task.id);
+   const removed=(task.removed_duplicates||[]).length;
+   resetForm();dialog.close();
+   notice((startMode==='scheduled'?'定时发送任务已保存；到时会自动执行。':'立即发送任务已创建，后台开始执行。')+
+    (removed?` 已自动剔除 ${removed} 个今天已发送过的号码（未重复发送）。`:'')+'请在任务列表查看进度。');
   }catch(error){status('任务未创建：'+error.message,true);}
   finally{inflight=false;get('submit').disabled=false;get('submit').removeAttribute('aria-busy');}
  });

@@ -1,16 +1,16 @@
 # 8070 Windows 安装包
 
-当前源码版本为 **v0.1.31**。本版归档 v0.1.30 已完成的变更：关闭自动回主页、短信角标扫描和持续横幅监控，保留实现；自动和手动共用标题号码识别器，最多读取 5 个元素，每个元素最多等待 200 毫秒，成功立即返回；新设备初次投屏准备等待延至 360 秒，并改善苹果 USB 服务暂不可用时工作台启动行为。后续构建应核对根目录 VERSION，必须使用全新 stage 和 `--host-only`。画面 30 秒超时仍未解决。
+当前源码版本为 **v0.1.36**。本版归档 v0.1.36 已完成的变更：短信任务“继续发送剩余号码/重发失败号码”、发送中单条失败或结果不明自动跳过继续（不再整批停机）、返回短信列表失败只停单台设备、新建任务自动剔除当天已发送过的号码（防重复发送）、任务列表行内展开汇总（总览/按设备/号码明细/状态筛选）、一键导出未发送号码、任务取消与继续按钮移入任务列表、新建短信提交后清空并关闭对话框、会话切换后发送核验发现号码不符时自动移除错挂在旧会话的待核对气泡、不在短信列表页时给出可行动的提示文案。后续构建应核对根目录 VERSION，必须使用全新 stage 和 `--host-only`。画面 30 秒超时仍未解决。
 
-安装器名称为“皮卡丘手机工作台 / Pikachu Phone Workbench”，启动时选择简体中文或 English，固定近黑底加 `#FF70B6` 粉色。资源位于 `tools/installer_8070/assets/`。安装身份、注册表发现和控制协议保持不变，新安装默认 `Programs/PikachuPhoneWorkbench`。输出为 `releases/皮卡丘手机工作台-<版本>-安装.exe`。用户于 2026-11-25 指定：`releases/` 只保留当前交付安装包及配套 `.sha256`/`.json`，旧安装包经用户确认后删除，回退依靠 Git 历史重新构建。工作台主题桥协议见 [接入协议](../PIKACHU_8070_CONTROL_PROTOCOL.md)。当前源码及本次目标安装包版本为 **v0.1.28**；上一版正式包为 v0.1.22。
+安装器名称为“皮卡丘手机工作台 / Pikachu Phone Workbench”，启动时选择简体中文或 English，固定近黑底加 `#FF70B6` 粉色。资源位于 `tools/installer_8070/assets/`。安装身份、注册表发现和控制协议保持不变，新安装默认 `Programs/PikachuPhoneWorkbench`。输出为 `releases/皮卡丘手机工作台-<版本>-安装.exe`。用户于 2026-11-25 指定：`releases/` 只保留当前交付安装包及配套 `.sha256`/`.json`，旧安装包经用户确认后删除，回退依靠 Git 历史重新构建。工作台主题桥协议见 [接入协议](../PIKACHU_8070_CONTROL_PROTOCOL.md)。当前源码及本次目标安装包版本为 **v0.1.36**；上一版正式包为 v0.1.35。
 
-本次 v0.1.28 纳入触控诊断日志、短信通知横幅只读工作进程复用、SpringBoard 信息 App 未读角标读取，以及短信任务界面和调度修订。角标通过 AX 从 SpringBoard 末端向上最多读取 6 个元素；正式元素遍览关闭屏幕高亮。仍需用户进行真实设备验收，当前设备画面持续 30 秒超时仍未解决。目标：Windows 10/11 x64，无需目标电脑预装 Python、Node 或 Git；需使用已接入后台控制协议的皮卡丘客户端。8070 与平级 VNC 项目使用不同 AppId 和目录。
+本次 v0.1.36 纳入触控诊断日志、短信通知横幅只读工作进程复用、SpringBoard 信息 App 未读角标读取，以及短信任务界面和调度修订。角标通过 AX 从 SpringBoard 末端向上最多读取 6 个元素；正式元素遍览关闭屏幕高亮。仍需用户进行真实设备验收，当前设备画面持续 30 秒超时仍未解决。目标：Windows 10/11 x64，无需目标电脑预装 Python、Node 或 Git；需使用已接入后台控制协议的皮卡丘客户端。8070 与平级 VNC 项目使用不同 AppId 和目录。
 
 当前后台专用构建与验收：
 
 ## 打包前强制检查
 
-先确认交付范围与目标构建：本次 8070 后台专用包目标为 v0.1.28。皮卡丘宿主负责菜单、IPC 和启动/关闭；8070 提供后台、网页和 `host_control.py` 协议。宿主的源码或安装包不会因重打 8070 包而更新，反之亦然。皮卡丘宿主源码变更需要进入皮卡丘自己的构建；8070 控制器或网页变更需要进入 8070 包。联动网页主题桥只用于皮卡丘内嵌的 `http://127.0.0.1:8070/` 顶层页面。
+先确认交付范围与目标构建：本次 8070 后台专用包目标为 v0.1.36。皮卡丘宿主负责菜单、IPC 和启动/关闭；8070 提供后台、网页和 `host_control.py` 协议。宿主的源码或安装包不会因重打 8070 包而更新，反之亦然。皮卡丘宿主源码变更需要进入皮卡丘自己的构建；8070 控制器或网页变更需要进入 8070 包。联动网页主题桥只用于皮卡丘内嵌的 `http://127.0.0.1:8070/` 顶层页面。
 
 1. **确认版本和工作树范围。** 核对根目录 `VERSION`、目标文件名、当前分支、所有已修改/未跟踪文件及用户数据边界。构建器会用 `git ls-files iphone_batch` 取得文件名，再从当前工作树复制已跟踪文件；未跟踪源码需显式列入白名单。本版白名单包括 `message_icon_badge.py`、`unread_badge.py`、`notification_worker.py`、`touch_diagnostics.py` 和 `web/touch_diagnostics.js`。其他未跟踪源码不会自动打包。打包清单必须逐项确认新增源码已纳入，且测试、`.device-data`、账号、配对和密钥没有进入载荷。
 2. **使用全新 stage。** 默认构建创建带时间戳的新 stage。禁止对旧 `--repack-stage` 目录做正式交付：复用 stage 不重新复制应用源码，可能把旧 controller/dashboard 与新文档或新版本混在一起。只有明确的纯安装器资源迭代、确认载荷源码完全不变时才允许复用；重打前对照 stage 与当前源码文件哈希。不要手工覆盖已安装目录来代替正式构建。
@@ -31,8 +31,8 @@
 
 ```powershell
 .venv\Scripts\python.exe tools/build_8070_installer.py --host-only
-.venv\Scripts\python.exe tools/check_8070_installer.py "releases/皮卡丘手机工作台-0.1.28-安装.exe" --language chinesesimp
-.venv\Scripts\python.exe tools/check_8070_installer.py "releases/皮卡丘手机工作台-0.1.28-安装.exe" --language english
+.venv\Scripts\python.exe tools/check_8070_installer.py "releases/皮卡丘手机工作台-0.1.36-安装.exe" --language chinesesimp
+.venv\Scripts\python.exe tools/check_8070_installer.py "releases/皮卡丘手机工作台-0.1.36-安装.exe" --language english
 ```
 
 新模式无 Electron、独立启动器、桌面或开始菜单启停入口。安装器将实际路径、版本和控制协议写入当前用户 64 位注册表；卸载清理登记。升级时清理固定的旧客户端程序目录及快捷方式，不清理业务数据。皮卡丘通过三种固定 JSON/stdin 命令控制后台，安装模式下直接启动 dashboard.py 或无授权启停被拒绝。具体约定见 [接入协议](../PIKACHU_8070_CONTROL_PROTOCOL.md)。注册表验证使用隔离测试目录临时登记，结束后卸载；不覆盖已有同 AppId 的安装。

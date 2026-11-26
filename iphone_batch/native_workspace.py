@@ -185,7 +185,7 @@ async def capture_history(service, phone):
 
 def unread_records(records):
     if not any(r['caption'] in ('Messages, Header', 'Unread, Header') for r in records):
-        raise ValueError('未确认短信列表页面')
+        raise ValueError('手机当前不在短信列表页，请在手机上手动切回短信列表后重试')
     rows = []
     seen = set()
     for index, r in enumerate(records):

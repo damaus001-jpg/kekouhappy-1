@@ -336,7 +336,11 @@ class ForegroundReader:
             if cancelled():
                 raise ReadingCancelled()
             if result.get('changed') or result.get('phone_number') != number:
-                return {'phase': 'send_changed'}
+                # The phone screen now shows a different conversation. Report
+                # the actual number so the page can detach the pending bubble
+                # from the stale conversation instead of leaving it there.
+                return {'phase': 'send_changed', 'phone_number': result.get('phone_number'),
+                        'expected_number': number}
             window = result.get('messages') or []
             merged, aligned = append_verified_window(history, window)
             added = merged[len(history):] if aligned and history else []
